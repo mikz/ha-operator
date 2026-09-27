@@ -21,6 +21,7 @@ from scripts.shadow_report import (  # noqa: E402
     _conditions,
     _feedback,
     _local_file,
+    _number,
     _utc,
     validate_bindings,
 )
@@ -34,6 +35,8 @@ MAX_ENTITIES = 1024
 RETRY_CACHE = 4096
 INTERVAL_LIMIT = 200
 HEARTBEAT_GAP = 90.0
+MAX_COVERS = 128
+TARGET_SETTLE_SECONDS = 1.0
 
 
 class ArchiveError(ValueError):
@@ -84,6 +87,175 @@ def _expected_entities(config):
     return entities
 
 
+def _position(data, attribute="current_position", *, raw=False):
+    if not data or data["state"] in (None, "unknown", "unavailable"):
+        return None
+    if raw and _feedback(data) is None or data["attributes"].get("restored"):
+        return None
+    value = _number(data["attributes"].get(attribute) if attribute else data["state"])
+    return value if value is not None and 0 <= value <= 100 else None
+
+
+class CoverComparison:
+    """Bounded timed feedback comparisons; never infer a cause or prior target age."""
+
+    def __init__(self, resource, policies):
+        self.signature = self.configuration_signature(resource, policies)
+        self.raw = resource.get("entity_id")
+        self.policy = policies[0][1] if len(policies) == 1 else {}
+        self.policy_id = policies[0][0] if len(policies) == 1 else None
+        self.reason = (
+            "multiple_policies" if len(policies) > 1 else "missing_policy" if not policies else None
+        )
+        if self.reason is None and (
+            self.policy.get("kind", "state") != "state"
+            or not self.policy.get("target_entity")
+            or self.policy.get("target_field", "position") != "position"
+            or not self.raw
+        ):
+            self.reason = "unsupported_policy_or_feedback"
+        self.timeout = _number(resource.get("movement_timeout", 120))
+        self.tolerance = _number(resource.get("tolerance", 2))
+        if (
+            self.timeout is None
+            or self.timeout <= 0
+            or self.tolerance is None
+            or self.tolerance < 0
+        ):
+            self.reason = "invalid_comparison_settings"
+        self.seconds, self.counts = Counter(), Counter()
+        self.intervals = deque(maxlen=INTERVAL_LIMIT)
+        self.total = self.known = self.raw_known = self.effective_known = 0.0
+        self.target_changes = self.generation = self.interval_count = 0
+        self.reset()
+
+    @staticmethod
+    def configuration_signature(resource, policies):
+        return json.dumps([resource, sorted(policies)], sort_keys=True, separators=(",", ":"))
+
+    def reset(self):
+        self.requested = self.since = self.effective = self.last_command = None
+        self.generation += 1
+
+    def input(self, data, at):
+        if self.reason or data["entity_id"] != self.policy["target_entity"]:
+            return
+        value = _position(data, self.policy.get("target_attribute"))
+        if value != self.requested or self.since is None:
+            self.target_changes += int(self.requested is not None and value is not None)
+            self.requested, self.since = value, at if value is not None else None
+            self.generation += 1
+
+    def decision(self, resource_id, data, at):
+        local_id = data.get("engine_aliases", {}).get(resource_id, resource_id)
+        decision = data.get("engine_result", {}).get("decisions", {}).get(local_id)
+        self.effective = (
+            {key: decision.get(key) for key in ("target", "status", "source")}
+            | {"frame_at_utc": _utc(at)}
+            if decision is not None
+            else None
+        )
+        self.last_command = data.get("resources", {}).get(resource_id, {}).get("last_command")
+
+    def account(self, start, end, states, valid, epoch):
+        if end <= start:
+            return
+        raw = states.get(self.raw)
+        observed = _position(raw, raw=True)
+        known = valid and observed is not None and self.requested is not None
+        duration = end - start
+        self.total += duration
+        self.raw_known += duration if valid and observed is not None else 0
+        self.known += duration if known and not self.reason else 0
+        self.effective_known += duration if valid and self.effective is not None else 0
+        points = {start, end}
+        if known and not self.reason:
+            points.update(
+                boundary
+                for boundary in (self.since + TARGET_SETTLE_SECONDS, self.since + self.timeout)
+                if start < boundary < end
+            )
+        points = sorted(points)
+        for left, right in zip(points, points[1:], strict=False):
+            status = "not_compared" if self.reason else "unknown"
+            if known and not self.reason:
+                age = left - self.since
+                moving = raw["state"] in {"opening", "closing"}
+                status = (
+                    "target_settling"
+                    if age < TARGET_SETTLE_SECONDS
+                    else "matched"
+                    if abs(observed - self.requested) <= self.tolerance and not moving
+                    else "pending_movement"
+                    if age < self.timeout
+                    else "sustained_divergence"
+                )
+            self.seconds[status] += right - left
+            recent = self.intervals[-1] if self.intervals else None
+            if recent and (
+                recent["end"],
+                recent["status"],
+                recent["epoch"],
+                recent["generation"],
+            ) == (left, status, epoch, self.generation):
+                recent["end"] = right
+            else:
+                self.intervals.append(
+                    {
+                        "start": left,
+                        "end": right,
+                        "status": status,
+                        "epoch": epoch,
+                        "generation": self.generation,
+                        "requested_position": self.requested,
+                        "observed_position_at_start": observed,
+                    }
+                )
+                self.counts[status] += 1
+                self.interval_count += 1
+
+    def report(self, states):
+        return {
+            "comparison_supported": self.reason is None,
+            "not_compared_reason": self.reason,
+            "policy": self.policy_id,
+            "requested_entity": self.policy.get("target_entity"),
+            "observed_entity": self.raw,
+            "movement_timeout_seconds": self.timeout,
+            "tolerance": self.tolerance,
+            "interval_seconds": round(self.total, 6),
+            "known_seconds": round(self.known, 6),
+            "unknown_seconds": round(self.seconds["unknown"], 6),
+            "known_ratio": self.known / self.total if self.total and not self.reason else None,
+            "raw_known_seconds": round(self.raw_known, 6),
+            "effective_frame_known_seconds": round(self.effective_known, 6),
+            "seconds_by_status": {key: round(value, 6) for key, value in self.seconds.items()},
+            "target_changes": self.target_changes,
+            "latest": {
+                "requested_position": self.requested,
+                "target_observed_since_utc": _utc(self.since) if self.since is not None else None,
+                "observed_position": _position(states.get(self.raw), raw=True),
+                "effective": self.effective,
+                "last_dispatched_command": self.last_command,
+            },
+            "episode_counts": dict(self.counts),
+            "omitted_episodes": max(0, self.interval_count - INTERVAL_LIMIT),
+            "episodes": [
+                {
+                    key: value
+                    for key, value in item.items()
+                    if key not in {"start", "end", "epoch", "generation"}
+                }
+                | {
+                    "start_utc": _utc(item["start"]),
+                    "end_utc": _utc(item["end"]),
+                    "seconds": round(item["end"] - item["start"], 6),
+                }
+                for item in self.intervals
+            ],
+        }
+
+
 class Archive:
     """Bounded streaming state; old retry hashes must never be silently trusted."""
 
@@ -92,6 +264,8 @@ class Archive:
         self.cache = OrderedDict()
         self.states, self.inputs, self.modes, self.sessions = {}, {}, {}, {}
         self.closed = set()
+        self.covers = {}
+        self.snapshot_valid = False
         self.completed_snapshots, self.expected = set(), set()
         self.initial, self.snapshot, self.lock = set(), False, None
         self.events, self.health, self.page_reasons, self.mode_counts = (
@@ -196,6 +370,11 @@ class Archive:
         self.findings["clock_regressions"] += int(backwards)
         self.findings["heartbeat_gaps"] += int(silent)
         self.findings["recorded_gaps"] += int(kind == "gap")
+        if previous:
+            for comparison in self.covers.values():
+                comparison.account(
+                    previous["at"], at, self.states, not broken and self.snapshot_valid, self.epoch
+                )
         if previous and not broken:
             self.observed_seconds += elapsed
             if elapsed:
@@ -204,6 +383,8 @@ class Archive:
         else:
             self.unknown_seconds += elapsed
         if broken:
+            for comparison in self.covers.values():
+                comparison.reset()
             self.states.clear()
             self.modes.clear()
             self.lock = None
@@ -214,6 +395,7 @@ class Archive:
             if kind != "session_start":
                 self.findings["session_start_missing"] += 1
             self.initial, self.expected, self.snapshot = set(), set(), False
+            self.snapshot_valid = False
         if kind == "session_start":
             require(session not in self.sessions, "Duplicate session start")
             require(len(self.sessions) < 4096, "Capacity exceeded: sessions")
@@ -221,6 +403,28 @@ class Archive:
                 key: data[key] for key in ("ha_version", "timezone", "shadow_lock")
             }
             self.expected = _expected_entities(data["config"])
+            configured_covers = {
+                key
+                for key, value in data["config"]["resources"].items()
+                if value["kind"] == "cover"
+            }
+            for resource_id in self.covers.keys() - configured_covers:
+                self.covers[resource_id].reason = "resource_removed"
+            for resource_id, resource in data["config"]["resources"].items():
+                if resource["kind"] != "cover":
+                    continue
+                policies = [
+                    (key, policy)
+                    for key, policy in data["config"]["policies"].items()
+                    if policy["resource_id"] == resource_id
+                ]
+                if resource_id not in self.covers:
+                    require(len(self.covers) < MAX_COVERS, "Capacity exceeded: cover comparisons")
+                    self.covers[resource_id] = CoverComparison(resource, policies)
+                elif self.covers[resource_id].signature != CoverComparison.configuration_signature(
+                    resource, policies
+                ):
+                    self.covers[resource_id].reason = "configuration_changed"
             self.findings["unclean_previous_sessions"] += int(
                 data["previous_session_closed"] is False
             )
@@ -236,6 +440,9 @@ class Archive:
             require(not self.snapshot, "Duplicate initial snapshot")
             self.findings["incomplete_initial_snapshot"] += int(
                 len(self.initial) != data["entities"] or self.initial != self.expected
+            )
+            self.snapshot_valid = (
+                len(self.initial) == data["entities"] and self.initial == self.expected
             )
             self.snapshot = True
             self.completed_snapshots.add(session)
@@ -260,12 +467,16 @@ class Archive:
                 )
                 self.initial.add(entity)
             self.states[entity] = data
+            for comparison in self.covers.values():
+                comparison.input(data, at)
             self.conditions.update(_conditions(self.states, self.cellar))
         elif kind == "admission" and data["action"] == "set_mode":
             mode = "observe" if self.lock else data["mode"]
             self.modes[data["resource_id"]] = mode
             self.mode_counts[mode] += 1
         elif kind == "decision":
+            for resource_id, comparison in self.covers.items():
+                comparison.decision(resource_id, data, at)
             self.lock = data.get("shadow_locked", self.lock)
             if "engine" in data:
                 self.modes = {
@@ -369,6 +580,13 @@ class Archive:
             },
             "sessions": self.sessions,
             "inputs": {key: dict(value) for key, value in self.inputs.items()},
+            "cover_comparisons": {
+                "target_settle_seconds": TARGET_SETTLE_SECONDS,
+                "resources": {key: value.report(self.states) for key, value in self.covers.items()},
+                "interpretation": "Sustained divergence is timed telemetry requiring review, "
+                "not an operator or device failure. Legacy synchronization timing may explain it. "
+                "Effective targets are recorded decisions; no actuator causation is inferred.",
+            },
             "cellar": {
                 "configured": bool(self.cellar),
                 "bindings": self.cellar,

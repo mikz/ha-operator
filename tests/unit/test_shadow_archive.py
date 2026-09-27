@@ -2,16 +2,21 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 from copy import deepcopy
+from types import SimpleNamespace
 
 import pytest
+from homeassistant.core import State
 
+from custom_components.ha_operator.shadow import ShadowTrace
 from scripts import shadow_archive as archive
 from tests.lab.shadow_trace import TraceValidationError, validate_trace
-from tests.unit.test_shadow_report import BINDINGS, CELLAR
-from tests.unit.test_shadow_trace import make_trace
+from tests.unit.test_shadow import Host
+from tests.unit.test_shadow_report import BINDINGS, CELLAR, VIRTUAL
+from tests.unit.test_shadow_trace import RESOURCE, make_trace
 
 
 def seeded():
@@ -318,3 +323,292 @@ def test_cli_reads_private_index_writes_sanitized_report_and_never_overwrites(tm
         archive.main([str(index), "--output", str(output)])
     assert failure.value.code == 2 and output.read_bytes() == before
     assert str(tmp_path) not in capsys.readouterr().err
+
+
+def cover_seed(*, timeout=10, target=100):
+    page = make_trace()
+    config = page["records"][0]["data"]["config"]
+    config["resources"][RESOURCE]["movement_timeout"] = timeout
+    policy = "p_" + "3" * 20
+    config["policies"][policy] = {
+        "name": policy,
+        "resource_id": RESOURCE,
+        "kind": "state",
+        "target_entity": VIRTUAL,
+        "target_attribute": "current_position",
+    }
+    virtual = deepcopy(page["records"][1])
+    virtual["data"].update(
+        entity_id=VIRTUAL, state="open", attributes={"current_position": target, "optimistic": True}
+    )
+    rows = page["records"][:2] + [virtual] + page["records"][2:]
+    rows[-2]["data"]["entities"] = 2
+    return page, rows
+
+
+def cover_input(rows, at, position, *, virtual=False, state="open", flags=None):
+    row = deepcopy(rows[2 if virtual else 1])
+    row.update(at=at)
+    row["data"].update(
+        event_type="state_reported",
+        state=state,
+        attributes={"current_position": position, **(flags or {})},
+        last_changed=at,
+        last_updated=at,
+        last_reported=at,
+    )
+    return row
+
+
+def cover_report(tmp_path, page, rows, *, split=None):
+    for row in rows:
+        if row["kind"] == "session_start":
+            config_hash = hashlib.sha256(
+                json.dumps(row["data"]["config"], sort_keys=True, separators=(",", ":")).encode()
+            ).hexdigest()
+            row["data"]["config_hash"] = page["config_hash"] = config_hash
+    for sequence, row in enumerate(rows, 1):
+        row["sequence"] = sequence
+    chunks = [rows] if split is None else [rows[:split], rows[split:]]
+    result = archive.analyze_archive(write_index(tmp_path, page, chunks))
+    return result["cover_comparisons"]["resources"][RESOURCE]
+
+
+def test_cover_normal_travel_is_pending_then_matched(tmp_path):
+    page, rows = cover_seed()
+    rows += [
+        cover_input(rows, 104, 40, state="opening"),
+        cover_input(rows, 108, 100),
+        heartbeat(page, 0, 115),
+    ]
+    result = cover_report(tmp_path, page, rows)
+    assert result["seconds_by_status"] == {
+        "target_settling": 1,
+        "pending_movement": 7,
+        "matched": 7,
+    }
+    assert result["known_seconds"] == 15 and result["known_ratio"] == 1
+    assert result["latest"]["requested_position"] == result["latest"]["observed_position"] == 100
+    assert (
+        result["latest"]["effective"]["target"] is None
+    )  # A recorded idle decision, not requested100.
+    assert result["latest"]["last_dispatched_command"] is None
+
+
+def test_cover_repeated_target_telemetry_does_not_postpone_timeout_across_pages(tmp_path):
+    page, rows = cover_seed()
+    rows.insert(-1, cover_input(rows, 100.5, 100, virtual=True))
+    rows += [
+        cover_input(rows, 107, 100, virtual=True),
+        heartbeat(page, 0, 112),
+    ]
+    result = cover_report(tmp_path, page, rows, split=len(rows) - 1)
+    assert result["seconds_by_status"] == {
+        "target_settling": 1,
+        "pending_movement": 9,
+        "sustained_divergence": 2,
+    }
+    assert result["target_changes"] == 0
+    assert result["episode_counts"]["pending_movement"] == 1
+
+
+def test_cover_supersession_restarts_settling_and_travel_deadline(tmp_path):
+    page, rows = cover_seed()
+    rows += [
+        cover_input(rows, 108, 50, virtual=True),
+        heartbeat(page, 0, 115),
+        heartbeat(page, 0, 120),
+    ]
+    result = cover_report(tmp_path, page, rows)
+    assert result["target_changes"] == 1
+    assert result["seconds_by_status"]["target_settling"] == 2
+    assert result["seconds_by_status"]["sustained_divergence"] == 2
+    assert result["latest"]["requested_position"] == 50
+
+
+@pytest.mark.parametrize(
+    "state,flags",
+    [("unavailable", {}), ("open", {"optimistic": True}), ("open", {"restored": True})],
+)
+def test_cover_unreliable_raw_feedback_is_unknown_not_divergence(tmp_path, state, flags):
+    page, rows = cover_seed()
+    rows += [cover_input(rows, 105, 50, state=state, flags=flags), heartbeat(page, 0, 115)]
+    result = cover_report(tmp_path, page, rows)
+    assert result["unknown_seconds"] == 10
+    assert result["known_seconds"] == 5 and result["known_ratio"] == 1 / 3
+    assert result["latest"]["observed_position"] is None
+    assert "sustained_divergence" not in result["episode_counts"]
+
+
+def test_cover_sequence_and_heartbeat_gaps_do_not_carry_comparisons(tmp_path):
+    page, rows = cover_seed()
+    rows += [heartbeat(page, 0, 205)]
+    result = cover_report(tmp_path, page, rows)
+    assert result["unknown_seconds"] == 103
+    assert result["known_seconds"] == 2
+    assert result["latest"]["requested_position"] is None
+    assert result["latest"]["effective"] is None
+
+
+def test_cover_missing_initial_snapshot_keeps_all_time_unknown(tmp_path):
+    page, rows = cover_seed()
+    rows = [row for row in rows if row["kind"] != "snapshot_end"] + [heartbeat(page, 0, 112)]
+    result = cover_report(tmp_path, page, rows)
+    assert result["unknown_seconds"] == 12 and result["known_ratio"] == 0
+
+
+@pytest.mark.parametrize("policy_kind", ["fixed", "multiple"])
+def test_cover_unsupported_policies_are_explicitly_not_compared(tmp_path, policy_kind):
+    page, rows = cover_seed()
+    policies = rows[0]["data"]["config"]["policies"]
+    policy = next(iter(policies.values()))
+    if policy_kind == "fixed":
+        policy.pop("target_entity")
+        policy["target"] = {"position": 100}
+    else:
+        other = "p_" + "4" * 20
+        policies[other] = {**policy, "name": other}
+    rows += [heartbeat(page, 0, 112)]
+    result = cover_report(tmp_path, page, rows)
+    assert not result["comparison_supported"] and result["not_compared_reason"]
+    assert result["seconds_by_status"]["not_compared"] == 12
+    assert result["known_ratio"] is None
+
+
+def test_cover_effective_target_uses_frame_alias_not_virtual_request(tmp_path):
+    page, rows = cover_seed()
+    data = rows[-1]["data"]
+    local_id = "r_" + "8" * 20
+    data["engine_aliases"][RESOURCE] = local_id
+    decision = data["engine_result"]["decisions"].pop(RESOURCE)
+    decision.update(resource_id=local_id, target={"position": 25}, status="observe")
+    data["engine_result"]["decisions"][local_id] = decision
+    rows += [heartbeat(page, 0, 112)]
+    result = cover_report(tmp_path, page, rows)
+    assert result["latest"]["effective"]["target"]["position"] == 25
+    assert result["latest"]["requested_position"] == 100
+    assert result["latest"]["observed_position"] == 0
+    assert result["effective_frame_known_seconds"] == 10
+
+
+def test_cover_episode_output_is_bounded_without_losing_totals(tmp_path, monkeypatch):
+    monkeypatch.setattr(archive, "INTERVAL_LIMIT", 3)
+    page, rows = cover_seed()
+    for second in range(103, 114):
+        rows.append(cover_input(rows, second, 0 if second % 2 else 100, virtual=True))
+    rows += [heartbeat(page, 0, 120)]
+    result = cover_report(tmp_path, page, rows)
+    assert len(result["episodes"]) == 3
+    assert result["omitted_episodes"] == sum(result["episode_counts"].values()) - 3
+    assert sum(result["seconds_by_status"].values()) == 20
+
+
+def test_cover_cross_hour_pages_preserve_original_timeout(tmp_path):
+    page, rows = cover_seed()
+    first = len(rows)
+    rows += [heartbeat(page, 0, 100 + minute * 60) for minute in range(1, 62)]
+    result = cover_report(tmp_path, page, rows, split=first + 60)
+    assert result["seconds_by_status"]["sustained_divergence"] == 3650
+    assert result["episode_counts"]["sustained_divergence"] == 1
+    assert result["known_ratio"] == 1
+
+
+def test_cover_moving_forever_is_not_an_unbounded_transient(tmp_path):
+    page, rows = cover_seed()
+    rows += [cover_input(rows, 103, 100, state="opening"), heartbeat(page, 0, 120)]
+    result = cover_report(tmp_path, page, rows)
+    assert result["seconds_by_status"]["sustained_divergence"] == 10
+    assert "matched" not in result["seconds_by_status"]
+
+
+@pytest.mark.parametrize("change", ["same", "target", "timeout", "removed"])
+def test_cover_reload_configuration_changes_fail_comparison_closed(tmp_path, change):
+    page, rows = cover_seed()
+    second = deepcopy(rows)
+    session = "00000000-0000-4000-8000-000000000002"
+    for row in second:
+        row["session_id"] = session
+        row["at"] += 6
+    second[0]["data"]["previous_session_closed"] = True
+    config = second[0]["data"]["config"]
+    if change == "target":
+        replacement = "cover.shadow_" + "9" * 20
+        next(iter(config["policies"].values()))["target_entity"] = replacement
+        second[2]["data"]["entity_id"] = replacement
+    elif change == "timeout":
+        config["resources"][RESOURCE]["movement_timeout"] = 50
+    elif change == "removed":
+        config["resources"], config["policies"] = {}, {}
+        second = [row for row in second if row["kind"] not in {"input", "decision"}]
+        second[-1]["data"]["entities"] = 0
+    ending = heartbeat(page, 0, 105)
+    ending["kind"] = "session_end"
+    final = heartbeat(page, 0, 111)
+    final["session_id"] = final["data"]["session_id"] = session
+    result = cover_report(tmp_path, page, rows + [ending] + second + [final])
+    assert result["comparison_supported"] == (change == "same")
+    assert result["not_compared_reason"] == (
+        None
+        if change == "same"
+        else "resource_removed"
+        if change == "removed"
+        else "configuration_changed"
+    )
+    if change == "same":
+        assert result["unknown_seconds"] == 1
+        assert result["seconds_by_status"]["target_settling"] == 2
+    else:
+        assert result["seconds_by_status"]["not_compared"] == 5
+
+
+def test_cover_resource_capacity_is_explicit(tmp_path, monkeypatch):
+    page, rows = cover_seed()
+    monkeypatch.setattr(archive, "MAX_COVERS", 0)
+    with pytest.raises(archive.ArchiveError, match="Capacity exceeded: cover"):
+        cover_report(tmp_path, page, rows)
+
+
+async def test_cover_effective_target_from_actual_recorder_validated_export(tmp_path):
+    _, rows = cover_seed()
+    config = rows[0]["data"]["config"]
+    config.pop("trace_entities")
+    entry = SimpleNamespace(
+        entry_id="private-cover",
+        options={"trace_enabled": True},
+        async_create_background_task=lambda _hass, coroutine, name: asyncio.create_task(
+            coroutine, name=name
+        ),
+    )
+    recorder = ShadowTrace(Host(tmp_path), entry, config, [])
+    try:
+        await recorder.async_start(
+            {"manuals": {}, "modes": {}, "policy_enabled": {}, "occurrences": {}}, True
+        )
+        for row in rows:
+            if row["kind"] == "input":
+                data = row["data"]
+                recorder.input(
+                    data["entity_id"],
+                    State(data["entity_id"], data["state"], data["attributes"]),
+                    "initial",
+                )
+        recorder.record("snapshot_end", {"entities": 2})
+        decision = deepcopy(rows[-1]["data"])
+        decision["engine_result"]["decisions"][RESOURCE].update(
+            target={"position": 25}, status="observe"
+        )
+        recorder.event("decision", decision)
+        await recorder.async_close()
+        exported = await recorder.async_export()
+        normalized = validate_trace(exported)
+        assert normalized.report["replay_complete"]
+        canonical = recorder.sanitizer.ids[RESOURCE]
+        frame = next(row for row in normalized.records if row["kind"] == "decision")
+        assert canonical != frame["data"]["engine_aliases"][canonical]
+        path = write_index(tmp_path, exported, [list(normalized.records)])
+        result = archive.analyze_archive(path)["cover_comparisons"]["resources"][canonical]
+        assert result["latest"]["requested_position"] == 100
+        assert result["latest"]["observed_position"] == 0
+        assert result["latest"]["effective"]["target"]["position"] == 25
+    finally:
+        await recorder.async_close()

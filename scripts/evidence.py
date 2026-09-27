@@ -493,6 +493,35 @@ def safe_copy(source: Path, destination: Path) -> None:
     shutil.copyfile(source, destination)
 
 
+def bind_sanitized_files(
+    original: Path, staged: Path, files: dict[str, Path], *, log: bool = False
+) -> None:
+    """Bind delivered bytes while preserving the producer's execution claims."""
+    original_bytes = original.read_bytes()
+    receipt = json.loads(original_bytes)
+    require(read_json(staged) == receipt, "Sanitization modified an execution receipt")
+    before = {next(iter(files)): receipt["log_sha256"]} if log else receipt["files"]
+    after = {name: digest(path.read_bytes()) for name, path in files.items()}
+    require(set(before) == set(after), "Sanitized receipt file set changed")
+    changed = sorted(name for name in before if before[name] != after[name])
+    if not changed:
+        return
+    require("sanitization" not in receipt, "Cannot overwrite existing sanitization provenance")
+    receipt["sanitization"] = {
+        "schema": 1,
+        "method": "tests.lab.redaction.sanitize_artifacts",
+        "producer_receipt_sha256": digest(original_bytes),
+        "original_files": before,
+        "changed_files": changed,
+        "execution_results_changed": False,
+    }
+    if log:
+        receipt["log_sha256"] = next(iter(after.values()))
+    else:
+        receipt["files"] = after
+    write_json(staged, receipt)
+
+
 def build_evidence(
     root: Path, labs: list[Path], tests: list[Path], mutations: Path, validators: Path, output: Path
 ) -> dict:
@@ -581,10 +610,37 @@ def build_evidence(
         for name in manifest["locks"]:
             safe_copy(root / name, evidence / "locks" / name)
         sanitize_artifacts(evidence, [])
+        for version, directory in zip(versions, tests, strict=True):
+            delivered = evidence / "tests" / version
+            bind_sanitized_files(
+                directory / "result.json",
+                delivered / "result.json",
+                {name: delivered / name for name in TEST_FILES - {"result.json"}},
+            )
+            validate_tests(delivered, manifest, root)
+            require(
+                junit_counts(delivered / "junit.xml") == junit_counts(directory / "junit.xml"),
+                "Sanitization changed executed test results",
+            )
+        for validator in ("hacs", "hassfest"):
+            name = f"{validator}.log"
+            bind_sanitized_files(
+                validators / f"{validator}.json",
+                evidence / "validators" / f"{validator}.json",
+                {name: evidence / "validators" / name},
+                log=True,
+            )
+            delivered = read_json(evidence / "validators" / f"{validator}.json")
+            require(
+                delivered["log_sha256"] == digest((evidence / "validators" / name).read_bytes()),
+                f"Sanitized {validator} log does not match its receipt",
+            )
         for directory, case in zip(labs, selected, strict=True):
-            if case[1] == "all":
-                run_name = read_json(directory / "summary.json")["run_id"]
-                validate_shadow_replay(evidence / "lab" / run_name, manifest)
+            run_name = read_json(directory / "summary.json")["run_id"]
+            require(
+                validate_lab(evidence / "lab" / run_name, manifest) == case,
+                "Sanitization changed a lab identity",
+            )
         safe_copy(root / "dist/ha_operator.zip", staging / "ha_operator.zip")
         safe_copy(root / "dist/ha_operator.manifest.json", staging / "ha_operator.manifest.json")
         files = {
@@ -598,6 +654,18 @@ def build_evidence(
             "artifact_sha256": manifest["sha256"],
             "component_sha256": manifest["component_sha256"],
             "source_commit": manifest["source_commit"],
+            "evidence_builder": {
+                "source_sha256": {
+                    name: digest((ROOT / name).read_bytes())
+                    for name in (
+                        "scripts/evidence.py",
+                        "scripts/coverage_gate.py",
+                        "scripts/mutation_gate.py",
+                        "scripts/release.py",
+                        "tests/lab/redaction.py",
+                    )
+                },
+            },
             "checks": {
                 "source_tests": sorted(versions),
                 "coverage": "passed",

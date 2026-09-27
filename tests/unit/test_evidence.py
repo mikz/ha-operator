@@ -17,6 +17,7 @@ from scripts.evidence import (
     TEST_FILES,
     build_evidence,
     validate_lab,
+    validate_tests,
 )
 from scripts.release import archive_bytes, build, digest
 
@@ -307,6 +308,92 @@ def test_rejects_shortened_soak(complete_evidence):
 def test_rejects_modified_test_evidence(complete_evidence):
     (complete_evidence["tests"][0] / "pytest.log").write_text("modified")
     with pytest.raises(ValueError, match="Source-test evidence changed"):
+        build_evidence(**complete_evidence)
+
+
+def test_sanitized_junit_has_explicit_provenance_and_valid_delivered_hashes(complete_evidence):
+    directory = complete_evidence["tests"][0]
+    junit = directory / "junit.xml"
+    junit.write_text(
+        '<testsuites><testsuite tests="10" failures="0" errors="0" skipped="0">'
+        '<testcase name="test_redaction[123-45-678]"/></testsuite></testsuites>'
+    )
+    original = json.loads((directory / "result.json").read_text())
+    original["files"]["junit.xml"] = digest(junit.read_bytes())
+    original["counts"] = {"tests": 10, "failures": 0, "errors": 0, "skipped": 0}
+    write_json(directory / "result.json", original)
+    original_receipt = (directory / "result.json").read_bytes()
+    original_junit = junit.read_bytes()
+    index = build_evidence(**complete_evidence)
+    with zipfile.ZipFile(complete_evidence["output"]) as bundle:
+        prefix = f'evidence/tests/{original["ha_version"]}/'
+        delivered = json.loads(bundle.read(prefix + "result.json"))
+        assert delivered["files"]["junit.xml"] == digest(bundle.read(prefix + "junit.xml"))
+        assert b"[REDACTED]" in bundle.read(prefix + "junit.xml")
+        provenance = delivered.pop("sanitization")
+        assert provenance == {
+            "schema": 1,
+            "method": "tests.lab.redaction.sanitize_artifacts",
+            "producer_receipt_sha256": digest(original_receipt),
+            "original_files": original["files"],
+            "changed_files": ["junit.xml"],
+            "execution_results_changed": False,
+        }
+        delivered["files"] = provenance["original_files"]
+        assert delivered == original
+        extracted = complete_evidence["root"] / "delivered"
+        bundle.extractall(extracted)
+        manifest = json.loads((extracted / "ha_operator.manifest.json").read_text())
+        assert validate_tests(extracted / prefix, manifest, complete_evidence["root"]) == "2026.9.3"
+    assert (directory / "result.json").read_bytes() == original_receipt
+    assert junit.read_bytes() == original_junit
+    assert len(index["evidence_builder"]["source_sha256"]) == 5
+
+
+@pytest.mark.parametrize("validator", ["hacs", "hassfest"])
+def test_sanitized_validator_log_preserves_producer_claims(complete_evidence, validator):
+    directory = complete_evidence["validators"]
+    log = directory / f"{validator}.log"
+    log.write_text("Bearer validator-fixture-secret\n")
+    receipt = directory / f"{validator}.json"
+    original = json.loads(receipt.read_text())
+    original["log_sha256"] = digest(log.read_bytes())
+    write_json(receipt, original)
+    original_receipt = receipt.read_bytes()
+    build_evidence(**complete_evidence)
+    with zipfile.ZipFile(complete_evidence["output"]) as bundle:
+        prefix = "evidence/validators/"
+        delivered = json.loads(bundle.read(prefix + receipt.name))
+        assert delivered["log_sha256"] == digest(bundle.read(prefix + log.name))
+        assert b"validator-fixture-secret" not in bundle.read(prefix + log.name)
+        provenance = delivered.pop("sanitization")
+        assert provenance["producer_receipt_sha256"] == digest(original_receipt)
+        assert provenance["original_files"] == {log.name: original["log_sha256"]}
+        assert provenance["changed_files"] == [log.name]
+        assert provenance["execution_results_changed"] is False
+        delivered["log_sha256"] = provenance["original_files"][log.name]
+        assert delivered == original
+    assert receipt.read_bytes() == original_receipt
+    assert log.read_text() == "Bearer validator-fixture-secret\n"
+
+
+@pytest.mark.parametrize("target", ["receipt", "counts"])
+def test_sanitization_cannot_change_executed_results(complete_evidence, monkeypatch, target):
+    from scripts import evidence
+
+    original = evidence.sanitize_artifacts
+
+    def faulty_sanitizer(directory, secrets):
+        original(directory, secrets)
+        tests = directory / "tests/2026.9.3"
+        if target == "receipt":
+            change(tests / "result.json", status="failed")
+        else:
+            path = tests / "junit.xml"
+            path.write_text(path.read_text().replace('tests="10"', 'tests="9"'))
+
+    monkeypatch.setattr(evidence, "sanitize_artifacts", faulty_sanitizer)
+    with pytest.raises(ValueError, match="Sanitization (modified|changed executed)"):
         build_evidence(**complete_evidence)
 
 
