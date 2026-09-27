@@ -1,12 +1,28 @@
 """Reload readiness cannot mistake the previous runtime or permanent API errors for success."""
 
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
-from tests.lab.readiness import wait_trace_ready
+from tests.lab.readiness import wait_native_tokens, wait_trace_ready
 from tests.lab.runner import HA
 from tests.lab.scenarios_shadow import observe
+
+
+async def test_native_tokens_wait_for_storage_condition_and_dispose_handle():
+    tokens = {"access_token": "synthetic-test-value"}
+    handle = SimpleNamespace(json_value=AsyncMock(return_value=tokens), dispose=AsyncMock())
+    page = SimpleNamespace(wait_for_function=AsyncMock(return_value=handle))
+    assert await wait_native_tokens(page) == tokens
+    assert page.wait_for_function.call_args.kwargs == {"timeout": 30_000}
+    handle.dispose.assert_awaited_once()
+
+
+async def test_native_tokens_missing_storage_propagates_readiness_timeout():
+    page = SimpleNamespace(wait_for_function=AsyncMock(side_effect=TimeoutError("not ready")))
+    with pytest.raises(TimeoutError, match="not ready"):
+        await wait_native_tokens(page)
 
 
 class PendingHA:

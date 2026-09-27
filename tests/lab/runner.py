@@ -15,6 +15,8 @@ from pathlib import Path
 
 import aiohttp
 
+from .readiness import wait_native_tokens
+
 ARTIFACTS = Path("/artifacts")
 CONTROL = Path("/control")
 STATE = Path("/state")
@@ -304,8 +306,7 @@ class Lab:
             )
             await self.page.get_by_role("button", name="Finish", exact=True).click()
             await self.page.wait_for_url(re.compile(r"^(?!.*onboarding).*$"))
-            tokens = await self.page.evaluate("JSON.parse(localStorage.getItem('hassTokens'))")
-            assert tokens and tokens.get("access_token"), "Native onboarding did not save tokens"
+            tokens = await wait_native_tokens(self.page)
             self.ha.token = tokens["access_token"]
             self.record_secret(tokens["access_token"], tokens.get("refresh_token", ""))
             config = await self.ready()

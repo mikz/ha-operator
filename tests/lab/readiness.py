@@ -1,9 +1,29 @@
-"""Bounded readiness after an awaited native config-entry reload."""
+"""Bounded readiness at native frontend and config-entry boundaries."""
 
 from __future__ import annotations
 
 import asyncio
 import time
+
+
+async def wait_native_tokens(page):
+    """Navigation can finish before HA's asynchronous auth bootstrap saves tokens."""
+    handle = await page.wait_for_function(
+        """() => {
+            try {
+                const tokens = JSON.parse(localStorage.getItem('hassTokens'));
+                return tokens && typeof tokens.access_token === 'string'
+                    && tokens.access_token.length > 0 ? tokens : false;
+            } catch {
+                return false;
+            }
+        }""",
+        timeout=30_000,
+    )
+    try:
+        return await handle.json_value()
+    finally:
+        await handle.dispose()
 
 
 async def wait_trace_ready(
