@@ -142,6 +142,193 @@ def test_fan_direction_while_off_and_discrete_speed(sim):
     assert observed(simulator, "exhaust")["direction"] == "reverse"
 
 
+@pytest.mark.parametrize("device_id", ["cellar_fan", "cellar_low_relay"])
+def test_configured_refusal_accepts_receipt_without_effect_or_replay(sim, device_id):
+    simulator, clock = sim
+    simulator.control(device_id, {"refuse_actions": ["turn_on"]})
+    before = simulator.sequence
+    receipt = simulator.command(device_id, {"action": "turn_on"})
+    assert receipt["accepted"] is True
+    assert simulator.devices[device_id].physical["on"] is False
+    assert observed(simulator, device_id)["on"] is False
+    events = [event for event in simulator.events if event["seq"] > before]
+    assert [event["kind"] for event in events] == ["command", "refusal"]
+    assert events[0]["seq"] == receipt["command_seq"]
+    assert events[1]["data"] == {"action": "turn_on", "reason": "configured_refusal"}
+    simulator.control(device_id, {"refuse_actions": []})
+    clock.advance(5)
+    assert observed(simulator, device_id)["on"] is False
+    simulator.command(device_id, {"action": "turn_on"})
+    assert observed(simulator, device_id)["on"] is True
+
+
+def test_refused_direction_preserves_physical_truth_and_still_validates_commands(sim):
+    simulator, _ = sim
+    simulator.command("cellar_fan", {"action": "turn_on", "percentage": 100})
+    simulator.control("cellar_fan", {"refuse_actions": ["set_direction", "set_percentage"]})
+    receipt = simulator.command("cellar_fan", {"action": "set_direction", "direction": "reverse"})
+    assert receipt["accepted"] is True
+    assert simulator.devices["cellar_fan"].physical["direction"] == "forward"
+    assert observed(simulator, "cellar_fan")["direction"] == "forward"
+    with pytest.raises(CommandError, match="direction"):
+        simulator.command("cellar_fan", {"action": "set_direction", "direction": "sideways"})
+    with pytest.raises(CommandError, match="finite"):
+        simulator.command("cellar_fan", {"action": "set_percentage", "percentage": 101})
+    simulator.control("cellar_fan", {"available": False})
+    with pytest.raises(CommandError, match="unavailable"):
+        simulator.command("cellar_fan", {"action": "set_direction", "direction": "reverse"})
+
+
+@pytest.mark.parametrize("device_id", ["cellar_fan", "cellar_low_relay"])
+def test_suppressed_off_feedback_retains_on_until_fault_clears_with_delay(sim, device_id):
+    simulator, clock = sim
+    simulator.command(device_id, {"action": "turn_on"})
+    assert observed(simulator, device_id)["on"] is True
+    simulator.control(device_id, {"suppress_off_feedback": True, "telemetry_delay": 2})
+    before = simulator.sequence
+    simulator.command(device_id, {"action": "turn_off"})
+    assert simulator.devices[device_id].physical["on"] is False
+    clock.advance(3)
+    assert observed(simulator, device_id)["on"] is True
+    if device_id == "cellar_fan":
+        assert simulator.devices[device_id].physical["percentage"] == 0
+        assert observed(simulator, device_id)["percentage"] == 100
+    events = [
+        event
+        for event in simulator.events
+        if event["seq"] > before and event["device_id"] == device_id
+    ]
+    assert any(event["kind"] == "effect" and event["data"].get("on") is False for event in events)
+    assert not any(event["kind"] == "feedback" for event in events)
+    simulator.control(device_id, {"suppress_off_feedback": False})
+    clock.advance(1.9)
+    assert observed(simulator, device_id)["on"] is True
+    clock.advance(0.1)
+    assert observed(simulator, device_id)["on"] is False
+    feedback = [
+        event
+        for event in simulator.events
+        if event["kind"] == "feedback" and event["device_id"] == device_id
+    ]
+    assert feedback[-1]["data"]["observation"]["on"] is False
+
+
+@pytest.mark.parametrize("on", [False, True])
+def test_unknown_direction_changes_observation_only(sim, on):
+    simulator, _ = sim
+    simulator.control("extraction", {"value": True})
+    simulator.command("cellar_fan", {"action": "set_direction", "direction": "forward"})
+    if on:
+        simulator.command("cellar_fan", {"action": "turn_on", "percentage": 100})
+    simulator.control("cellar_fan", {"unknown_direction": True})
+    state = observed(simulator, "cellar_fan")
+    assert state["direction"] is None
+    assert state["on"] is on
+    assert state["available"] is True
+    assert simulator.devices["cellar_fan"].physical["direction"] == "forward"
+    assert observed(simulator, "airflow")["value"] == (100 if on else 0)
+    simulator.control("cellar_fan", {"unknown_direction": False})
+    assert observed(simulator, "cellar_fan")["direction"] == "forward"
+
+
+def test_derived_virtual_on_is_physical_and_can_have_independent_feedback_fault(sim):
+    simulator, _ = sim
+    simulator.command("cellar_fan", {"action": "turn_on"})
+    assert observed(simulator, "cellar_on")["value"] is True
+    simulator.control("cellar_fan", {"suppress_off_feedback": True})
+    simulator.command("cellar_fan", {"action": "turn_off"})
+    assert observed(simulator, "cellar_fan")["on"] is True
+    assert observed(simulator, "cellar_on")["value"] is False
+    simulator.command("cellar_fan", {"action": "turn_on"})
+    simulator.control("cellar_on", {"suppress_off_feedback": True})
+    simulator.command("cellar_fan", {"action": "turn_off"})
+    assert simulator.devices["cellar_on"].physical["value"] is False
+    assert observed(simulator, "cellar_on")["value"] is True
+    simulator.control("cellar_on", {"suppress_off_feedback": False})
+    assert observed(simulator, "cellar_on")["value"] is False
+
+
+@pytest.mark.parametrize("prefix", ["", "cellar_"])
+def test_direction_relay_requires_actual_power_for_airflow(sim, prefix):
+    simulator, _ = sim
+    simulator.control("extraction", {"value": True})
+    direction, power = f"{prefix}inward_relay", f"{prefix}low_relay"
+    simulator.command(direction, {"action": "turn_on"})
+    assert observed(simulator, direction)["on"] is True
+    assert observed(simulator, "airflow")["value"] == 0
+    simulator.command(power, {"action": "turn_on"})
+    assert observed(simulator, "airflow")["value"] == 100
+    simulator.control(power, {"suppress_off_feedback": True})
+    simulator.command(power, {"action": "turn_off"})
+    assert observed(simulator, power)["on"] is True
+    assert simulator.devices[power].physical["on"] is False
+    assert observed(simulator, "airflow")["value"] == 0
+
+
+def test_cellar_relays_have_independent_interlock_groups(sim):
+    simulator, _ = sim
+    for device_id in ("low_relay", "inward_relay", "cellar_low_relay", "cellar_inward_relay"):
+        simulator.command(device_id, {"action": "turn_on"})
+    assert not any(event["kind"] == "unsafe_command" for event in simulator.events)
+    for device_id in ("cellar_high_relay", "cellar_outward_relay"):
+        with pytest.raises(CommandError, match="Conflicting relay"):
+            simulator.command(device_id, {"action": "turn_on"})
+
+
+def test_feedback_journal_records_publication_after_physical_effect(sim):
+    simulator, clock = sim
+    simulator.control("cellar_fan", {"telemetry_delay": 2})
+    before = simulator.sequence
+    simulator.command("cellar_fan", {"action": "turn_on"})
+    assert simulator.devices["cellar_fan"].physical["on"] is True
+    assert observed(simulator, "cellar_fan")["on"] is False
+    clock.advance(2)
+    assert observed(simulator, "cellar_fan")["on"] is True
+    events = [
+        event
+        for event in simulator.events
+        if event["seq"] > before and event["device_id"] == "cellar_fan"
+    ]
+    assert [event["kind"] for event in events] == ["command", "effect", "feedback"]
+    assert events[2]["monotonic"] - events[1]["monotonic"] == 2
+    assert events[2]["data"]["observation"]["on"] is True
+    simulator.command("cellar_fan", {"action": "turn_off"})
+    clock.advance(2)
+    observed(simulator, "cellar_fan")
+    assert events[2]["data"]["observation"]["on"] is True, "Earlier journal rows were mutated"
+
+
+@pytest.mark.parametrize(
+    "patch",
+    [
+        {"refuse_actions": "turn_on"},
+        {"refuse_actions": ["turn_on", "turn_on"]},
+        {"refuse_actions": ["open"]},
+        {"suppress_off_feedback": "false"},
+        {"unknown_direction": 1},
+    ],
+)
+def test_reject_invalid_fault_controls_atomically(sim, patch):
+    simulator, _ = sim
+    previous = dict(simulator.devices["cellar_fan"].controls)
+    with pytest.raises(ValueError):
+        simulator.control("cellar_fan", {"available": False, **patch})
+    assert simulator.devices["cellar_fan"].controls == previous
+
+
+def test_reject_invalid_physical_dependencies_without_replacing_fixture(sim):
+    simulator, _ = sim
+    with pytest.raises(ValueError, match="airflow_requires_any"):
+        simulator.reset(
+            [{"id": "direction", "kind": "switch", "airflow_requires_any": ["missing"]}]
+        )
+    with pytest.raises(ValueError, match="derived on"):
+        simulator.reset(
+            [{"id": "virtual", "kind": "binary_sensor", "derived": "on", "source": "missing"}]
+        )
+    assert "cellar_fan" in simulator.devices
+
+
 def test_reset_preserves_instance_and_append_only_journal(sim):
     simulator, clock = sim
     instance = simulator.instance_id
@@ -200,6 +387,52 @@ async def test_http_boundary_hides_controls_and_records_refusal(
     assert response.status == 409
 
 
+async def test_http_fault_contract_keeps_controls_private(sim, aiohttp_client, socket_enabled):
+    from tests.lab.sim.server import create_app
+
+    simulator, _ = sim
+    client = await aiohttp_client(create_app(simulator))
+    response = await client.patch(
+        "/admin/devices/cellar_fan",
+        json={
+            "refuse_actions": ["turn_on"],
+            "suppress_off_feedback": True,
+            "unknown_direction": True,
+        },
+    )
+    assert response.status == 200
+    response = await client.post("/devices/cellar_fan/command", json={"action": "turn_on"})
+    assert response.status == 200
+    assert (await response.json())["accepted"] is True
+    descriptor = await (await client.get("/devices/cellar_fan")).json()
+    assert descriptor["observable"]["on"] is False
+    assert descriptor["observable"]["direction"] is None
+    public = await (await client.get("/devices")).json()
+    for field in (
+        "controls",
+        "refuse_actions",
+        "suppress_off_feedback",
+        "unknown_direction",
+        "source",
+        "derived",
+        "airflow_requires_any",
+    ):
+        assert f'"{field}"' not in json.dumps(public)
+    private = await (await client.get("/admin/state")).json()
+    cellar = next(device for device in private["devices"] if device["id"] == "cellar_fan")
+    assert cellar["physical"]["direction"] == "forward"
+    assert cellar["controls"]["refuse_actions"] == ["turn_on"]
+    journal = await (await client.get("/admin/journal")).json()
+    assert any(
+        event["kind"] == "refusal" and event["device_id"] == "cellar_fan"
+        for event in journal["events"]
+    )
+    assert any(
+        event["kind"] == "feedback" and event["device_id"] == "cellar_fan"
+        for event in journal["events"]
+    )
+
+
 async def test_native_ha_bridge_reports_feedback_not_receipts(
     sim, aiohttp_client, hass, monkeypatch, socket_enabled
 ):
@@ -220,6 +453,8 @@ async def test_native_ha_bridge_reports_feedback_not_receipts(
     try:
         assert hass.states.get("cover.sim_skylight").attributes["current_position"] == 0
         assert hass.states.get("fan.sim_exhaust").state == "off"
+        assert hass.states.get("fan.sim_cellar_fan").state == "off"
+        assert hass.states.get("binary_sensor.sim_cellar_on").state == "off"
         assert hass.states.get("binary_sensor.sim_passive_window").state == "off"
         simulator.control("skylight", {"hidden_rain": True})
         await hass.services.async_call(
@@ -258,5 +493,29 @@ async def test_native_ha_bridge_reports_feedback_not_receipts(
         await coordinator.async_refresh()
         await hass.async_block_till_done()
         assert hass.states.get("cover.sim_skylight").state == "unavailable"
+        simulator.control("cellar_fan", {"unknown_direction": True})
+        await hass.services.async_call(
+            "fan",
+            "turn_on",
+            {"entity_id": "fan.sim_cellar_fan", "percentage": 100},
+            blocking=True,
+        )
+        await coordinator.async_refresh()
+        await hass.async_block_till_done()
+        assert hass.states.get("fan.sim_cellar_fan").state == "on"
+        assert hass.states.get("fan.sim_cellar_fan").attributes.get("direction") is None
+        assert hass.states.get("binary_sensor.sim_cellar_on").state == "on"
+        simulator.control("cellar_fan", {"suppress_off_feedback": True})
+        await hass.services.async_call(
+            "fan",
+            "turn_off",
+            {"entity_id": "fan.sim_cellar_fan"},
+            blocking=True,
+        )
+        await coordinator.async_refresh()
+        await hass.async_block_till_done()
+        assert simulator.devices["cellar_fan"].physical["on"] is False
+        assert hass.states.get("fan.sim_cellar_fan").state == "on"
+        assert hass.states.get("binary_sensor.sim_cellar_on").state == "off"
     finally:
         await coordinator.async_shutdown()

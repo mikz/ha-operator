@@ -24,7 +24,27 @@ from tests.lab.redaction import sanitize_artifacts  # noqa: E402
 VERSIONS = {"2026.9.3", "2026.9.4"}
 LAB_CASES = {("2026.9.3", "all"), ("2026.9.4", "all"), ("2026.9.3", "soak")}
 INITIAL_SCENARIOS = {"LAB-ONBOARDING", "LAB-NATIVE-CONFIG-FLOW", "LAB-RESOURCE-CONFIGURATION"}
-ALL_SCENARIOS = INITIAL_SCENARIOS | {
+SHADOW_SCENARIOS = {
+    "SHADOW-LOCK-ZERO-COMMANDS",
+    "SHADOW-LOCK-RELOAD-RESTART",
+    "SHADOW-TRACE-EXPORT",
+    "SHADOW-TRACE-REPLAY",
+}
+CELLAR_SCENARIOS = {
+    "CELLAR-CONFIGURATION",
+    "CELLAR-REFUSED-POWER-DIRECTION",
+    "CELLAR-OFF-FEEDBACK-REVERSAL",
+    "CELLAR-STALE-VIRTUAL-AVAILABILITY",
+    "CELLAR-FALLBACK-KEEP-EXTRACTING",
+    "CELLAR-MANUAL-SCOPE-EXPIRY",
+}
+SHADOW_FILES = {
+    "shadow-trace.json",
+    "shadow-replay.json",
+    "shadow-lock-journal.json",
+    "cellar-evidence.json",
+}
+ALL_SCENARIOS = INITIAL_SCENARIOS | SHADOW_SCENARIOS | CELLAR_SCENARIOS | {
     "OBSERVE-ZERO",
     "COVER-RAIN-RETRY",
     "COVER-SUPERSESSION",
@@ -46,7 +66,7 @@ ALL_SCENARIOS = INITIAL_SCENARIOS | {
     "AIRFLOW-MAKE-BEFORE-BREAK-PHYSICAL-CONFIRMATION",
     "RELAY-REVERSAL-CONFIRMED-DEAD-TIME",
 }
-LAB_FILES = {
+LAB_FILES = SHADOW_FILES | {
     "summary.json",
     "sanitized.json",
     "cleanup-verification.json",
@@ -277,6 +297,7 @@ def validate_lab(directory: Path, manifest: dict) -> tuple[str, str]:
     summary = read_json(directory / "summary.json")
     prepared = read_json(directory / "prepared.json")
     sanitized = read_json(directory / "sanitized.json")
+    cleanup = read_json(directory / "cleanup-verification.json")
     case = (summary["ha_version"], summary["scenario"])
     require(case in LAB_CASES, f"Unexpected release lab case: {case}")
     require(
@@ -284,6 +305,14 @@ def validate_lab(directory: Path, manifest: dict) -> tuple[str, str]:
         f"Lab run did not pass: {directory}",
     )
     require(summary.get("cleanup") == "passed", "Lab cleanup did not complete")
+    require(
+        cleanup.get("status") == "passed"
+        and cleanup.get("run_id") == summary.get("run_id")
+        and isinstance(cleanup.get("completed_at"), (int, float))
+        and cleanup["completed_at"] >= summary.get("completed_at", 0)
+        and all(cleanup.get(name) == [] for name in ("containers", "networks", "volumes")),
+        "Cleanup receipt must prove this run left no scoped Docker resources",
+    )
     require(
         sanitized.get("run_id") == summary.get("run_id")
         and isinstance(sanitized.get("completed_at"), (int, float))
@@ -310,6 +339,7 @@ def validate_lab(directory: Path, manifest: dict) -> tuple[str, str]:
         "Lab contains an incomplete or failed scenario",
     )
     names = {case["id"] for case in scenarios}
+    require(len(names) == len(scenarios), "Lab scenario IDs must be unique")
     required = INITIAL_SCENARIOS.copy()
     if case[1] == "all":
         required = ALL_SCENARIOS
@@ -318,8 +348,10 @@ def validate_lab(directory: Path, manifest: dict) -> tuple[str, str]:
             "hap-accessories.json",
             "crash-events.jsonl",
             "downloaded-diagnostics.json",
+            *sorted(SHADOW_FILES),
         ):
             require((directory / name).is_file(), f"Missing {name}")
+        validate_shadow_replay(directory, manifest)
     else:
         required.add("LAB-REALISTIC-SOAK")
         soak = next((item for item in scenarios if item["id"] == "LAB-REALISTIC-SOAK"), {})
@@ -340,6 +372,92 @@ def validate_lab(directory: Path, manifest: dict) -> tuple[str, str]:
     ):
         require((directory / name).is_file(), f"Missing lab evidence: {name}")
     return case
+
+
+def validate_shadow_replay(directory: Path, manifest: dict) -> None:
+    """Keep recorder replay claims bound to complete, exact-source evidence."""
+    trace = read_json(directory / "shadow-trace.json")
+    pages = trace.get("pages")
+    require(
+        trace.get("schema") == 1 and isinstance(pages, list) and bool(pages),
+        "Shadow trace must preserve native export pages",
+    )
+    require(
+        all(
+            page.get("schema") == 1
+            and page.get("integration_version") == manifest["version"]
+            and page.get("component_sha256") == manifest["component_sha256"]
+            and page.get("gap") is False
+            and page.get("health", {}).get("enabled") is True
+            and page.get("health", {}).get("healthy") is True
+            for page in pages
+        )
+        and pages[-1].get("more") is False,
+        "Shadow trace pages must be healthy, complete, and match the installed component",
+    )
+    replay = read_json(directory / "shadow-replay.json")
+    require(
+        replay.get("schema") == 1
+        and replay.get("status") == "passed"
+        and replay.get("complete") is True
+        and replay.get("gaps") == [],
+        "Shadow replay is incomplete or did not pass",
+    )
+    require(
+        replay.get("trace_sha256") == digest((directory / "shadow-trace.json").read_bytes()),
+        "Shadow replay covers another trace",
+    )
+    require(
+        replay.get("artifact_sha256") == manifest["sha256"]
+        and replay.get("component_sha256") == manifest["component_sha256"]
+        and replay.get("config_hash") == pages[-1].get("config_hash")
+        and isinstance(replay.get("config_hash"), str),
+        "Shadow replay covers another artifact or installed component",
+    )
+    require(
+        replay.get("provenance") == "recorded_engine_snapshot_replay"
+        and replay.get("clock") == "recorded_epoch_per_snapshot"
+        and replay.get("physical_effects") == "not_observed",
+        "Shadow replay must declare recorded snapshots and unobserved physical effects",
+    )
+    comparisons = replay.get("comparisons")
+    require(
+        isinstance(comparisons, list)
+        and bool(comparisons)
+        and all(case.get("matched") is True for case in comparisons),
+        "Shadow replay must compare matching engine snapshots",
+    )
+    lock = read_json(directory / "shadow-lock-journal.json")
+    boundaries = {"locked", "reload", "restart"}
+    states = lock.get("states", [])
+    require(
+        lock.get("schema") == 1
+        and lock.get("status") == "passed"
+        and lock.get("provenance") == "simulator_generated"
+        and lock.get("physical_effects") == "simulator_observed"
+        and lock.get("command_count") == 0
+        and isinstance(lock.get("events"), list)
+        and not any(event.get("kind") == "command" for event in lock["events"])
+        and set(lock.get("boundaries", [])) == boundaries
+        and {state.get("boundary") for state in states} == boundaries
+        and all(state.get("state", {}).get("mode") == "observe" for state in states)
+        and type(lock.get("started_sequence")) is int
+        and type(lock.get("completed_sequence")) is int
+        and 0 <= lock["started_sequence"] <= lock["completed_sequence"],
+        "Shadow lock evidence must prove zero commands through reload and restart",
+    )
+    cellar = read_json(directory / "cellar-evidence.json")
+    require(
+        cellar.get("schema") == 1
+        and cellar.get("provenance") == "simulator_generated"
+        and cellar.get("physical_effects") == "simulator_observed",
+        "Cellar evidence must identify simulator-generated effects",
+    )
+    cellar_ids = [case.get("id") for case in cellar.get("scenarios", [])]
+    require(
+        len(cellar_ids) == len(set(cellar_ids)) and CELLAR_SCENARIOS <= set(cellar_ids),
+        "Cellar evidence must cover every required fault scenario",
+    )
 
 
 def validate_tests(directory: Path, manifest: dict, root: Path) -> str:
@@ -463,6 +581,10 @@ def build_evidence(
         for name in manifest["locks"]:
             safe_copy(root / name, evidence / "locks" / name)
         sanitize_artifacts(evidence, [])
+        for directory, case in zip(labs, selected, strict=True):
+            if case[1] == "all":
+                run_name = read_json(directory / "summary.json")["run_id"]
+                validate_shadow_replay(evidence / "lab" / run_name, manifest)
         safe_copy(root / "dist/ha_operator.zip", staging / "ha_operator.zip")
         safe_copy(root / "dist/ha_operator.manifest.json", staging / "ha_operator.manifest.json")
         files = {
@@ -474,6 +596,7 @@ def build_evidence(
             "schema_version": 1,
             "status": "passed",
             "artifact_sha256": manifest["sha256"],
+            "component_sha256": manifest["component_sha256"],
             "source_commit": manifest["source_commit"],
             "checks": {
                 "source_tests": sorted(versions),

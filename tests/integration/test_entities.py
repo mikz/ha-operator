@@ -80,6 +80,8 @@ def fake_runtime():
         attempts={},
         last_commands={},
         fault=None,
+        shadow_locked=False,
+        trace_health=Mock(return_value={"enabled": False, "healthy": True, "complete": True}),
         history=deque(maxlen=100),
         mode=Mock(return_value="observe"),
         manual=Mock(return_value=None),
@@ -314,6 +316,24 @@ async def test_diagnostics_allowlist_and_bounded_history(hass, fake_runtime):
     secret = "private-address-and-token"
     fake_runtime.resources["roof"].update(token=secret, entity_id="cover.secret_room")
     fake_runtime.fault = secret
+    fake_runtime.shadow_locked = True
+    fake_runtime.trace_health.return_value = {
+        "enabled": True,
+        "healthy": False,
+        "complete": False,
+        "session_id": secret,
+        "last_sequence": 24,
+        "durable_sequence": 20,
+        "queued_records": 4,
+        "dropped_records": 0,
+        "write_errors": 1,
+        "rotations": 2,
+        "last_heartbeat": 10,
+        "last_write_at": 9,
+        "path": secret,
+        "records": [{"secret": secret}],
+        "token": secret,
+    }
     fake_runtime.decisions["roof"] = SimpleNamespace(
         status="pending", source=secret, target=Target(position=100, profile=secret)
     )
@@ -338,6 +358,13 @@ async def test_diagnostics_allowlist_and_bounded_history(hass, fake_runtime):
     assert secret not in text and "Private roof" not in text and "cover.secret_room" not in text
     assert '"roof"' not in text and '"morning"' not in text
     assert result["faulted"] and len(result["history"]) == 100
+    assert result["shadow_locked"] is True
+    assert result["trace"]["enabled"] is True
+    assert result["trace"]["healthy"] is False
+    assert result["trace"]["durable_sequence"] == 20
+    assert result["trace"]["queued_records"] == 4
+    assert "records" not in result["trace"] and "path" not in result["trace"]
+    assert fake_runtime.trace_health.call_count == 1
     assert result["history"][0]["at"] == 20
     assert len(fake_runtime.history) == 120  # download is read-only
     fake_runtime.async_request.assert_not_awaited()

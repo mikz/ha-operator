@@ -7,7 +7,14 @@ from pathlib import Path
 
 import pytest
 
-from scripts.release import ARCHIVE_NAME, MANIFEST_NAME, build, integration_files, verify
+from scripts.release import (
+    ARCHIVE_NAME,
+    MANIFEST_NAME,
+    build,
+    component_digest,
+    integration_files,
+    verify,
+)
 
 
 @pytest.fixture
@@ -31,6 +38,8 @@ def test_reproducible_flat_archive_and_source_verification(source, tmp_path):
     assert first == second
     assert content == (output / ARCHIVE_NAME).read_bytes()
     assert first["sha256"] == sha256(content).hexdigest()
+    assert first["schema_version"] == 2
+    assert first["component_sha256"] == component_digest(integration_files(source))
     assert verify(output / ARCHIVE_NAME, output / MANIFEST_NAME, root=source) == first
     with zipfile.ZipFile(output / ARCHIVE_NAME) as archive:
         assert set(archive.namelist()) == {"__init__.py", "manifest.json", "brand/icon.png"}
@@ -56,7 +65,7 @@ def test_corrupted_archive_or_evidence_is_rejected(source, tmp_path):
     (output / MANIFEST_NAME).write_text(json.dumps(result))
     with pytest.raises(ValueError, match="member evidence"):
         verify(output / ARCHIVE_NAME, output / MANIFEST_NAME)
-    build(source, output)
+    build(source, output, replace=True)
     with (output / ARCHIVE_NAME).open("ab") as archive:
         archive.write(b"tampered")
     with pytest.raises(ValueError, match="digest"):
@@ -112,6 +121,62 @@ def test_dependency_locks_are_hashed(source, tmp_path):
         "uv.lock": sha256(b"lock fixture").hexdigest(),
         "compat/ha2026.9.4/uv.lock": sha256(b"compat fixture").hexdigest(),
     }
+
+
+def test_unchanged_archive_cannot_silently_relabel_dependency_lock(source, tmp_path):
+    output = tmp_path / "dist"
+    lock = source / "uv.lock"
+    lock.write_text("first lock")
+    original = build(source, output)
+    archive = (output / ARCHIVE_NAME).read_bytes()
+    receipt = (output / MANIFEST_NAME).read_bytes()
+    lock.write_text("changed lock")
+    with pytest.raises(ValueError, match="manifest already differs"):
+        build(source, output)
+    assert (output / ARCHIVE_NAME).read_bytes() == archive
+    assert (output / MANIFEST_NAME).read_bytes() == receipt
+    replaced = build(source, output, replace=True)
+    assert replaced["sha256"] == original["sha256"]
+    assert replaced["locks"] != original["locks"]
+
+
+def test_runtime_and_compatibility_versions_must_match_release(source):
+    production = source / "custom_components/ha_operator"
+    (production / "const.py").write_text('VERSION = "0.0.9"\n')
+    with pytest.raises(ValueError, match="Runtime and integration versions differ"):
+        integration_files(source)
+    (production / "const.py").write_text('VERSION = "0.1.0"\n')
+    compatibility = source / "compat/ha2026.9.4"
+    compatibility.mkdir(parents=True)
+    (compatibility / "pyproject.toml").write_text('[project]\nversion = "0.0.9"\n')
+    with pytest.raises(ValueError, match="Project and integration versions differ"):
+        integration_files(source)
+    (compatibility / "pyproject.toml").write_text('[project]\nversion = "0.1.0"\n')
+    assert "const.py" in integration_files(source)
+
+
+def test_component_fingerprint_covers_code_configuration_and_excludes_branding():
+    files = {"__init__.py": b"source", "translations/en.json": b"{}", "services.yaml": b"{}"}
+    hashes = {name: sha256(content).hexdigest() for name, content in files.items()}
+    encoded = json.dumps(hashes, sort_keys=True, separators=(",", ":")).encode()
+    expected = sha256(encoded).hexdigest()
+    assert component_digest(files) == expected
+    decorated = {**files, "brand/icon.png": b"image", "LICENSE": b"license"}
+    assert component_digest(decorated) == expected
+    assert component_digest({**files, "services.yaml": b"changed"}) != expected
+
+
+def test_new_manifest_requires_component_fingerprint_but_legacy_manifests_remain_readable(source):
+    output = source / "dist"
+    evidence = build(source, output)
+    evidence["component_sha256"] = "incorrect"
+    (output / MANIFEST_NAME).write_text(json.dumps(evidence))
+    with pytest.raises(ValueError, match="component fingerprint differs"):
+        verify(output / ARCHIVE_NAME, output / MANIFEST_NAME)
+    del evidence["component_sha256"]
+    evidence["schema_version"] = 1
+    (output / MANIFEST_NAME).write_text(json.dumps(evidence))
+    assert verify(output / ARCHIVE_NAME, output / MANIFEST_NAME) == evidence
 
 
 @pytest.mark.parametrize("name", ["../escape.py", "/escape.py", "a\\escape.py", "tests/evil.py"])

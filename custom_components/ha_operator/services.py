@@ -37,6 +37,21 @@ _OCCURRENCE = vol.Schema(
 )
 
 
+def _trace_integer(value):
+    if type(value) is not int:
+        raise vol.Invalid("Expected an integer")
+    return value
+
+
+_TRACE = vol.Schema(
+    {
+        vol.Optional("config_entry_id"): cv.string,
+        vol.Optional("after"): vol.All(_trace_integer, vol.Range(min=0)),
+        vol.Optional("limit", default=100): vol.All(_trace_integer, vol.Range(min=1, max=1000)),
+    }
+)
+
+
 @callback
 def async_register_services(hass: HomeAssistant) -> None:
     def runtime_for(call):
@@ -72,6 +87,10 @@ def async_register_services(hass: HomeAssistant) -> None:
 
     async def handle(call: ServiceCall):
         runtime = runtime_for(call)
+        if call.service == "export_trace":
+            return await runtime.async_export_trace(
+                after=call.data.get("after"), limit=call.data["limit"]
+            )
         if call.service in {"submit_occurrence", "skip_occurrence"}:
             result = await getattr(runtime, f"async_{call.service}")(
                 call.data["policy_id"], call.data["occurrence_id"], call.data["expires_at"]
@@ -89,6 +108,14 @@ def async_register_services(hass: HomeAssistant) -> None:
         await getattr(runtime, f"async_{call.service}")(key)
         return None
 
+    service.async_register_admin_service(
+        hass,
+        DOMAIN,
+        "export_trace",
+        handle,
+        schema=_TRACE,
+        supports_response=SupportsResponse.ONLY,
+    )
     for name in (
         "request",
         "release",

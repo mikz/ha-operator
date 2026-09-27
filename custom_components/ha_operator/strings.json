@@ -4,7 +4,17 @@
     "step": {
       "user": {
         "title": "HA Operator",
-        "description": "Create HA Operator, then add resources, policies, and airflow requirements. New resources remain in observe mode until you explicitly select live."
+        "description": "Create HA Operator, then add resources, policies, and airflow requirements. New resources start in observe mode. Trace recording and the global shadow lock are optional and default to off.",
+        "data": {
+          "trace_enabled": "Record local trace",
+          "shadow_lock": "Lock all resources in observe mode",
+          "trace_entities": "Additional entities to observe"
+        },
+        "data_description": {
+          "trace_enabled": "Record bounded, sanitized decisions and source observations to local storage for paginated export and replay.",
+          "shadow_lock": "Prevent every resource from entering live mode. Turn off this lock before explicitly activating individual resources.",
+          "trace_entities": "Record these extra source entities when tracing is enabled. This does not grant device ownership or permit commands."
+        }
       }
     },
     "abort": {
@@ -322,6 +332,46 @@
           "description": "Optional entry selector. Defaults to the single HA Operator integration."
         }
       }
+    },
+    "export_trace": {
+      "name": "Export recorded trace",
+      "description": "Administrator-only export of one page of sanitized, locally recorded decision and observation events. Records have durable sequence numbers. Use next_after as the next request cursor; inspect gap and health before treating the trace as complete. This action never commands a device.",
+      "fields": {
+        "after": {
+          "name": "After sequence",
+          "description": "Return records after this durable sequence number. Omit to begin with the oldest retained record."
+        },
+        "limit": {
+          "name": "Page size",
+          "description": "Maximum records to return, from 1 to 1000."
+        },
+        "config_entry_id": {
+          "name": "Configuration entry",
+          "description": "Optional entry selector. Defaults to the single HA Operator integration."
+        }
+      }
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Recording and shadow control",
+        "description": "Changes reload the integration after existing workers stop. A shadow lock prevents device commands; recording-only entities remain observation inputs.",
+        "data": {
+          "trace_enabled": "Record local trace",
+          "shadow_lock": "Lock all resources in observe mode",
+          "trace_entities": "Additional entities to observe"
+        },
+        "data_description": {
+          "trace_enabled": "Record bounded, sanitized decisions and source observations to local storage for paginated export and replay.",
+          "shadow_lock": "Prevent every resource from entering live mode. Unlocking first saves all resource modes as observe; explicitly select live for each resource after unlocking.",
+          "trace_entities": "Record these extra source entities when tracing is enabled. This does not grant device ownership or permit commands."
+        }
+      }
+    },
+    "error": {
+      "unlock_unavailable": "The shadow lock is still enabled. Reload HA Operator and wait for it to finish loading before trying to unlock again. Resources must be saved in observe mode before unlocking.",
+      "unlock_persistence_failed": "The shadow lock is still enabled because observe mode could not be saved. Check the HA Operator storage Repair and resolve the storage problem, reload the integration, then try again."
     }
   }
 }

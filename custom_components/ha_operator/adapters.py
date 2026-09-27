@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import math
 from collections.abc import Callable, Mapping
 from typing import Any
@@ -10,9 +11,10 @@ from typing import Any
 from homeassistant.components.cover import CoverEntityFeature
 from homeassistant.components.fan import FanEntityFeature
 from homeassistant.const import STATE_UNAVAILABLE, STATE_UNKNOWN
-from homeassistant.core import HomeAssistant, State, callback
+from homeassistant.core import Context, HomeAssistant, State, callback
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.event import async_track_state_change_event
+from homeassistant.util import dt as dt_util
 from homeassistant.util.percentage import (
     ordered_list_item_to_percentage,
     percentage_to_ordered_list_item,
@@ -21,6 +23,7 @@ from homeassistant.util.percentage import (
 from .async_utils import async_settle
 from .core import Observation, Target
 
+_LOGGER = logging.getLogger(__name__)
 _FEATURES = "supported_features"
 _UNKNOWN = {STATE_UNAVAILABLE, STATE_UNKNOWN}
 _DIRECTIONS = {"forward", "reverse"}
@@ -52,6 +55,8 @@ class Adapter:
         self.resource_id = resource_id
         self.config = config
         self.entity_id: str = config.get("entity_id", "")
+        self.audit_callback: Callable[[dict[str, Any]], None] | None = None
+        self._audit_warning_logged = False
 
     @property
     def supported_features(self) -> int:
@@ -106,13 +111,86 @@ class Adapter:
         cancelled. Shield the complete service invocation, then settle it before
         propagating cancellation so reload never overlaps an abandoned actuator.
         """
-        task = self.hass.async_create_task(
-            self.hass.services.async_call(domain, service, data, blocking=True),
-            f"ha_operator:physical:{self.resource_id}:{service}",
-        )
-        _, cancelled = await async_settle(task)
+        context = Context()
+        self._audit_dispatch(domain, service, data, context, "started")
+        try:
+            task = self.hass.async_create_task(
+                self.hass.services.async_call(
+                    domain, service, data, blocking=True, context=context
+                ),
+                f"ha_operator:physical:{self.resource_id}:{service}",
+            )
+            _, cancelled = await async_settle(task)
+        except asyncio.CancelledError:
+            self._audit_dispatch(
+                domain, service, data, context, "cancelled", cancellation_scope="service"
+            )
+            raise
+        except Exception as err:
+            self._audit_dispatch(
+                domain, service, data, context, "error", error_type=type(err).__name__[:64]
+            )
+            raise
+        self._audit_dispatch(domain, service, data, context, "completed")
         if cancelled:
+            # The physical service returned despite caller cancellation. Preserve
+            # both facts instead of labelling the already-completed I/O cancelled.
+            self._audit_dispatch(
+                domain, service, data, context, "cancelled", cancellation_scope="caller"
+            )
             raise asyncio.CancelledError
+
+    def _audit_dispatch(
+        self,
+        domain: str,
+        service: str,
+        data: Mapping[str, Any],
+        context: Context,
+        status: str,
+        *,
+        error_type: str | None = None,
+        cancellation_scope: str | None = None,
+    ) -> None:
+        """Emit a bounded allowlist; the callback owns bounded queue retention.
+
+        Started means an attempted service invocation; completed means the HA
+        handler returned. Neither event proves physical target satisfaction.
+        """
+        if self.audit_callback is None:
+            return
+        payload: dict[str, Any] = {}
+        if isinstance(entity_id := data.get("entity_id"), str):
+            payload["entity_id"] = entity_id[:255]
+        for field in ("position", "percentage"):
+            value = data.get(field)
+            if (
+                isinstance(value, (int, float))
+                and not isinstance(value, bool)
+                and math.isfinite(value)
+                and 0 <= value <= 100
+            ):
+                payload[field] = value
+        if data.get("direction") in _DIRECTIONS:
+            payload["direction"] = data["direction"]
+        record = {
+            "resource_id": self.resource_id,
+            "domain": domain,
+            "service": service,
+            "data": payload,
+            "context_id": context.id,
+            "at": dt_util.utcnow().timestamp(),
+            "status": status,
+        }
+        if error_type is not None:
+            record["error_type"] = error_type
+        if cancellation_scope is not None:
+            record["cancellation_scope"] = cancellation_scope
+        try:
+            self.audit_callback(record)
+        except Exception as err:
+            if not self._audit_warning_logged:
+                _LOGGER.warning("Dispatch audit callback failed (%s)", type(err).__name__)
+                self._audit_warning_logged = True
 
     def _validate_fields(self, target: Target, allowed: set[str]) -> None:
         extra = target.to_dict().keys() - allowed

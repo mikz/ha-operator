@@ -7,6 +7,7 @@ Build once, transfer the ZIP and manifest together, then verify before each test
 from __future__ import annotations
 
 import argparse
+import ast
 import json
 import stat
 import subprocess
@@ -27,6 +28,16 @@ IGNORED_PARTS = {"__pycache__", "tests", "test", "sim", "simulator"}
 def digest(data: bytes) -> str:
     """Return the content digest used by every release evidence consumer."""
     return sha256(data).hexdigest()
+
+
+def component_digest(files: dict[str, bytes]) -> str:
+    """Match the installed component's trace fingerprint without ZIP metadata."""
+    source = {
+        name: digest(content)
+        for name, content in files.items()
+        if PurePosixPath(name).suffix in {".py", ".json", ".yaml"}
+    }
+    return digest(json.dumps(source, sort_keys=True, separators=(",", ":")).encode())
 
 
 def integration_files(root: Path) -> dict[str, bytes]:
@@ -55,11 +66,23 @@ def integration_files(root: Path) -> dict[str, bytes]:
     if (root / "LICENSE").is_file():
         files["LICENSE"] = (root / "LICENSE").read_bytes()
     validate_files(files)
-    project = root / "pyproject.toml"
-    if project.exists():
-        version = tomllib.loads(project.read_text())["project"]["version"]
-        if version != json.loads(files["manifest.json"])["version"]:
+    version = json.loads(files["manifest.json"])["version"]
+    for project in (root / "pyproject.toml", *sorted(root.glob("compat/*/pyproject.toml"))):
+        if project.exists() and tomllib.loads(project.read_text())["project"]["version"] != version:
             raise ValueError("Project and integration versions differ")
+    if "const.py" in files:
+        constants = ast.parse(files["const.py"])
+        versions = [
+            node.value.value
+            for node in constants.body
+            if isinstance(node, ast.Assign)
+            and any(
+                isinstance(target, ast.Name) and target.id == "VERSION" for target in node.targets
+            )
+            and isinstance(node.value, ast.Constant)
+        ]
+        if versions != [version]:
+            raise ValueError("Runtime and integration versions differ")
     return files
 
 
@@ -115,11 +138,12 @@ def build(root: Path, output: Path, *, replace: bool = False) -> dict:
         *root.glob("*.lock"), *root.glob("requirements/*.lock"), *root.glob("compat/*/uv.lock")
     })
     evidence = {
-        "schema_version": 1,
+        "schema_version": 2,
         "domain": DOMAIN,
         "version": json.loads(files["manifest.json"])["version"],
         "archive": ARCHIVE_NAME,
         "sha256": digest(content),
+        "component_sha256": component_digest(files),
         "source_commit": revision.stdout.strip() if revision.returncode == 0 else None,
         "files": {
             name: {"sha256": digest(data), "size": len(data)}
@@ -127,8 +151,14 @@ def build(root: Path, output: Path, *, replace: bool = False) -> dict:
         },
         "locks": {str(path.relative_to(root)): digest(path.read_bytes()) for path in locks},
     }
+    manifest = output / MANIFEST_NAME
+    rendered = json.dumps(evidence, indent=2, sort_keys=True) + "\n"
+    if manifest.exists() and manifest.read_text() != rendered and not replace:
+        raise ValueError(
+            "Release manifest already differs; use a new output directory or --replace"
+        )
     archive.write_bytes(content)
-    (output / MANIFEST_NAME).write_text(json.dumps(evidence, indent=2, sort_keys=True) + "\n")
+    manifest.write_text(rendered)
     return evidence
 
 
@@ -136,7 +166,7 @@ def verify(archive: Path, manifest: Path, *, root: Path | None = None) -> dict:
     """Verify transferred bytes and optionally ensure they match current source."""
     evidence = json.loads(manifest.read_text())
     content = archive.read_bytes()
-    if evidence.get("schema_version") != 1 or evidence.get("domain") != DOMAIN:
+    if evidence.get("schema_version") not in (1, 2) or evidence.get("domain") != DOMAIN:
         raise ValueError("Unknown release evidence schema or domain")
     if evidence.get("sha256") != digest(content) or evidence.get("archive") != archive.name:
         raise ValueError("Archive digest or filename differs from release manifest")
@@ -151,6 +181,11 @@ def verify(archive: Path, manifest: Path, *, root: Path | None = None) -> dict:
     actual = {name: {"sha256": digest(data), "size": len(data)} for name, data in files.items()}
     if evidence.get("files") != actual or evidence.get("version") != integration["version"]:
         raise ValueError("Archive member evidence or version differs")
+    if (
+        evidence["schema_version"] == 2
+        and evidence.get("component_sha256") != component_digest(files)
+    ):
+        raise ValueError("Installed component fingerprint differs from release manifest")
     if root is not None and files != integration_files(root):
         raise ValueError("Archive differs from current integration source")
     return evidence

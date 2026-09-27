@@ -1,0 +1,67 @@
+{
+  "schema": 1,
+  "provenance": "rebased_sanitized_legacy_observation_summary",
+  "physical_effects": "not_observed",
+  "operator_admissions": "not_observed",
+  "records": [
+    {
+      "id": "legacy_manual_flag_without_timer_scope",
+      "observed": {
+        "manual_flag": true,
+        "manual_timer": "idle",
+        "cellar_timer": "idle",
+        "warm_co2_start_called_virtual_fan_turn_on": true,
+        "timer_start_failed_manual_off_condition": true,
+        "virtual_fan": "on",
+        "raw_power": "on",
+        "raw_inward": "on",
+        "raw_outward": "off"
+      },
+      "interpretation": "Demonstrated legacy start and timer policy inconsistency. A boolean is not an accepted operator lease. Motor failure and measured airflow were not established.",
+      "started_at_offset_seconds": 9052.958815,
+      "ended_at_offset_seconds": 150747.288
+    },
+    {
+      "id": "legacy_availability_flaps_while_virtual_off",
+      "observed": {
+        "virtual_fan": "off",
+        "reversal": "not_observed",
+        "known_state_mismatch_over_one_second": "not_observed",
+        "direction_unavailable_intervals_offset_seconds": [
+          [
+            0.0,
+            10.349
+          ],
+          [
+            59.306,
+            60.218
+          ]
+        ],
+        "power_unavailable_intervals_offset_seconds": [
+          [
+            75.462,
+            85.805
+          ],
+          [
+            134.766,
+            135.467
+          ]
+        ]
+      },
+      "interpretation": "Observed availability interruptions. Refused power, refused direction, stale virtual-on, and reversal faults in the lab are synthetic counterfactuals, not demonstrated historical motor faults."
+    }
+  ],
+  "synthetic_cases": [
+    "CELLAR-REFUSED-POWER-DIRECTION",
+    "CELLAR-OFF-FEEDBACK-REVERSAL",
+    "CELLAR-STALE-VIRTUAL-AVAILABILITY",
+    "CELLAR-FALLBACK-KEEP-EXTRACTING",
+    "CELLAR-MANUAL-SCOPE-EXPIRY"
+  ],
+  "time_basis": {
+    "clock": "relative_seconds",
+    "origin": "synthetic_zero",
+    "calendar_dates": "removed",
+    "within_fixture_intervals": "preserved"
+  }
+}

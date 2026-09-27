@@ -106,6 +106,39 @@ Parameterized names refer to all cases of that test.
 | RELAY-CANCEL | HA, Lab | Supersession, hands-off, observe mode, unload, or a fault during reversal prevents every stale subsequent effect. | `adapters::test_relay_stale_before_dispatch_and_between_off_calls`; `adapters::test_relay_rechecks_after_dead_time`; `adapters::test_relay_stale_between_energized_outputs_skips_later_output`; `adapters::test_relay_wait_cancellation_unsubscribes` |
 | RELAY-OFF-DIRECTION | Pure, HA, Lab | Direction-only control while physically off leaves outputs off. Later bare turn-on uses the configured default profile. | `adapters::test_relay_off_feedback_and_profile_normalization`; `adapters::test_relay_bare_on_uses_configured_profile_after_reverse` |
 
+## Shadow observation and replay
+
+Version 0.1.1 requires the following additional packaged scenarios on both Home
+Assistant versions. Their presence in this table does not establish a pass. The
+release record must contain a completed run and the supporting trace, replay,
+physical journal, and cleanup evidence for the same archive.
+
+| ID | Required layers | Expected outcome | Evidence requirement |
+| --- | --- | --- | --- |
+| SHADOW-LOCK-ZERO-COMMANDS | HA, Lab | With the integration lock enabled, every resource stays in observe mode. Attempts to select live mode fail, and policy and input changes cause zero HA Operator actuator commands. | Independent simulator command counts for the bounded lock window in `shadow-lock-journal.json`; trace records alone do not prove zero physical effects. |
+| SHADOW-LOCK-RELOAD-RESTART | HA, Lab | The lock survives native reload and process restart, including resources with stored live modes and valid intent. | Restart records, exported session transitions, and the independent zero-command journal. |
+| SHADOW-TRACE-EXPORT | HA, Lab | An admin retrieves the versioned, paginated trace with sanitized configuration, intent, input, decision, context, and health fields. Disabled tracing yields no records. | `shadow-trace.json`, native action responses, privacy assertions, and source tests for non-admin refusal. |
+| SHADOW-TRACE-REPLAY | Pure, Lab | The packaged pure engine evaluates each recorded engine-input snapshot at its recorded time and matches the recorded result. Missing ancestry, gaps, and partial snapshots prevent a complete replay claim. | `shadow-replay.json` binds the exported trace hash to a comparison ledger. Inputs come from the recorder and are not independently reconstructed from raw feedback. Physical consequences remain `not_observed`. |
+| CELLAR-CONFIGURATION | HA, Lab | Native resource, policy, and airflow configuration binds the simulated cellar devices to explicit raw feedback and alternative providers. | Successful setup and configured resource identities in `cellar-evidence.json`. |
+| CELLAR-REFUSED-POWER-DIRECTION | HA, Lab | Refused power or direction changes remain pending or unconfirmed. A successful service response cannot establish fan movement or airflow. | `cellar-evidence.json` records simulator-generated faults and correlated commands, effects, and feedback. |
+| CELLAR-OFF-FEEDBACK-REVERSAL | HA, Lab | A direction reversal waits for confirmed conflicting outputs off and the configured dead time. Unknown or missing off feedback blocks progression. | Independent relay ordering and feedback sequence numbers. |
+| CELLAR-STALE-VIRTUAL-AVAILABILITY | HA, Lab | A virtual optimistic target or unavailable raw feedback cannot confirm an airflow provider. | Separate desired, raw, availability, and physical feedback evidence. |
+| CELLAR-FALLBACK-KEEP-EXTRACTING | HA, Lab | A failing cellar provider causes alternative selection and an unmet report when appropriate. Extraction continues. | Acquisition and alternative confirmation evidence with extractor state and command journal. |
+| CELLAR-MANUAL-SCOPE-EXPIRY | HA, Lab | An explicit hands-off lease blocks automatic commands, then expiry resumes the currently eligible target. An unrelated legacy manual boolean does not create an operator lease. | Durable lease, absolute expiry, current target, and independently observed command ordering. |
+
+Shadow recording is passive. Recorded observations describe the inputs received
+while the existing controller owned the actuators. A simulated alternative run
+must label its inputs, faults, and physical outcomes as simulator-generated.
+Neither replay agreement nor context correlation establishes what the physical
+house would have done under different commands.
+
+Every full run must preserve `shadow-trace.json`, `shadow-replay.json`,
+`shadow-lock-journal.json`, and `cellar-evidence.json`. All release runs, including
+the production-timing soak, must include `cleanup-verification.json` with the run
+identity, completion time, and empty scoped Docker container, network, and volume
+inventories. The [0.1.1 release notes](releases/0.1.1.md) link to the release
+validation evidence.
+
 ## Durability, native integration, and release
 
 | ID | Required layers | Expected outcome | Implemented test nodes and limits |
@@ -193,8 +226,9 @@ records the separate automated validation runs.
 | HA 2026.9.4 packaged lab | 23/23 scenarios passed in 143.67 seconds; isolation and cleanup passed. | `evidence/lab/lab-2026-9-4-05adff92/` |
 | HA 2026.9.3 production-timing soak | `LAB-REALISTIC-SOAK` passed in 627.54 seconds; isolation and cleanup passed. | `evidence/lab/lab-2026-9-3-ba03a1c7/` |
 
-Each lab directory includes `summary.json`, `scenarios.json`, the independent
-`simulator-journal.json`, and `cleanup-verification.json`. The full runs also
+Each lab directory includes `summary.json`, `scenarios.json`, and the independent
+`simulator-journal.json`. Cleanup results are recorded in each summary; the soak
+also includes a separate `cleanup-verification.json`. The full runs also
 include HAP transcripts, restart records, browser evidence, and downloaded
 diagnostics. All three runs used the archive hash above and left no lab
 containers, networks, or volumes after cleanup. Passing the 23 runner scenarios

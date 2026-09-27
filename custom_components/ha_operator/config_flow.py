@@ -6,8 +6,15 @@ from types import SimpleNamespace
 from typing import Any
 
 import voluptuous as vol
-from homeassistant.config_entries import ConfigEntry, ConfigFlow, ConfigSubentryFlow
+from homeassistant.config_entries import (
+    ConfigEntry,
+    ConfigEntryState,
+    ConfigFlow,
+    ConfigSubentryFlow,
+    OptionsFlow,
+)
 from homeassistant.core import callback
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import selector
 
 from .configuration import KINDS, RESOURCE_DEFAULTS, ConfigurationError, validate_configuration
@@ -28,10 +35,33 @@ def _number(minimum: float = 0.001, maximum: float | None = None) -> selector.Nu
     return selector.NumberSelector(config)
 
 
+def _options_schema(options: dict[str, Any] | None = None) -> vol.Schema:
+    """Use explicit opt-in defaults for both tracing and the global observe lock."""
+    current = options or {}
+    return vol.Schema(
+        {
+            vol.Optional(
+                "trace_enabled", default=current.get("trace_enabled", False)
+            ): selector.BooleanSelector(),
+            vol.Optional(
+                "shadow_lock", default=current.get("shadow_lock", False)
+            ): selector.BooleanSelector(),
+            vol.Optional("trace_entities", default=current.get("trace_entities", [])): _entity(
+                multiple=True
+            ),
+        }
+    )
+
+
 class OperatorConfigFlow(ConfigFlow, domain=DOMAIN):
     """Create the single integration; resources are native subentries."""
 
     VERSION = 1
+
+    @staticmethod
+    @callback
+    def async_get_options_flow(config_entry: ConfigEntry) -> OptionsFlow:
+        return OperatorOptionsFlow()
 
     @classmethod
     @callback
@@ -46,8 +76,39 @@ class OperatorConfigFlow(ConfigFlow, domain=DOMAIN):
         if user_input is not None:
             await self.async_set_unique_id(DOMAIN)
             self._abort_if_unique_id_configured()
-            return self.async_create_entry(title=NAME, data={})
-        return self.async_show_form(step_id="user", data_schema=vol.Schema({}))
+            return self.async_create_entry(title=NAME, data={}, options=user_input)
+        return self.async_show_form(step_id="user", data_schema=_options_schema())
+
+
+class OperatorOptionsFlow(OptionsFlow):
+    """Edit options through HA's existing single reload listener."""
+
+    async def async_step_init(self, user_input: dict[str, Any] | None = None):
+        errors: dict[str, str] = {}
+        if user_input is not None:
+            options = {**self.config_entry.options, **user_input}
+            if self.config_entry.options.get("shadow_lock", False) and not options["shadow_lock"]:
+                runtime = getattr(self.config_entry, "runtime_data", None)
+                if self.config_entry.state is not ConfigEntryState.LOADED or runtime is None:
+                    errors["base"] = "unlock_unavailable"
+                else:
+                    try:
+                        await runtime.async_prepare_unlock()
+                    except HomeAssistantError:
+                        errors["base"] = "unlock_persistence_failed"
+                    else:
+                        if (
+                            self.config_entry.state is not ConfigEntryState.LOADED
+                            or getattr(self.config_entry, "runtime_data", None) is not runtime
+                        ):
+                            errors["base"] = "unlock_unavailable"
+            if not errors:
+                return self.async_create_entry(title="", data=options)
+        return self.async_show_form(
+            step_id="init",
+            data_schema=_options_schema(dict(self.config_entry.options)),
+            errors=errors,
+        )
 
 
 class OperatorSubentryFlow(ConfigSubentryFlow):

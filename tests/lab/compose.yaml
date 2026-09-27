@@ -48,6 +48,7 @@ services:
       LAB_HA_ADDRESS: ${LAB_HA_ADDRESS}
       LAB_SIM_URL: http://simulator:8099
       LAB_SCENARIO: ${LAB_SCENARIO:-all}
+      LAB_ARTIFACT_SHA256: ${LAB_ARTIFACT_SHA256:?}
     labels:
       io.ha-operator.lab.run: ${LAB_RUN_ID}
       io.ha-operator.lab.role: runner

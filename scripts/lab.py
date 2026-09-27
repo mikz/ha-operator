@@ -155,6 +155,28 @@ def collect_route_snapshot(container):
     }
 
 
+def verify_cleanup(run_id):
+    """Query scoped Docker objects after teardown; a successful down is insufficient."""
+    containers = output(
+        ["docker", "ps", "-aq", "--filter", f"label=io.ha-operator.lab.run={run_id}"]
+    ).splitlines()
+    networks = output(
+        ["docker", "network", "ls", "-q", "--filter", f"label=com.docker.compose.project={run_id}"]
+    ).splitlines()
+    volumes = output(
+        ["docker", "volume", "ls", "-q", "--filter", f"label=com.docker.compose.project={run_id}"]
+    ).splitlines()
+    receipt = {
+        "run_id": run_id,
+        "status": "failed" if containers or networks or volumes else "passed",
+        "completed_at": time.time(),
+        "containers": containers,
+        "networks": networks,
+        "volumes": volumes,
+    }
+    return receipt
+
+
 def run_lab(args):
     """No pull/build/network fallback is permitted in this phase."""
     receipt = json.loads((ROOT / ".lab" / f"prepared-{args.ha_version}.json").read_text())
@@ -175,6 +197,13 @@ def run_lab(args):
     staging.mkdir(parents=True, mode=0o700)
     control.mkdir(mode=0o700)
     artifacts.mkdir(mode=0o700)
+    if getattr(args, "trace", None):
+        # Only validated, normalized JSON enters the private offline lab. Never
+        # mount the external export or its parent directory into a container.
+        from tests.lab.shadow_trace import load_trace
+
+        atomic_text(control / "shadow-input.json", Path(args.trace).read_text())
+        load_trace(control / "shadow-input.json")
     subnet, ha_address = select_subnet()
     env = dict(
         os.environ,
@@ -186,6 +215,7 @@ def run_lab(args):
             "LAB_SUBNET": subnet,
             "LAB_HA_ADDRESS": ha_address,
             "LAB_SCENARIO": args.scenario,
+            "LAB_ARTIFACT_SHA256": archive_digest,
             "HA_LAB_IMAGE": receipt["images"]["ha"],
             "SIM_LAB_IMAGE": receipt["images"]["simulator"],
             "RUNNER_LAB_IMAGE": receipt["images"]["runner"],
@@ -318,6 +348,12 @@ def run_lab(args):
                     write_json(artifacts / "summary.json", result)
                     raise RuntimeError("Lab disposal failed; evidence remains in private staging")
                 result["cleanup"] = "passed"
+                cleanup = verify_cleanup(run_id)
+                write_json(artifacts / "cleanup-verification.json", cleanup)
+                if cleanup["status"] != "passed":
+                    result.update(status="failed", cleanup="failed")
+                    write_json(artifacts / "summary.json", result)
+                    raise RuntimeError("Scoped Docker objects survived teardown")
             else:
                 result["cleanup"] = "retained_by_request"
             write_json(artifacts / "summary.json", result)
@@ -339,6 +375,7 @@ def run_lab(args):
         finally:
             secret_receipt.unlink(missing_ok=True)
             (control / ".secrets.tmp").unlink(missing_ok=True)
+    return published
 
 
 def main():
@@ -347,7 +384,9 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("command", choices=("prepare", "test"))
     parser.add_argument("--ha-version", choices=SUPPORTED, default=SUPPORTED[0])
-    parser.add_argument("--scenario", choices=("smoke", "cover", "all", "soak"), default="all")
+    parser.add_argument(
+        "--scenario", choices=("smoke", "cover", "all", "soak", "shadow", "replay"), default="all"
+    )
     parser.add_argument("--timeout", type=float, default=900)
     parser.add_argument("--keep", action="store_true", help="Keep failed lab for inspection")
     args = parser.parse_args()

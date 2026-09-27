@@ -14,6 +14,8 @@ The [validation record](docs/scenarios.md#release-validation-record) identifies 
 tested archive and the limits of this evidence. Automated results are available
 in [GitHub Actions](https://github.com/mikz/ha-operator/actions/workflows/validate.yml).
 Development requires Python 3.14.2 or later within Python 3.14.
+The [0.1.1 release notes](docs/releases/0.1.1.md) describe shadow observation and
+link to its release-specific evidence.
 
 ## Control behavior
 
@@ -42,13 +44,85 @@ Managed entities report observed state. An accepted request or successful Home
 Assistant action does not mean that a device moved. See the
 [architecture and acknowledgement boundaries](docs/architecture.md).
 
+## Record a passive shadow trace
+
+Version 0.1.1 adds three integration options:
+
+- `shadow_lock` forces every resource into observe mode and rejects selecting
+  live mode. The lock survives reload and restart because it is saved in the
+  integration options. It defaults to disabled.
+- `trace_enabled` records the configured inputs and decisions in a bounded,
+  integration-owned journal. Enabling tracing does not activate a resource.
+  It defaults to disabled.
+- `trace_entities` selects additional entities to record. It defaults to an empty
+  list and does not give HA Operator control of those entities.
+
+For passive observation, enable `trace_enabled` and `shadow_lock` when adding
+the integration or editing its options in **Settings > Devices & services**. Keep the existing
+automations as the actuator owners. The lock suppresses HA Operator commands;
+it does not block commands from those automations or other integrations.
+
+Disabling the lock is an explicit change to the integration options. Before
+doing so, inspect every resource's stored mode and accepted intent, and complete
+the [ownership-transfer procedure](docs/migration.md). Loading a locked
+integration saves its resources in observe mode. Unlocking alone does not restore
+their previous live modes; activate each resource explicitly when it is ready.
+
+Use the admin-only `ha_operator.export_trace` action with response data to retrieve the
+sanitized journal. `after` is the last sequence number you processed; omit it
+for the first page. `limit` defaults to 100 and accepts 1–1000 records; each page
+also has a 1 MiB size cap. Follow `next_after` while `more` is true. The
+`through_sequence` field identifies the sequence tip captured for that export.
+Each response includes the schema version, integration version, component and
+configuration hashes, records, pagination, and journal health.
+Tracing disabled returns an empty record list and `health.enabled: false`.
+
+Records retain the configured input fields, accepted intent, decisions, and
+dispatch context with pseudonymous identifiers. They omit arbitrary entity
+attributes, names, and credentials. A new session has a configuration and intent
+snapshot. Sequence numbers continue across sessions. The journal reports dropped
+records, write errors, rotation, heartbeat time, and cursor gaps; an incomplete
+trace is not complete evidence of behavior.
+
+The journal uses a queue of at most 512 records, a 64 KiB limit per record,
+32 rotating 2 MiB files, and a 60-second heartbeat. Recording and export do not
+create manual ownership. A raw report or a correlated context is evidence of a
+report or command path, not physical confirmation or proof of human intent.
+
+Observe-mode decisions use the inputs that actually arrived. They do not predict
+how the house would respond to commands that HA Operator did not issue. Evaluate
+that behavior separately with the isolated replay and simulator scenarios in the
+[scenario catalog](docs/scenarios.md#shadow-observation-and-replay).
+
+To inspect an exported trace, save a response as `sanitized-trace.json`, or wrap
+all pages as `{"schema": 1, "pages": [...]}`. Validate it before preparing a replay:
+
+```sh
+uv run python scripts/shadow_replay.py validate sanitized-trace.json
+```
+
+After [preparing the isolated lab](#develop-and-validate) with the same release
+component, replay the trace against that exact archive:
+
+```sh
+uv run python scripts/shadow_replay.py run sanitized-trace.json --ha-version 2026.9.3
+```
+
+The replay report compares recorded engine-input snapshots and results at their
+recorded times. It flags missing session ancestry, gaps, and incomplete snapshots.
+The native HA probe separately loads the last recorded state for each entity
+while the shadow lock is active; it uses the lab's current clock. It does not
+reproduce historical native timers or HomeKit delivery. Both steps preserve
+their scope in `artifacts/lab/<run_id>/shadow-replay.json`; physical consequences
+from the original recording remain `not_observed`.
+
 ## Install a release archive
 
 Keep the existing actuator configuration and automations available for rollback.
 Follow the [migration runbook](docs/migration.md) before enabling live control.
 
 1. Download `ha_operator.zip` and `ha_operator.manifest.json` from the same
-   [release](https://github.com/mikz/ha-operator/releases/tag/v0.1.0). Verify the
+   [release](https://github.com/mikz/ha-operator/releases/latest). Verify the
    archive against the manifest and preserve its hash with the release evidence.
    Local builds place these files under `dist/`.
 2. Extract the archive into Home Assistant's
@@ -69,7 +143,7 @@ an actuator that lacks it.
 
 ## Integration actions
 
-The integration registers six actions. Resource actions accept either one
+The integration registers seven actions. Resource actions accept either one
 `resource_id` or one managed `entity_id`, never both. `config_entry_id` is
 optional for the singleton integration.
 
@@ -81,6 +155,7 @@ optional for the singleton integration.
 | `ha_operator.skip_occurrence` | Mark the specified `policy_id` and `occurrence_id` skipped through its supplied UTC Unix `expires_at`. |
 | `ha_operator.reconcile` | Reevaluate one resource, or all resources when no target is supplied. Existing mode, lease, fault, and command guards still apply. |
 | `ha_operator.explain` | Return response data for one resource, or all resources: revision, fault, decision, observation, manual lease, last command, attempts, and requirements. |
+| `ha_operator.export_trace` | Admin-only action that returns a sanitized, versioned journal page. Accepts optional `config_entry_id`, `after`, and `limit`; does not accept a resource target or change control state. |
 
 For `request`, `mode` defaults to `target`, which needs a capability-valid `target`
 object. `hands_off` forbids a target. Choose at most one of `duration` in seconds,
@@ -139,8 +214,11 @@ uv run python scripts/release.py verify --against-source
 
 The build produces `dist/ha_operator.zip` and a manifest with archive and file
 hashes, the version, the source revision, and dependency-lock digests. A differing
-existing archive requires explicit replacement. After a replacement, rerun every
+existing archive or manifest requires explicit replacement. After a replacement, rerun every
 artifact-dependent gate. Publish the exact archive that passed acceptance.
+The manifest also records an installed-component fingerprint over the Python,
+JSON, and YAML files. Trace export uses this fingerprint to identify the installed
+code independently of ZIP metadata. It does not replace the archive hash.
 
 Prepare images before testing the isolated runtime:
 
@@ -157,6 +235,9 @@ isolation evidence, simulator effects journal, HomeKit transcript, browser
 evidence, logs, and crash records. Each scenario needs an explicit outcome;
 unavailable or unexecuted checks are not passes. See the
 [scenario-to-layer mapping](docs/scenarios.md) for the required behavior.
+Full runs also preserve exported shadow traces, replay results, and the scoped
+Docker cleanup receipt. A release bundle rejects missing scenarios, incomplete
+traces used for replay, and evidence for another archive.
 
 ## Documentation
 
@@ -169,3 +250,5 @@ unavailable or unexecuted checks are not passes. See the
 - [Examples](examples/README.md): resource, policy, and requirement data.
 - [Development boundary contract](docs/development-contract.md): shared internal
   interfaces and ownership.
+- [0.1.1 release notes](docs/releases/0.1.1.md): shadow observation changes and
+  release-specific validation.

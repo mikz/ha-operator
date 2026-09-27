@@ -230,3 +230,35 @@ explain:
       selector:
         config_entry:
           integration: ha_operator
+export_trace:
+  name: Export recorded trace
+  description: Administrator-only export of one page of sanitized, locally recorded decision and observation events.
+    Records have durable sequence numbers. Use next_after as the next request cursor; inspect gap and health before
+    treating the trace as complete. This action never commands a device.
+  fields:
+    after:
+      name: After sequence
+      description: Return records after this durable sequence number. Omit to begin with the oldest retained record.
+      selector:
+        number:
+          min: 0
+          max: 9007199254740991
+          step: 1
+          mode: box
+    limit:
+      name: Page size
+      description: Maximum records to return, from 1 to 1000.
+      default: 100
+      selector:
+        number:
+          min: 1
+          max: 1000
+          step: 1
+          mode: box
+    config_entry_id:
+      name: Configuration entry
+      description: Optional entry selector. Defaults to the single HA Operator integration.
+      advanced: true
+      selector:
+        config_entry:
+          integration: ha_operator

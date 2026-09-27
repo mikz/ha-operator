@@ -57,6 +57,27 @@ def _status(value: Any) -> str:
     return value if isinstance(value, str) and value in _STATUSES else "unknown"
 
 
+def _trace_health(value: dict[str, Any]) -> dict[str, Any]:
+    """Export health counters only; raw records and paths belong outside diagnostics."""
+    return {
+        **{key: value.get(key) is True for key in ("enabled", "healthy", "complete")},
+        **{
+            key: _number(value.get(key))
+            for key in (
+                "last_sequence",
+                "durable_sequence",
+                "queued_records",
+                "dropped_records",
+                "write_errors",
+                "rotations",
+                "last_heartbeat",
+                "last_write_at",
+            )
+        },
+        "session": _identifier(value.get("session_id")),
+    }
+
+
 async def async_get_config_entry_diagnostics(hass: Any, entry: Any) -> dict[str, Any]:
     """Export structural evidence only; never call devices or alter runtime state."""
     runtime = entry.runtime_data
@@ -117,6 +138,8 @@ async def async_get_config_entry_diagnostics(hass: Any, entry: Any) -> dict[str,
     return {
         "version": 1,
         "faulted": bool(runtime.fault),
+        "shadow_locked": bool(runtime.shadow_locked),
+        "trace": _trace_health(runtime.trace_health()),
         "resources": resources,
         "policies": {
             _identifier(key): {"enabled": bool(runtime.policy_enabled(key))}

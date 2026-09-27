@@ -15,7 +15,7 @@ from typing import Any
 from uuid import uuid4
 
 from homeassistant.components import persistent_notification
-from homeassistant.core import HomeAssistant, callback
+from homeassistant.core import HassJob, HomeAssistant, callback
 from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
 from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.event import (
@@ -42,6 +42,7 @@ from .core import (
     evaluate,
     evaluate_evidence,
 )
+from .shadow import ShadowTrace
 from .storage import IntentStore, IntentStoreError
 
 _LOGGER = logging.getLogger(__name__)
@@ -123,6 +124,8 @@ class OperatorRuntime:
         self.resources = configured["resources"]
         self.policies = configured["policies"]
         self.requirements = configured["requirements"]
+        self._shadow_lock_latched = bool(entry.options.get("shadow_lock", False))
+        self._trace = ShadowTrace(hass, entry, configured, entry.options.get("trace_entities", []))
         self.store = IntentStore(hass, Path(hass.config.path(f"ha_operator.{entry.entry_id}.json")))
         self.observations: dict[str, Any] = {}
         self.decisions: dict[str, Decision] = {}
@@ -135,6 +138,9 @@ class OperatorRuntime:
         self._adapters = {
             key: create_adapter(hass, key, config) for key, config in self.resources.items()
         }
+        if self._trace.enabled:
+            for adapter in self._adapters.values():
+                adapter.audit_callback = lambda data: self._trace.event("dispatch", data)
         self._listeners: set[Callable[[], None]] = set()
         self._unsubscribers: list[Callable[[], None]] = []
         self._timers: dict[str, Callable[[], None]] = {}
@@ -155,7 +161,10 @@ class OperatorRuntime:
         self._memory: dict[str, Any] = {}
         self._closed = False
         self._state = self.store.state
-        self._observed_entities = self._input_entities()
+        self._decision_input_entities = self._input_entities()
+        self._observed_entities = self._decision_input_entities | (
+            self._trace.sanitizer.attrs.keys() if self._trace.enabled else set()
+        )
 
     def _input_entities(self) -> set[str]:
         ids: set[str] = set()
@@ -178,6 +187,12 @@ class OperatorRuntime:
         try:
             await self.store.async_load(expected_existing=self.entry.data.get("initialized", False))
             _validate_saved_state(self.store.state)
+            if self.shadow_locked and any(
+                self.store.state["modes"].get(key) == "live" for key in self.resources
+            ):
+                await self.store.async_update(
+                    lambda state: state["modes"].update(dict.fromkeys(self.resources, "observe"))
+                )
             if not self.entry.data.get("initialized"):
                 await self.store.async_update(lambda _: None)
                 self.hass.config_entries.async_update_entry(
@@ -202,6 +217,8 @@ class OperatorRuntime:
             self._storage_fault(err)
         else:
             self._state = self.store.state
+        await self._trace.async_start(self._state, self.shadow_locked)
+        self._unsubscribers.append(self.hass.async_add_shutdown_job(HassJob(self.async_close)))
         if self._observed_entities:
             self._unsubscribers.append(
                 async_track_state_change_event(
@@ -213,6 +230,13 @@ class OperatorRuntime:
                     self.hass, self._observed_entities, self._input_changed
                 )
             )
+        if self._trace.enabled:
+            self._unsubscribers.append(
+                self.hass.bus.async_listen("homekit_state_change", self._external_command)
+            )
+            for entity_id in sorted(self._trace.sanitizer.attrs):
+                self._trace.input(entity_id, self.hass.states.get(entity_id), "initial")
+            self._trace.record("snapshot_end", {"entities": len(self._trace.sanitizer.attrs)})
         self._recompute()
         self._tasks = [
             self.entry.async_create_background_task(
@@ -248,7 +272,27 @@ class OperatorRuntime:
             task.cancel()
         await asyncio.gather(*self._tasks, return_exceptions=True)
         await asyncio.gather(*self._stop_tasks, return_exceptions=True)
+        # A lock observed by this instance cannot be undone by an options race
+        # before reload. Save observe before a replacement can start unlocked.
+        if (
+            self.shadow_locked
+            and not self.fault
+            and not self.store.fault
+            and any(self.store.state["modes"].get(key) == "live" for key in self.resources)
+        ):
+            try:
+                await self.store.async_update(
+                    lambda state: state["modes"].update(dict.fromkeys(self.resources, "observe"))
+                )
+            except IntentStoreError as err:
+                self._storage_fault(err)
+                # Direct options mutations can bypass the native unlock flow.
+                # Retain the lock for the replacement if demotion was uncertain.
+                self.hass.config_entries.async_update_entry(
+                    self.entry, options={**self.entry.options, "shadow_lock": True}
+                )
         await self.store.async_close()
+        await self._trace.async_close()
         self._listeners.clear()
 
     @callback
@@ -265,7 +309,29 @@ class OperatorRuntime:
         return self._adapters[resource_id]
 
     def mode(self, resource_id: str) -> str:
+        if self.shadow_locked:
+            return "observe"
         return self._state["modes"].get(resource_id, "observe")
+
+    @property
+    def shadow_locked(self) -> bool:
+        self._shadow_lock_latched |= bool(self.entry.options.get("shadow_lock", False))
+        return self._shadow_lock_latched
+
+    def trace_health(self) -> dict:
+        return self._trace.health()
+
+    async def async_export_trace(self, *, after: int | None = None, limit: int = 100) -> dict:
+        return await self._trace.async_export(after, limit)
+
+    async def async_prepare_unlock(self) -> None:
+        """Durably demote all resources before the options flow removes its lock."""
+        if self._closed:
+            raise HomeAssistantError("HA Operator is unloaded")
+        if self.shadow_locked:
+            await self._commit(
+                lambda state: state["modes"].update(dict.fromkeys(self.resources, "observe"))
+            )
 
     def policy_enabled(self, policy_id: str) -> bool:
         return self._state["policy_enabled"].get(policy_id, True)
@@ -313,11 +379,18 @@ class OperatorRuntime:
             translation_key="storage_error",
         )
 
-    async def _commit(self, mutator: Callable[[dict], None]) -> dict:
+    async def _commit(self, mutator: Callable[[dict], None], admission=None) -> dict:
         if self.fault or self.store.fault:
             raise HomeAssistantError("HA Operator storage is inhibited; inspect Repairs")
+        candidate = None
+
+        def own_mutation(state):
+            nonlocal candidate
+            mutator(state)
+            candidate = state
+
         try:
-            return await self.store.async_update(mutator)
+            return await self.store.async_update(own_mutation)
         except IntentStoreError as err:
             self._storage_fault(err)
             raise HomeAssistantError("Request persistence failed; actuation inhibited") from err
@@ -326,6 +399,14 @@ class OperatorRuntime:
             # before cancellation escapes, so always observe the committed revision.
             if not self.fault:
                 self._state = self.store.state
+                if (
+                    admission is not None
+                    and candidate is not None
+                    and candidate["revision"] <= self._state["revision"]
+                ):
+                    self._trace.event(
+                        "admission", {**admission(candidate), "revision": candidate["revision"]}
+                    )
             if not self._closed:
                 self._recompute()
                 self._wake_all()
@@ -390,8 +471,10 @@ class OperatorRuntime:
             ).encode()
         ).hexdigest()
         receipt = {"request_id": request_id, "resource_id": resource_id, "expires_at": expiry}
+        replayed = False
 
         def mutate(state):
+            nonlocal replayed
             # Admission can wait behind another write; observe mode or unload
             # may have changed while the request was queued.
             self._admit(resource_id)
@@ -400,6 +483,7 @@ class OperatorRuntime:
                 if existing["fingerprint"] != fingerprint:
                     raise ServiceValidationError("request_id was already used for different intent")
                 receipt.update(existing["receipt"])
+                replayed = True
                 return
             if expiry is not None and expiry <= _now():
                 raise ServiceValidationError("expires_at must be in the future")
@@ -412,12 +496,23 @@ class OperatorRuntime:
             }
             state["requests"][request_id] = {"fingerprint": fingerprint, "receipt": receipt}
 
-        await self._commit(mutate)
+        await self._commit(
+            mutate,
+            lambda state: {
+                "action": "request",
+                "resource_id": resource_id,
+                "manual": state["manuals"].get(resource_id),
+                "replayed": replayed,
+            },
+        )
         return {**receipt, "accepted": True}
 
     async def async_release(self, resource_id: str) -> None:
         self._resource(resource_id)
-        await self._commit(lambda state: state["manuals"].pop(resource_id, None))
+        await self._commit(
+            lambda state: state["manuals"].pop(resource_id, None),
+            lambda state: {"action": "release", "resource_id": resource_id},
+        )
         self._emergency_hands_off.pop(resource_id, None)
         self._recompute()
         self._wake_all()
@@ -463,7 +558,14 @@ class OperatorRuntime:
             }
 
         try:
-            await self._commit(mutate)
+            await self._commit(
+                mutate,
+                lambda state: {
+                    "action": "stop",
+                    "resource_id": resource_id,
+                    "manual": state["manuals"][resource_id],
+                },
+            )
             emergency = self._emergency_hands_off.get(resource_id)
             if emergency is not None and emergency.request_id == stop_id:
                 self._emergency_hands_off.pop(resource_id)
@@ -476,7 +578,11 @@ class OperatorRuntime:
                 async def finish_stop():
                     async with actuator_lock:
                         lease = self.manual(resource_id)
-                        if lease is not None and lease.request_id == stop_id:
+                        if (
+                            lease is not None
+                            and lease.request_id == stop_id
+                            and self.mode(resource_id) == "live"
+                        ):
                             await self.adapter(resource_id).async_stop()
                             return True
                     return False
@@ -495,7 +601,20 @@ class OperatorRuntime:
         self._resource(resource_id)
         if mode not in {"observe", "live"}:
             raise ServiceValidationError("mode must be observe or live")
-        await self._commit(lambda state: state["modes"].__setitem__(resource_id, mode))
+
+        def mutate(state):
+            if mode == "live" and self.shadow_locked:
+                raise ServiceValidationError("Shadow lock prohibits live control")
+            state["modes"][resource_id] = mode
+
+        await self._commit(
+            mutate,
+            lambda state: {
+                "action": "set_mode",
+                "resource_id": resource_id,
+                "mode": mode,
+            },
+        )
 
     async def async_set_policy_enabled(self, policy_id: str, enabled: bool) -> None:
         if policy_id not in self.policies or not isinstance(enabled, bool):
@@ -508,7 +627,14 @@ class OperatorRuntime:
                     if occurrence["policy_id"] == policy_id:
                         occurrence["skipped"] = True
 
-        await self._commit(mutate)
+        await self._commit(
+            mutate,
+            lambda state: {
+                "action": "set_policy_enabled",
+                "policy_id": policy_id,
+                "enabled": enabled,
+            },
+        )
 
     def _occurrence(self, policy_id, occurrence_id, expires_at):
         config = self.policies.get(policy_id)
@@ -530,6 +656,7 @@ class OperatorRuntime:
             raise ServiceValidationError("Occurrence target is unavailable")
 
         def mutate(state):
+            self._admit(config["resource_id"])
             if key not in state["occurrences"]:
                 state["occurrences"][key] = {
                     "policy_id": policy_id,
@@ -539,7 +666,14 @@ class OperatorRuntime:
                     "skipped": not self.policy_enabled(policy_id) or not self._eligible(config),
                 }
 
-        await self._commit(mutate)
+        await self._commit(
+            mutate,
+            lambda state: {
+                "action": "submit_occurrence",
+                "policy_id": policy_id,
+                "occurrence": state["occurrences"][key],
+            },
+        )
         return dict(self._state["occurrences"][key])
 
     async def async_skip_occurrence(self, policy_id, occurrence_id, expires_at) -> None:
@@ -556,7 +690,14 @@ class OperatorRuntime:
             )
             item["skipped"] = True
 
-        await self._commit(mutate)
+        await self._commit(
+            mutate,
+            lambda state: {
+                "action": "skip_occurrence",
+                "policy_id": policy_id,
+                "occurrence": state["occurrences"][key],
+            },
+        )
 
     async def async_reconcile(self, resource_id: str | None = None) -> None:
         if resource_id is not None:
@@ -659,9 +800,50 @@ class OperatorRuntime:
     def _input_changed(self, event) -> None:
         if self._closed:
             return
+        if self._trace.enabled and hasattr(event, "data"):
+            entity_id = event.data.get("entity_id")
+            self._trace.input(
+                entity_id,
+                event.data.get("new_state"),
+                event.event_type,
+                event.time_fired.timestamp(),
+                event.context,
+                event.data.get("old_last_reported"),
+                event.data.get("last_reported"),
+            )
+            if entity_id not in self._decision_input_entities:
+                return
         self._recompute()
         self._wake_all()
         self._notify()
+
+    @callback
+    def _external_command(self, event) -> None:
+        data = event.data
+        entity_id = data.get("entity_id")
+        if entity_id not in self._trace.sanitizer.attrs or data.get("service") not in {
+            "open_cover",
+            "close_cover",
+            "stop_cover",
+            "set_cover_position",
+            "turn_on",
+            "turn_off",
+            "set_percentage",
+            "set_direction",
+        }:
+            return
+        self._trace.event(
+            "external_command",
+            {
+                "source": "homekit",
+                "entity_id": entity_id,
+                "service": data["service"],
+                "value": data.get("value"),
+                "context_id": event.context.id,
+                "evidence": "bridge_request",
+                "at": event.time_fired.timestamp(),
+            },
+        )
 
     @callback
     def _wake_all(self) -> None:
@@ -707,7 +889,7 @@ class OperatorRuntime:
             self._storage_fault(err)
             manuals, occurrences = [], []
             resources = {key: replace(item, fault=self.fault) for key, item in resources.items()}
-        result = evaluate(
+        engine = dict(
             now=now,
             resources=resources,
             observations=self.observations,
@@ -730,6 +912,20 @@ class OperatorRuntime:
             ],
             requirement_memory=self._memory,
         )
+        result = evaluate(**engine)
+        trace_engine = None
+        if self._trace.enabled:
+            trace_engine = {
+                "now": now,
+                **{
+                    key: {identifier: asdict(value) for identifier, value in engine[key].items()}
+                    for key in ("resources", "observations", "requirement_memory")
+                },
+                **{
+                    key: [asdict(value) for value in engine[key]]
+                    for key in ("manuals", "policies", "occurrences", "requirements")
+                },
+            }
         previous = self.decisions
         self.decisions = dict(result.decisions)
         for key, decision in self.decisions.items():
@@ -817,6 +1013,24 @@ class OperatorRuntime:
         if result.next_evaluation is not None:
             self._deadline_timer = async_call_later(
                 self.hass, max(0.01, result.next_evaluation - now), self._input_changed
+            )
+
+        if trace_engine is not None:
+            self._trace.event(
+                "decision",
+                {
+                    **self.explain(),
+                    "engine": trace_engine,
+                    "engine_result": {
+                        "decisions": {
+                            key: asdict(value) for key, value in result.decisions.items()
+                        },
+                        "requirements": {
+                            key: asdict(value) for key, value in result.requirements.items()
+                        },
+                        "next_evaluation": result.next_evaluation,
+                    },
+                },
             )
 
     def _schedule(self, resource_id: str, when: float) -> None:
@@ -944,6 +1158,7 @@ class OperatorRuntime:
         return {
             "revision": self._state["revision"],
             "fault": self.fault,
+            "shadow_locked": self.shadow_locked,
             "resources": {
                 key: {
                     "mode": self.mode(key),

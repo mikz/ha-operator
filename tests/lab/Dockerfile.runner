@@ -8,5 +8,7 @@ RUN PLAYWRIGHT_DOWNLOAD_CONNECTION_TIMEOUT=120000 python -m playwright install c
 WORKDIR /app
 COPY tests/__init__.py /app/tests/__init__.py
 COPY tests/lab /app/tests/lab
+COPY dist/ha_operator.zip /opt/ha-operator/ha_operator.zip
+COPY dist/ha_operator.manifest.json /opt/ha-operator/ha_operator.manifest.json
 COPY tests/lab/gate.py /lab/gate.py
 ENV PYTHONUNBUFFERED=1

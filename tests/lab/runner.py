@@ -84,6 +84,16 @@ class HA:
     async def add_resource(self, entry, data):
         return await self.add_subentry(entry, "resource", data)
 
+    async def options(self, entry, data):
+        flow = await self.request(
+            "POST", "/api/config/config_entries/options/flow", {"handler": entry}
+        )
+        result = await self.request(
+            "POST", "/api/config/config_entries/options/flow/" + flow["flow_id"], data
+        )
+        assert result["type"] == "create_entry", result
+        return result
+
     async def add_subentry(self, entry, kind, data):
         flow = await self.request(
             "POST",
@@ -539,8 +549,25 @@ class Lab:
                 "policies",
                 "requirements",
                 "history",
+                "shadow_locked",
+                "trace",
             }, data.keys()
             assert data["version"] == 1 and isinstance(data["faulted"], bool)
+            assert isinstance(data["shadow_locked"], bool)
+            assert set(data["trace"]) == {
+                "enabled",
+                "healthy",
+                "complete",
+                "last_sequence",
+                "durable_sequence",
+                "queued_records",
+                "dropped_records",
+                "write_errors",
+                "rotations",
+                "last_heartbeat",
+                "last_write_at",
+                "session",
+            }
             assert len(data["history"]) <= 100
             for collection in ("resources", "policies", "requirements"):
                 assert all(re.fullmatch(r"[0-9a-f]{12}", key) for key in data[collection])
@@ -679,6 +706,17 @@ async def main():
             lab = Lab(session, page)
             try:
                 await lab.bootstrap()
+                if os.environ["LAB_SCENARIO"] == "replay":
+                    from .scenarios_shadow import run_external_replay
+
+                    await run_external_replay(lab)
+                    return
+                if os.environ["LAB_SCENARIO"] == "shadow":
+                    from .scenarios_shadow import run_shadow_scenarios
+
+                    await run_shadow_scenarios(lab)
+                    await lab.diagnostics()
+                    return
                 if os.environ["LAB_SCENARIO"] == "soak":
                     await lab.soak()
                     return
@@ -699,6 +737,12 @@ async def main():
                     from .scenarios_airflow import run_airflow_scenarios
 
                     await run_airflow_scenarios(lab)
+                    from .scenarios_cellar import run_cellar_scenarios
+                    from .scenarios_shadow import observe, run_shadow_scenarios
+
+                    await observe(lab, locked=False)
+                    await run_cellar_scenarios(lab)
+                    await run_shadow_scenarios(lab)
                 await lab.diagnostics()
             finally:
                 if lab.hap:
