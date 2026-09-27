@@ -764,6 +764,36 @@ def test_export_byte_budget_does_not_claim_tail_is_complete(tmp_path, monkeypatc
     assert second["records"][0]["sequence"] == 2
 
 
+def test_export_byte_budget_keeps_large_then_small_records_in_contiguous_pages(
+    tmp_path, monkeypatch
+):
+    records = [
+        row(1, data={"padding": "x" * 220}),
+        row(2, data={"padding": "x" * 300}),
+        row(3),
+    ]
+    # The first page can fit 1+3, but not 1+2. Skipping 2 would make its
+    # sequence unreachable once the caller resumes after the returned cursor.
+    budget = sum(
+        len((json.dumps(record, separators=(",", ":")) + "\n").encode())
+        for record in records[1:]
+    )
+    monkeypatch.setattr(shadow, "EXPORT_BYTES", budget)
+    disk = TraceDisk(tmp_path / "trace")
+    disk.load()
+    disk.append(records)
+
+    first = disk.export(None, 100, through=3)
+    assert [record["sequence"] for record in first["records"]] == [1]
+    assert first["next_after"] == 1
+    assert first["more"] is True and first["gap"] is False
+
+    second = disk.export(first["next_after"], 100, through=3)
+    assert [record["sequence"] for record in second["records"]] == [2, 3]
+    assert second["next_after"] == 3
+    assert second["more"] is False and second["gap"] is False
+
+
 def test_duplicate_sequence_is_bad_evidence_without_losing_later_rows(tmp_path):
     disk = TraceDisk(tmp_path / "trace")
     disk.load()

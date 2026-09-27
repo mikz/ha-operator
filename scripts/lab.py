@@ -63,6 +63,14 @@ def pinned_image(reference):
     return data["RepoDigests"][0]
 
 
+def image_references(ha_version, digest):
+    """Keep each prepared version reachable when another version is prepared."""
+    return {
+        role: f"ha-operator-lab-{role}:{ha_version}-{digest[:12]}"
+        for role in ("ha", "simulator", "runner")
+    }
+
+
 def prepare(args):
     """Only this phase is allowed to fetch/build dependencies."""
     command([sys.executable, "scripts/release.py", "verify"], capture=False)
@@ -87,11 +95,7 @@ def prepare(args):
     (prepared_dir / "requirements-sim.txt").write_text(requirements + "\n")
     ha_base = pinned_image(f"ghcr.io/home-assistant/home-assistant:{args.ha_version}")
     python_base = pinned_image("python:3.14.2-slim-bookworm")
-    references = {
-        "ha": f"ha-operator-lab-ha:{args.ha_version}-{digest[:12]}",
-        "simulator": "ha-operator-lab-simulator:local",
-        "runner": "ha-operator-lab-runner:local",
-    }
+    references = image_references(args.ha_version, digest)
     for role, reference in references.items():
         command(
             [

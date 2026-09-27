@@ -474,7 +474,7 @@ class TraceDisk:
                             and (after is None or maximum > after)
                             and (through is None or maximum <= through)
                         ):
-                            if len(records) >= limit or (
+                            if more or len(records) >= limit or (
                                 records and size + len(line) > EXPORT_BYTES
                             ):
                                 more = True

@@ -5,6 +5,15 @@ import pytest
 from scripts import lab
 
 
+def test_prepared_versions_and_artifacts_do_not_replace_each_others_image_tags():
+    versions = [lab.image_references(version, "a" * 64) for version in lab.SUPPORTED]
+    assert set(versions[0].values()).isdisjoint(versions[1].values())
+    assert set(versions[0].values()).isdisjoint(
+        lab.image_references(lab.SUPPORTED[0], "b" * 64).values()
+    )
+    assert set(versions[0]) == {"ha", "simulator", "runner"}
+
+
 @pytest.mark.parametrize("remaining", [None, "containers", "networks", "volumes"])
 def test_cleanup_receipt_queries_scoped_objects(monkeypatch, remaining):
     calls = []
