@@ -11,6 +11,33 @@ from typing import Any
 from .scenarios_airflow import _AirflowScenarios
 
 
+async def run_cellar_debug(lab: Any) -> None:
+    """Establish the extraction baseline for the standalone diagnostic scope."""
+    from .runner import eventually
+    from .scenarios_shadow import observe
+
+    await lab.ha.service(
+        "fan", "set_direction", {"entity_id": "fan.sim_exhaust", "direction": "forward"}
+    )
+    await lab.ha.service(
+        "fan", "turn_on", {"entity_id": "fan.sim_exhaust", "percentage": 100}
+    )
+    await eventually(
+        lambda: lab.physical("exhaust"),
+        lambda state: state["on"]
+        and state["percentage"] == 100
+        and state["direction"] == "forward",
+    )
+    await eventually(
+        lambda: lab.ha.state("fan.sim_exhaust"),
+        lambda state: state["state"] == "on"
+        and state["attributes"].get("percentage") == 100
+        and state["attributes"].get("direction") == "forward",
+    )
+    await observe(lab, locked=False)
+    await run_cellar_scenarios(lab)
+
+
 async def run_cellar_scenarios(lab: Any) -> None:
     from .runner import ARTIFACTS, eventually
 

@@ -53,6 +53,8 @@ _ATTRIBUTES = {
     "next_update",
 }
 _METADATA_ATTRIBUTES = {"supported_features", "assumed_state", "restored", "optimistic"}
+# Dynamic policy fields admitted by configuration.validate_policy.
+_POLICY_TARGET_FIELDS = {"position", "on", "percentage", "direction"}
 _SAFE_VALUES = {
     "on",
     "off",
@@ -97,6 +99,9 @@ _SAFE_VALUES = {
     "stop",
     "active",
     "paused",
+    "direction",
+    "percentage",
+    "profile",
     "homekit",
     "bridge_request",
 }
@@ -532,6 +537,12 @@ def _configuration(value: Any) -> dict:
             if group == "policies":
                 _alias(item.get("resource_id"), "r_")
                 _require(item["resource_id"] in config["resources"], "Unknown policy resource")
+                if "target_field" in item:
+                    _require(
+                        type(item["target_field"]) is str
+                        and item["target_field"] in _POLICY_TARGET_FIELDS,
+                        "Invalid policy target field",
+                    )
             for field in ("outputs", "activation_entities"):
                 if field in item:
                     _require(type(item[field]) is list, "Expected entity list")

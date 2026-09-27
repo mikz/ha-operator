@@ -1103,6 +1103,15 @@ class OperatorRuntime:
                 _LOGGER.debug("Resource %s delivery failed: %s", resource_id, err)
             finally:
                 self._applying.discard(resource_id)
+                # A relay transaction may spend longer than the retry interval
+                # awaiting off feedback, dead time, or a slow transport. Give
+                # its final effects a full observation interval before retrying.
+                # Telemetry never moves this completion-based pacing boundary.
+                self._last_send[resource_id] = completed_at = _now()
+                if not self._closed and self._generation[resource_id] == generation:
+                    self.next_attempts[resource_id] = completed_at + max(
+                        config["retry_interval"], config["command_interval"]
+                    )
             if not self._closed:
                 self._recompute()
                 self._notify()

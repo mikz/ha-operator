@@ -389,7 +389,9 @@ def main():
     parser.add_argument("command", choices=("prepare", "test"))
     parser.add_argument("--ha-version", choices=SUPPORTED, default=SUPPORTED[0])
     parser.add_argument(
-        "--scenario", choices=("smoke", "cover", "all", "soak", "shadow", "replay"), default="all"
+        "--scenario",
+        choices=("smoke", "cover", "all", "soak", "cellar", "shadow", "replay"),
+        default="all",
     )
     parser.add_argument("--timeout", type=float, default=900)
     parser.add_argument("--keep", action="store_true", help="Keep failed lab for inspection")

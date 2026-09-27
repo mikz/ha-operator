@@ -734,6 +734,12 @@ async def main():
                     await run_shadow_scenarios(lab)
                     await lab.diagnostics()
                     return
+                if os.environ["LAB_SCENARIO"] == "cellar":
+                    from .scenarios_cellar import run_cellar_debug
+
+                    await run_cellar_debug(lab)
+                    await lab.diagnostics()
+                    return
                 if os.environ["LAB_SCENARIO"] == "soak":
                     await lab.soak()
                     return

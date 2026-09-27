@@ -9,6 +9,8 @@ import zipfile
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+import pytest
+
 from custom_components.ha_operator.runtime import OperatorRuntime
 from tests.lab.replay import replay_trace
 from tests.lab.shadow_trace import load_trace
@@ -117,5 +119,76 @@ async def test_real_recorded_admission_inputs_and_decisions_replay(hass, tmp_pat
         assert report["status"] == "passed", report
         assert report["comparisons"] and all(row["matched"] for row in report["comparisons"])
         assert report["physical_effects"] == "not_observed"
+    finally:
+        await runtime.async_close()
+
+
+@pytest.mark.parametrize(
+    "kind,field,value",
+    [
+        ("cover", "position", "40"),
+        ("switch", "on", "on"),
+        ("fan", "percentage", "50"),
+        ("fan", "direction", "reverse"),
+    ],
+)
+async def test_native_policy_target_field_survives_sanitized_export(
+    hass, tmp_path, kind, field, value
+):
+    """Exercise the production sanitizer and journal for every admitted target field."""
+    hass.config.config_dir = str(tmp_path)
+    entity_id = f"{kind}.physical"
+    hass.states.async_set(
+        entity_id,
+        "closed" if kind == "cover" else "on",
+        {
+            "supported_features": 63,
+            "current_position": 0,
+            "percentage": 0,
+            "direction": "forward",
+        },
+    )
+    hass.states.async_set("sensor.desired", value)
+    literals = ["direction", "percentage", "profile"]
+    extras = [f"sensor.literal_{index}" for index in range(len(literals))]
+    for entity, literal in zip(extras, literals, strict=True):
+        hass.states.async_set(entity, literal)
+    resource = {"name": "Device", "kind": kind, "entity_id": entity_id}
+    if kind == "fan":
+        resource["default_target"] = {"on": True, "percentage": 50, "direction": "forward"}
+    entry = operator_entry(
+        resources={"device": resource},
+        policies={
+            "dynamic": {
+                "name": "Dynamic",
+                "resource_id": "device",
+                "kind": "state",
+                "target_entity": "sensor.desired",
+                "target_field": field,
+            }
+        },
+    )
+    entry.add_to_hass(hass)
+    hass.config_entries.async_update_entry(
+        entry,
+        options={
+            "trace_enabled": True,
+            "shadow_lock": True,
+            "trace_entities": extras,
+        },
+    )
+    runtime = OperatorRuntime(hass, entry)
+    entry.runtime_data = runtime
+    try:
+        await runtime.async_start()
+        await hass.async_block_till_done()
+        exported = await runtime.async_export_trace(limit=1000)
+        path = tmp_path / "trace.json"
+        path.write_text(json.dumps(exported))
+        trace = load_trace(path)
+        assert trace.report["replay_complete"], trace.report["reasons"]
+        assert next(iter(trace.config["policies"].values()))["target_field"] == field
+        states = {record["data"]["state"] for record in trace.records if record["kind"] == "input"}
+        assert set(literals) <= states
     finally:
         await runtime.async_close()

@@ -483,3 +483,35 @@ def test_no_decision_is_explicitly_incomplete():
     result = validate_trace(payload)
     assert result.report["replay_complete"] is False
     assert "engine_decisions_missing" in result.report["reasons"]
+
+
+def _trace_with_policy_target_field(field):
+    payload = make_trace()
+    session = payload["records"][0]["data"]
+    policy_id = "p_" + "6" * 20
+    session["config"]["policies"][policy_id] = {
+        "name": policy_id,
+        "resource_id": RESOURCE,
+        "kind": "state",
+        "target_entity": "sensor.shadow_" + "7" * 20,
+        "target_field": field,
+    }
+    digest = hashlib.sha256(
+        json.dumps(session["config"], sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    payload["config_hash"] = session["config_hash"] = digest
+    return payload
+
+
+@pytest.mark.parametrize("field", ["position", "on", "percentage", "direction"])
+def test_policy_target_fields_preserve_production_enum(field):
+    trace = validate_trace(_trace_with_policy_target_field(field))
+    assert next(iter(trace.config["policies"].values()))["target_field"] == field
+
+
+@pytest.mark.parametrize(
+    "field", ["unknown_field", "profile", "onward", "value_" + "8" * 20, None, True]
+)
+def test_policy_target_field_rejects_unknown_and_sanitized_non_enum_values(field):
+    with pytest.raises(TraceValidationError):
+        validate_trace(_trace_with_policy_target_field(field))
