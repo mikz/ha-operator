@@ -123,6 +123,100 @@ class ArtifactRedactionTests(unittest.TestCase):
         with self.assertRaises(zipfile.BadZipFile):
             sanitize_artifacts(self.root, [])
 
+    def test_unlisted_onboarding_refresh_and_url_credentials_in_nested_trace(self):
+        credentials = {
+            name: name + "-ephemeral-value"
+            for name in ("auth_code", "refresh_token", "access_token", "password", "client_secret")
+        }
+        body = json.dumps(credentials)
+        events = [
+            {"response": credentials, "postData": {"text": body}},
+            {"url": "http://ha:8123/api/brands/icon.png?token=unrecorded-value&size=32"},
+            {"url": "http://ha:8123/auth?code=unrecorded-code&amp;state=keep"},
+        ]
+        nested = io.BytesIO()
+        with zipfile.ZipFile(nested, "w") as archive:
+            archive.writestr("trace.network", "\n".join(map(json.dumps, events)) + "\n")
+        path = self.root / "evidence.zip"
+        with zipfile.ZipFile(path, "w") as archive:
+            archive.writestr("trace.zip", nested.getvalue())
+        with self.assertRaisesRegex(ValueError, "requires redaction"):
+            sanitize_artifacts(self.root, [], check=True)
+        original = path.read_bytes()
+        sanitize_artifacts(self.root, [])
+        self.assertNotEqual(path.read_bytes(), original)
+        with zipfile.ZipFile(path) as outer:
+            with zipfile.ZipFile(io.BytesIO(outer.read("trace.zip"))) as inner:
+                records = [json.loads(line) for line in inner.read("trace.network").splitlines()]
+        self.assertEqual(records[0]["response"], dict.fromkeys(credentials, REDACTED))
+        self.assertEqual(
+            json.loads(records[0]["postData"]["text"]), dict.fromkeys(credentials, REDACTED)
+        )
+        self.assertEqual(
+            records[1]["url"], f"http://ha:8123/api/brands/icon.png?token={REDACTED}&size=32"
+        )
+        self.assertEqual(records[2]["url"], f"http://ha:8123/auth?code={REDACTED}&amp;state=keep")
+        sanitize_artifacts(self.root, [], check=True)
+        cleaned = path.read_bytes()
+        sanitize_artifacts(self.root, [])
+        self.assertEqual(path.read_bytes(), cleaned)
+
+    def test_private_home_paths_and_json_escaped_windows_paths(self):
+        path = self.root / "inspect.json"
+        path.write_text(
+            json.dumps(
+                {
+                    "mount": "/Users/auditor/work/controller/.lab/run",
+                    "source": "/home/operator/project/test.py",
+                    "windows": r"C:\Users\auditor\project\test.py",
+                    "ci": "/home/runner/work/public/project/test.py",
+                }
+            )
+        )
+        sanitize_artifacts(self.root, [])
+        result = json.loads(path.read_text())
+        for name in ("mount", "source", "windows"):
+            self.assertEqual(result[name], "[PRIVATE_PATH]")
+        self.assertEqual(result["ci"], "/home/runner/work/public/project/test.py")
+
+    def test_publication_check_does_not_modify_dirty_evidence(self):
+        path = self.root / "trace.json"
+        path.write_text(json.dumps({"auth_code": "one-time-lab-code"}))
+        original = path.read_bytes()
+        with self.assertRaisesRegex(ValueError, "requires redaction"):
+            sanitize_artifacts(self.root, [], check=True)
+        self.assertEqual(path.read_bytes(), original)
+
+    def test_publication_check_rejects_control_secrets_and_symlinks(self):
+        control = self.root / "control"
+        control.mkdir()
+        receipt = control / "secrets.json"
+        receipt.write_text("[]")
+        with self.assertRaisesRegex(ValueError, "Control data"):
+            sanitize_artifacts(self.root, [], check=True)
+        receipt.unlink()
+        (self.root / "link").symlink_to(control)
+        with self.assertRaisesRegex(ValueError, "Symlink"):
+            sanitize_artifacts(self.root, [], check=True)
+
+    def test_redaction_refuses_colliding_evidence_keys_without_overwriting(self):
+        path = self.root / "coverage.json"
+        path.write_text(json.dumps({"/Users/first/file.py": 1, "/Users/second/file.py": 2}))
+        original = path.read_bytes()
+        with self.assertRaisesRegex(ValueError, "merge JSON"):
+            sanitize_artifacts(self.root, [])
+        self.assertEqual(path.read_bytes(), original)
+
+    def test_redaction_refuses_colliding_archive_members_without_overwriting(self):
+        path = self.root / "evidence.zip"
+        with zipfile.ZipFile(path, "w") as archive:
+            archive.writestr("/Users/first/file.txt", "first")
+            archive.writestr("/Users/second/file.txt", "second")
+        original = path.read_bytes()
+        with self.assertRaisesRegex(ValueError, "merge archive"):
+            sanitize_artifacts(self.root, [])
+        self.assertEqual(path.read_bytes(), original)
+
 
 if __name__ == "__main__":
     unittest.main()

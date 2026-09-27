@@ -25,7 +25,12 @@ jobs:
           python-version: "3.14.7"
       - run: python scripts/release.py build
       - run: python scripts/release.py verify --against-source
+      - name: Check artifact privacy
+        id: privacy
+        if: always()
+        run: python scripts/privacy_gate.py dist/
       - uses: actions/upload-artifact@v4
+        if: always() && steps.privacy.outcome == 'success'
         with:
           name: release-package
           path: dist/
@@ -65,8 +70,12 @@ jobs:
           ${{ matrix.python }} scripts/release.py verify --against-source
       - name: Test all production modules
         run: ${{ matrix.python }} scripts/evidence.py tests --ha-version "${{ matrix.ha }}" --python "${{ matrix.python }}" --directory "artifacts/tests-${{ matrix.ha }}"
-      - uses: actions/upload-artifact@v4
+      - name: Check artifact privacy
+        id: privacy
         if: always()
+        run: python scripts/privacy_gate.py artifacts/
+      - uses: actions/upload-artifact@v4
+        if: always() && steps.privacy.outcome == 'success'
         with:
           name: tests-ha-${{ matrix.ha }}
           path: artifacts/
@@ -85,8 +94,12 @@ jobs:
       - run: uv sync --locked --python 3.14.7
       - run: .venv/bin/ruff check .
       - run: .venv/bin/python scripts/mutation_gate.py --output artifacts/mutations.json
-      - uses: actions/upload-artifact@v4
+      - name: Check artifact privacy
+        id: privacy
         if: always()
+        run: python scripts/privacy_gate.py artifacts/
+      - uses: actions/upload-artifact@v4
+        if: always() && steps.privacy.outcome == 'success'
         with:
           name: guard-mutations
           path: artifacts/
@@ -105,8 +118,12 @@ jobs:
         env:
           INPUT_GITHUB_TOKEN: ${{ github.token }}
         run: python scripts/evidence.py validator --validator hacs
-      - uses: actions/upload-artifact@v4
+      - name: Check artifact privacy
+        id: privacy
         if: always()
+        run: python scripts/privacy_gate.py artifacts/validators/
+      - uses: actions/upload-artifact@v4
+        if: always() && steps.privacy.outcome == 'success'
         with:
           name: validator-hacs
           path: artifacts/validators/
@@ -123,8 +140,12 @@ jobs:
           python-version: "3.14.7"
       - name: Run official hassfest image and record source-bound evidence
         run: python scripts/evidence.py validator --validator hassfest
-      - uses: actions/upload-artifact@v4
+      - name: Check artifact privacy
+        id: privacy
         if: always()
+        run: python scripts/privacy_gate.py artifacts/validators/
+      - uses: actions/upload-artifact@v4
+        if: always() && steps.privacy.outcome == 'success'
         with:
           name: validator-hassfest
           path: artifacts/validators/
@@ -165,8 +186,12 @@ jobs:
       - name: Confirm release bytes remain identical
         if: always()
         run: .venv/bin/python scripts/release.py verify --against-source
-      - uses: actions/upload-artifact@v4
+      - name: Check artifact privacy
+        id: privacy
         if: always()
+        run: python scripts/privacy_gate.py artifacts/lab/
+      - uses: actions/upload-artifact@v4
+        if: always() && steps.privacy.outcome == 'success'
         with:
           name: lab-ha-${{ matrix.ha }}
           path: |
@@ -238,7 +263,12 @@ jobs:
               dist / "ha_operator-evidence.zip",
           )
           PY
+      - name: Check artifact privacy
+        id: privacy
+        if: always()
+        run: python scripts/privacy_gate.py dist/
       - uses: actions/upload-artifact@v4
+        if: always() && steps.privacy.outcome == 'success'
         with:
           name: validated-release
           path: |

@@ -44,28 +44,33 @@ SHADOW_FILES = {
     "shadow-lock-journal.json",
     "cellar-evidence.json",
 }
-ALL_SCENARIOS = INITIAL_SCENARIOS | SHADOW_SCENARIOS | CELLAR_SCENARIOS | {
-    "OBSERVE-ZERO",
-    "COVER-RAIN-RETRY",
-    "COVER-SUPERSESSION",
-    "COVER-STOP",
-    "COVER-EXPIRY",
-    "COVER-RESTART",
-    "COVER-KILL",
-    "SCHEDULE-SLEEP-IN-DURABLE",
-    "SCHEDULE-ADJACENT-NATIVE-BLOCKS",
-    "OCCURRENCE-DST-IDENTITY-EXPIRY",
-    "LAB-HAP-PAIR",
-    "LAB-HAP-RESTART-DURABLE",
-    "LAB-NATIVE-COVER",
-    "LAB-DIAGNOSTICS",
-    "AIRFLOW-CONFIGURATION",
-    "FAN-OFF-DIRECTION-NO-AIRFLOW",
-    "AIRFLOW-UNMET-ALTERNATIVES-KEEP-EXTRACTING",
-    "AIRFLOW-MANUAL-CLOSE-LAST-INLET",
-    "AIRFLOW-MAKE-BEFORE-BREAK-PHYSICAL-CONFIRMATION",
-    "RELAY-REVERSAL-CONFIRMED-DEAD-TIME",
-}
+ALL_SCENARIOS = (
+    INITIAL_SCENARIOS
+    | SHADOW_SCENARIOS
+    | CELLAR_SCENARIOS
+    | {
+        "OBSERVE-ZERO",
+        "COVER-RAIN-RETRY",
+        "COVER-SUPERSESSION",
+        "COVER-STOP",
+        "COVER-EXPIRY",
+        "COVER-RESTART",
+        "COVER-KILL",
+        "SCHEDULE-SLEEP-IN-DURABLE",
+        "SCHEDULE-ADJACENT-NATIVE-BLOCKS",
+        "OCCURRENCE-DST-IDENTITY-EXPIRY",
+        "LAB-HAP-PAIR",
+        "LAB-HAP-RESTART-DURABLE",
+        "LAB-NATIVE-COVER",
+        "LAB-DIAGNOSTICS",
+        "AIRFLOW-CONFIGURATION",
+        "FAN-OFF-DIRECTION-NO-AIRFLOW",
+        "AIRFLOW-UNMET-ALTERNATIVES-KEEP-EXTRACTING",
+        "AIRFLOW-MANUAL-CLOSE-LAST-INLET",
+        "AIRFLOW-MAKE-BEFORE-BREAK-PHYSICAL-CONFIRMATION",
+        "RELAY-REVERSAL-CONFIRMED-DEAD-TIME",
+    }
+)
 LAB_FILES = SHADOW_FILES | {
     "summary.json",
     "sanitized.json",
@@ -206,6 +211,8 @@ def run_validator(root: Path, name: str, directory: Path, ref: str | None = None
         log = log.replace(token, "[REDACTED]")
     logfile = directory / f"{name}.log"
     logfile.write_text(log)
+    sanitize_artifacts(directory, [])
+    log = logfile.read_text()
     result = {
         "status": "passed"
         if process.returncode == 0 and integration_files(root) == source
@@ -281,6 +288,7 @@ def run_source_tests(root: Path, python: Path, version: str, directory: Path) ->
                 check=True,
             )
         result.update(status="passed", counts=counts, coverage_gate="passed")
+        sanitize_artifacts(directory, [])
         result["files"] = {
             name: digest((directory / name).read_bytes()) for name in TEST_FILES - {"result.json"}
         }
@@ -290,6 +298,7 @@ def run_source_tests(root: Path, python: Path, version: str, directory: Path) ->
     finally:
         result["completed_at"] = time.time()
         write_json(directory / "result.json", result)
+        sanitize_artifacts(directory, [])
     return result
 
 
@@ -641,6 +650,7 @@ def build_evidence(
                 validate_lab(evidence / "lab" / run_name, manifest) == case,
                 "Sanitization changed a lab identity",
             )
+        sanitize_artifacts(evidence, [], check=True)
         safe_copy(root / "dist/ha_operator.zip", staging / "ha_operator.zip")
         safe_copy(root / "dist/ha_operator.manifest.json", staging / "ha_operator.manifest.json")
         files = {

@@ -17,3 +17,14 @@ dist/
 artifacts/
 .DS_Store
 *.egg-info/
+
+# Private deployment and investigation material belongs outside this repository.
+investigations/
+private/
+private-replays/
+.storage/
+*.bundle
+raw-mcp-*.json
+.env
+.env.*
+!.env.example
