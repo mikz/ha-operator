@@ -5,11 +5,15 @@ manual overrides, scheduled occurrences, and requirements shared by several
 devices. It separates a request from the effective target, the last command, and
 the device's observed state.
 
-Version 0.1.0 targets Home Assistant 2026.9.3, with a compatibility gate for
-2026.9.4. Development requires Python 3.14.2 or later within Python 3.14.
-These versions describe the release matrix; they do not imply that its checks
-passed. Consult the generated
-release and lab evidence before deployment.
+Version 0.1.0 passed local source tests and packaged acceptance runs on Home
+Assistant 2026.9.3 and 2026.9.4. Each packaged run passed all 23 runner scenarios;
+a separate baseline run verified five-minute retries. Download the
+[v0.1.0 release](https://github.com/mikz/ha-operator/releases/tag/v0.1.0) and its
+[validation evidence](https://github.com/mikz/ha-operator/releases/download/v0.1.0/ha_operator-evidence.zip).
+The [validation record](docs/scenarios.md#release-validation-record) identifies the
+tested archive and the limits of this evidence. Automated results are available
+in [GitHub Actions](https://github.com/mikz/ha-operator/actions/workflows/validate.yml).
+Development requires Python 3.14.2 or later within Python 3.14.
 
 ## Control behavior
 
@@ -43,9 +47,10 @@ Assistant action does not mean that a device moved. See the
 Keep the existing actuator configuration and automations available for rollback.
 Follow the [migration runbook](docs/migration.md) before enabling live control.
 
-1. Verify `dist/ha_operator.zip` and its corresponding
-   `dist/ha_operator.manifest.json` from the same build. Preserve the archive hash
-   with the release evidence.
+1. Download `ha_operator.zip` and `ha_operator.manifest.json` from the same
+   [release](https://github.com/mikz/ha-operator/releases/tag/v0.1.0). Verify the
+   archive against the manifest and preserve its hash with the release evidence.
+   Local builds place these files under `dist/`.
 2. Extract the archive into Home Assistant's
    `/config/custom_components/ha_operator/` directory. The archive contains the
    integration's files directly, without a containing directory.

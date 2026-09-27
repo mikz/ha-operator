@@ -628,6 +628,11 @@ class Lab:
             assert retried[1]["monotonic"] - first >= 299, "Retry storm at default timing"
             await self.sim("POST", "/admin/devices/inlet", {"hidden_rain": False})
             await self.wait_position(70, device="inlet", timeout=360)
+            await eventually(
+                lambda: self.physical("inlet"),
+                lambda state: not state["moving"] and abs(state["position"] - 70) <= 2,
+                timeout=30,
+            )
             commands = [
                 item
                 for item in await self.journal()

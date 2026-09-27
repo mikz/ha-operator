@@ -299,7 +299,7 @@ def run_lab(args):
         try:
             # Raw evidence stays outside CI upload paths until redaction succeeds.
             if containers.get("runner"):
-                command(["docker", "stop", "--time", "10", containers["runner"]], check=False)
+                command(["docker", "stop", "--time", "10", containers["runner"]])
             for role, container in containers.items():
                 log = command(["docker", "logs", container], check=False)
                 (artifacts / f"{role}.log").write_text(log.stdout + log.stderr)

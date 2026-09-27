@@ -6,8 +6,8 @@ claims that the named tests do not establish. Execution status comes from a run
 record with the source or archive hash, Home Assistant version, command, and
 outcome. Collection and test presence alone are not passes.
 
-All Lab claims remain **awaiting packaged execution evidence** until a completed
-run establishes them. Fixture reload is not process restart, mocked service
+Lab claims require the completed packaged execution evidence recorded below.
+Unlisted or pending runs do not establish a pass. Fixture reload is not process restart, mocked service
 capture is not physical feedback, and successful pairing is not HAP control.
 
 ## Validation layers
@@ -75,7 +75,7 @@ Parameterized names refer to all cases of that test.
 | MANUAL-TARGET | Pure, HA, Lab | A manual target wins over requirements and ordinary policies for its lease; those lower-priority requests remain recorded. | `core::test_manual_beats_provider_beats_arbitrarily_high_policy`; `reconcile::test_requirement_fallback_cooldown_and_manual_last_inlet_close` |
 | MANUAL-HANDS-OFF | Pure, HA, Lab | A hands-off lease causes zero automatic effects until expiry or release, including effects already waiting in an adapter. | `requests::test_hands_off_release_and_resource_validation`; `core::test_hands_off_never_acquires_but_observed_route_still_satisfies`; partial: adapter interruption uses generation tests. |
 | MANUAL-RESUME | Pure, HA, Lab | Lease expiry or release automatically reevaluates durable intent rather than replaying a cached prior command. | `requests::test_release_manual_resumes_surviving_policy_command`; `requests::test_manual_expiry_exact_deadline_dispatches_current_policy_target`; `requests::test_hands_off_release_and_resource_validation` |
-| MANUAL-PROVENANCE | HA, Lab | Explicit managed control establishes a lease. Raw telemetry, unknown context, and unrelated service calls do not invent manual ownership. | `properties::test_telemetry_cannot_renew_lease`; `reconcile::test_unchanged_telemetry_does_not_renew_lease_or_starve_retry`; partial: explicit external-origin matrix absent. |
+| MANUAL-PROVENANCE | HA, Lab | Explicit managed control establishes a lease. Raw telemetry, unknown context, and unrelated service calls do not invent manual ownership. | `requests::test_raw_context_never_creates_or_renews_manual_ownership` covers user, parent, absent, and operator-correlated context; `properties::test_telemetry_cannot_renew_lease`; `reconcile::test_unchanged_telemetry_does_not_renew_lease_or_starve_retry`. The context matrix is HA fixture coverage. |
 | MANUAL-INDEFINITE | Pure, HA | An explicitly indefinite lease has no synthetic timeout and survives restart until release. | `requests::test_indefinite_manual_target_survives_runtime_restart`; `requests::test_default_explicit_and_indefinite_leases`; fixture runtime restart does not replace full process evidence. |
 | COVER-STOP | HA, Lab | Supported physical STOP suppresses stale automatic work; unsupported raw STOP is not advertised or faked by setting the current position. | `requests::test_stop_precedes_durable_hands_off_and_bypasses_pacing`; `entities::test_cover_commands_do_not_claim_motion`; `requests::test_unsupported_stop_still_persists_hands_off` |
 | COVER-STOP-BARRIER | HA, Lab | Send immediate STOP, drain a prior in-flight service, and send final STOP if the same lease still owns the resource. Acknowledgement waits for the barrier and durable save. | `boundaries::test_stop_fences_an_inflight_delayed_device_command`; partial: device-internal queues after service return are outside this boundary. |
@@ -124,7 +124,7 @@ Parameterized names refer to all cases of that test.
 | NATIVE-LIFECYCLE | HA | Setup, unload, reload, and entity removal leave no duplicate subscriptions or pending resource effects. | `lifecycle::test_real_setup_observe_registry_and_reload`; `lifecycle::test_entry_update_listener_reloads_exactly_once`; `entities::test_native_lifecycle_updates_and_unsubscribes` |
 | NATIVE-UNLOAD-BARRIER | HA, Lab | Unload drains in-flight adapter service work, including executor calls, before replacement workers can own the actuator. | `boundaries::test_unload_waits_for_physical_executor_call_to_finish`; service completion is not proof of an empty firmware command queue. |
 | NATIVE-REQUEST-ID | HA, Lab | Repeating an accepted request ID is idempotent and returns the same ownership result. | `requests::test_request_retry_is_idempotent_and_conflict_is_validation_error`; `services::test_request_receipt_follows_real_atomic_file_and_release` |
-| DIAGNOSTICS-REDACTION | HA | Diagnostics redact private identifiers and arbitrary stored strings, bound history length, and cause no request or actuation. | `entities::test_diagnostics_allowlist_and_bounded_history`; `lifecycle::test_corrupt_storage_loads_visible_fault_without_actuation` |
+| DIAGNOSTICS-REDACTION | HA, Lab | Diagnostics redact private identifiers and arbitrary stored strings, bound history length, and cause no request or actuation. | `entities::test_diagnostics_allowlist_and_bounded_history`; `lifecycle::test_corrupt_storage_loads_visible_fault_without_actuation`; `LAB-DIAGNOSTICS` exercises the native download endpoint. |
 | LAB-ISOLATION | Lab | Inspect routes and container configuration; prove no production credentials, external route, host network, or published ports before control tests. | `isolation::ComposeIsolationTests::test_forbids_network_escapes`; `isolation::InspectIsolationTests::test_detects_extra_network_and_gateway`; `isolation::RouteIsolationTests::test_forbids_gateway_external_route_and_policy`; runtime inspection still required. |
 | LAB-ONBOARDING | Lab | A fresh config installs the exact archive, completes HA onboarding, and adds the integration without development-tree mounts. | Lab-only execution; fixture setup does not prove packaged fresh-install onboarding. |
 | LAB-HAP-PAIR | Lab | A real HAP client pairs with the isolated HA HomeKit bridge. Preserve the transcript independently of later control assertions. | Lab-only execution; HAP transcript required. |
@@ -149,10 +149,11 @@ run or prove scenarios that were never reached.
 
 | Catalog scope | Runner IDs and source | Remaining scope distinction |
 | --- | --- | --- |
-| Fresh installation and native config | `LAB-ONBOARDING`, `LAB-NATIVE-CONFIG-FLOW` in [runner.py](../tests/lab/runner.py) | Native resource create path does not establish deletion or every reconfigure path. |
+| Fresh installation and native config | `LAB-ONBOARDING`, `LAB-NATIVE-CONFIG-FLOW`, `LAB-RESOURCE-CONFIGURATION` in [runner.py](../tests/lab/runner.py) | Native resource create path does not establish deletion or every reconfigure path. |
 | Observe, retry, replacement, STOP, expiry, restart, kill | `OBSERVE-ZERO`, `COVER-RAIN-RETRY`, `COVER-SUPERSESSION`, `COVER-STOP`, `COVER-EXPIRY`, `COVER-RESTART`, `COVER-KILL` in [runner.py](../tests/lab/runner.py) | A kill after accepted intent does not cover every persistence crash boundary. |
 | HAP pairing, control, and restart | `LAB-HAP-PAIR`, `LAB-HAP-RESTART-DURABLE` in [runner.py](../tests/lab/runner.py) | Asserts write, physical movement, subscription event, readback, durable-intent correlation, and reconnection with the same pairing after restart. It does not establish Bonjour discovery, iPhone, or home-hub behavior. |
 | Native cover UI | `LAB-NATIVE-COVER` in [runner.py](../tests/lab/runner.py) | Cover control does not establish all status, fault, fan, and configuration UI paths. |
+| Native diagnostics download | `LAB-DIAGNOSTICS` in [runner.py](../tests/lab/runner.py) | Checks the downloaded allowlist, pseudonymous IDs, bounded history, and absence of known private identifiers. |
 | Production timing | `LAB-REALISTIC-SOAK` in [runner.py](../tests/lab/runner.py) | Exercises two five-minute retry periods. It is not a general request-storm or lifecycle soak. |
 | Schedule and occurrence policies | `SCHEDULE-SLEEP-IN-DURABLE`, `SCHEDULE-ADJACENT-NATIVE-BLOCKS`, `OCCURRENCE-DST-IDENTITY-EXPIRY` in [scenarios_schedule.py](../tests/lab/scenarios_schedule.py) | Read assertions and event evidence before assigning catalog outcomes. |
 | Alternative airflow and relay sequencing | `AIRFLOW-CONFIGURATION`, `FAN-OFF-DIRECTION-NO-AIRFLOW`, `AIRFLOW-UNMET-ALTERNATIVES-KEEP-EXTRACTING`, `AIRFLOW-MANUAL-CLOSE-LAST-INLET`, `AIRFLOW-MAKE-BEFORE-BREAK-PHYSICAL-CONFIRMATION`, `RELAY-REVERSAL-CONFIRMED-DEAD-TIME` in [scenarios_airflow.py](../tests/lab/scenarios_airflow.py) | These paths require independent physical-state and relay-journal assertions, not just managed state. |
@@ -169,6 +170,40 @@ The lab summary is `artifacts/lab/<run_id>/summary.json`; scenario outcomes are 
 `simulator-journal.json`, `hap-transcript.jsonl`, screenshots, `trace.zip`, HA logs, and
 `crash-events.jsonl`. The simulator journal records physical effects independently
 of HA's requested state. Preserve it when an assertion fails.
+
+### Release validation record
+
+Version 0.1.0 completed the local validation matrix with archive SHA-256
+`36c568d064b60b2fcb08342ad7e5ba379d520e3bebc77fb150a066f036ccdc7e`.
+Download the [release](https://github.com/mikz/ha-operator/releases/tag/v0.1.0) and
+[evidence ZIP](https://github.com/mikz/ha-operator/releases/download/v0.1.0/ha_operator-evidence.zip).
+The paths below are inside that ZIP, not files served from the Git repository.
+Its `evidence.json` index binds the included files to the tested archive.
+[GitHub Actions](https://github.com/mikz/ha-operator/actions/workflows/validate.yml)
+records the separate automated validation runs.
+
+| Check | Recorded result | Evidence path in the bundle |
+| --- | --- | --- |
+| HA 2026.9.3 source tests | 570 tests; zero failures, errors, or skips. Release/source identity verified before and after execution. | `evidence/tests/2026.9.3/result.json` and `junit.xml` |
+| HA 2026.9.4 source tests | 570 tests; zero failures, errors, or skips. Release/source identity verified before and after execution. | `evidence/tests/2026.9.4/result.json` and `junit.xml` |
+| Coverage, both versions | All 19 production Python modules exceed 95% line coverage; the lowest is 98.22%. Config flow has 100% line and branch coverage. | `evidence/tests/<version>/coverage.json` |
+| Focused mutations | All four guard mutations killed; the unmutated baseline passed. | `evidence/mutations.json` and `evidence/mutations/` |
+| HACS and hassfest | Both official validator images returned success against the recorded production source hashes. | `evidence/validators/hacs.json` and `hassfest.json`, with logs |
+| HA 2026.9.3 packaged lab | 23/23 scenarios passed in 143.68 seconds; isolation and cleanup passed. | `evidence/lab/lab-2026-9-3-383ac879/` |
+| HA 2026.9.4 packaged lab | 23/23 scenarios passed in 143.67 seconds; isolation and cleanup passed. | `evidence/lab/lab-2026-9-4-05adff92/` |
+| HA 2026.9.3 production-timing soak | `LAB-REALISTIC-SOAK` passed in 627.54 seconds; isolation and cleanup passed. | `evidence/lab/lab-2026-9-3-ba03a1c7/` |
+
+Each lab directory includes `summary.json`, `scenarios.json`, the independent
+`simulator-journal.json`, and `cleanup-verification.json`. The full runs also
+include HAP transcripts, restart records, browser evidence, and downloaded
+diagnostics. All three runs used the archive hash above and left no lab
+containers, networks, or volumes after cleanup. Passing the 23 runner scenarios
+does not expand their scope beyond the assertions mapped in this catalog.
+
+The soak recorded exactly three inlet position commands, separated by 300.020
+and 300.015 seconds. The 70% target reached the configured two-percentage-point
+tolerance. The final captured position was 68.683% while still moving; this
+result does not assert settled position 70%.
 
 The [migration inventory](migration.md#inventory-the-existing-control-paths)
 provides realistic fixture patterns. Recreate those patterns with fictional IDs

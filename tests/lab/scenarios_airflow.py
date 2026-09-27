@@ -434,6 +434,14 @@ class _AirflowScenarios:
                 bundle,
                 lambda state: state == dict(zip(channels, (True, False, True, False), strict=True)),
             )
+            # Direction-only intent preserves the observed on/off profile. Wait
+            # for raw feedback to reach HA after proving the physical bundle.
+            await self.wait(
+                lambda: self.ha.state(fan),
+                lambda state: state["state"] == "on"
+                and state["attributes"].get("percentage") == 50
+                and state["attributes"].get("direction") == "forward",
+            )
             before = await self.marker()
             await self.ha.service(
                 "fan", "set_direction", {"entity_id": fan, "direction": "reverse"}
