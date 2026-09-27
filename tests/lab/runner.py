@@ -14,9 +14,6 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 import aiohttp
-from playwright.async_api import async_playwright
-
-from .hap import HAPClient
 
 ARTIFACTS = Path("/artifacts")
 CONTROL = Path("/control")
@@ -84,6 +81,19 @@ class HA:
     async def add_resource(self, entry, data):
         return await self.add_subentry(entry, "resource", data)
 
+    async def wait_entry_loaded(self, entry):
+        async def state():
+            entries = await self.ws("config_entries/get")
+            return next((item for item in entries if item["entry_id"] == entry), None)
+
+        return await eventually(state, lambda item: item is not None and item["state"] == "loaded")
+
+    async def reload_entry(self, entry):
+        # Native flow completion schedules the listener; this explicit setup
+        # barrier serializes behind it through HA's entry.setup_lock.
+        await self.request("POST", f"/api/config/config_entries/entry/{entry}/reload", {})
+        await self.wait_entry_loaded(entry)
+
     async def options(self, entry, data):
         flow = await self.request(
             "POST", "/api/config/config_entries/options/flow", {"handler": entry}
@@ -92,6 +102,7 @@ class HA:
             "POST", "/api/config/config_entries/options/flow/" + flow["flow_id"], data
         )
         assert result["type"] == "create_entry", result
+        await self.reload_entry(entry)
         return result
 
     async def add_subentry(self, entry, kind, data):
@@ -107,6 +118,7 @@ class HA:
             "POST", "/api/config/config_entries/subentries/flow/" + flow["flow_id"], data
         )
         assert flow["type"] == "create_entry", flow
+        await self.reload_entry(entry)
         subentries = await self.ws("config_entries/subentries/list", entry_id=entry)
         matches = [item for item in subentries if item.get("title") == data["name"]]
         if matches:
@@ -316,6 +328,7 @@ class Lab:
             self.entry = next(
                 item["entry_id"] for item in entries if item["domain"] == "ha_operator"
             )
+            await self.ha.wait_entry_loaded(self.entry)
             await self.page.screenshot(path=str(ARTIFACTS / "integration-configured.png"))
         async with self.scenario("LAB-RESOURCE-CONFIGURATION"):
             await eventually(lambda: self.sim(path="/health"), timeout=30)
@@ -432,6 +445,8 @@ class Lab:
                 await self.wait_position(20)
 
     async def homekit(self):
+        from .hap import HAPClient
+
         async with self.scenario("LAB-HAP-PAIR"):
             # Reload the native bridge after managed entities first appear.
             entries = await self.ha.ws("config_entries/get")
@@ -692,6 +707,8 @@ class Lab:
 
 
 async def main():
+    from playwright.async_api import async_playwright
+
     await asyncio.to_thread(ARTIFACTS.mkdir, exist_ok=True)
     await asyncio.to_thread(STATE.mkdir, exist_ok=True)
     async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=15)) as session:

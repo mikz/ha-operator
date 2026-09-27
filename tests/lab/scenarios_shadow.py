@@ -8,6 +8,7 @@ import os
 import time
 from pathlib import Path
 
+from .readiness import wait_trace_ready
 from .replay import write_replay
 from .shadow_trace import load_trace
 
@@ -24,19 +25,14 @@ async def export_page(lab, after=None):
 
 
 async def observe(lab, *, locked, extras=()):
-    from .runner import eventually
-
+    previous = (await export_page(lab))["health"]["session_id"]
     await lab.ha.options(
         lab.entry,
         {"trace_enabled": True, "shadow_lock": locked, "trace_entities": list(extras)},
     )
-
-    async def current_options():
-        data = await lab.ha.service("ha_operator", "explain", {}, response=True)
-        return data["service_response"]
-
-    await eventually(current_options, lambda data: data.get("shadow_locked") is locked)
-    await eventually(lambda: export_page(lab), lambda page: page["health"]["enabled"])
+    # HA.options includes the awaited native reload barrier. The changed session
+    # also prevents treating stale pre-reload runtime data as success.
+    await wait_trace_ready(lab.ha, lab.entry, previous, locked=locked)
 
 
 async def lock(lab, extras=()):
