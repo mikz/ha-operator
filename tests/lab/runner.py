@@ -50,13 +50,15 @@ class HA:
         self.token = None
         self.ws_id = 0
 
-    async def request(self, method, path, data=None):
+    async def request(self, method, path, data=None, *, allow_error=False):
         headers = {"Authorization": f"Bearer {self.token}"} if self.token else {}
         async with self.session.request(
             method, self.base + path, json=data, headers=headers
         ) as response:
             body = await response.text()
             if response.status >= 400:
+                if allow_error:
+                    return {"status": response.status, "body": body}
                 raise AssertionError(f"HA {method} {path} -> {response.status}: {body[:1000]}")
             return json.loads(body) if body else None
 
@@ -153,7 +155,9 @@ class Lab:
         self.secret_values.extend(value for value in values if value)
         temporary = CONTROL / ".secrets.tmp"
         temporary.write_text(json.dumps(self.secret_values))
-        temporary.chmod(0o600)
+        # The bind parent is host-owned 0700; 0644 permits the non-root Linux
+        # host to read this root-container file without exposing the private path.
+        temporary.chmod(0o644)
         temporary.replace(CONTROL / "secrets.json")
 
     async def sim(self, method="GET", path="/admin/state", data=None):
@@ -192,6 +196,19 @@ class Lab:
         except Exception as error:
             item.update(status="failed", error=f"{type(error).__name__}: {error}")
             await self.page.screenshot(path=str(ARTIFACTS / f"failure-{name}.png"))
+            if self.ha.token:
+                try:
+                    async with asyncio.timeout(10):
+                        diagnostics = {"states": await self.ha.request("GET", "/api/states")}
+                        if hasattr(self, "entry"):
+                            diagnostics["explain"] = await self.ha.service(
+                                "ha_operator", "explain", {}, response=True
+                            )
+                        (ARTIFACTS / f"failure-{name}.json").write_text(
+                            json.dumps(diagnostics, indent=2)
+                        )
+                except Exception as diagnostic_error:
+                    item["diagnostic_error"] = type(diagnostic_error).__name__
             raise
         else:
             item["status"] = "passed"
@@ -324,13 +341,26 @@ class Lab:
     async def cover_scenarios(self):
         async with self.scenario("OBSERVE-ZERO"):
             before = len([e for e in await self.journal() if e["kind"] == "command"])
-            await self.request(70)
+            rejected = await self.ha.request(
+                "POST",
+                "/api/services/ha_operator/request",
+                {"resource_id": self.resource, "target": {"position": 70}, "duration": 30},
+                allow_error=True,
+            )
+            assert rejected["status"] >= 400, rejected
+            explained = await self.ha.service(
+                "ha_operator", "explain", {"resource_id": self.resource}, response=True
+            )
+            assert explained["service_response"]["resources"][self.resource]["manual"] is None
             await asyncio.sleep(2)
             after = len([e for e in await self.journal() if e["kind"] == "command"])
             assert before == after, "Observe mode sent physical commands"
             assert (await self.ha.state(self.cover))["attributes"]["current_position"] == 0
         await self.ha.service("select", "select_option", {"entity_id": self.mode, "option": "live"})
         async with self.scenario("COVER-RAIN-RETRY"):
+            await asyncio.sleep(1.2)
+            assert len([e for e in await self.journal() if e["kind"] == "command"]) == after
+            await self.request(70)
             await eventually(
                 self.journal, lambda events: any(e["kind"] == "refusal" for e in events)
             )
@@ -487,12 +517,69 @@ class Lab:
 
     async def native_control(self):
         async with self.scenario("LAB-NATIVE-COVER"):
-            await self.page.goto(self.ha.base + f"/config/entities/entity/{self.cover}")
-            # Open the native more-info control from the entity's built-in detail page.
-            await self.page.get_by_role("button", name=re.compile("Control", re.I)).click()
-            await self.page.get_by_role("button", name=re.compile("Close", re.I)).first.click()
+            await self.page.goto(self.ha.base + "/config/entities")
+            await self.page.get_by_placeholder(re.compile(r"Search \d+ entities")).fill(self.cover)
+            await self.page.get_by_role("rowheader", name="Lab Skylight", exact=True).click()
+            await (
+                self.page.locator("more-info-cover")
+                .get_by_role("button", name="Set position to 0%", exact=True)
+                .click()
+            )
             await self.wait_position(0)
             await self.page.screenshot(path=str(ARTIFACTS / "native-cover-closed.png"))
+
+    async def diagnostics(self):
+        async with self.scenario("LAB-DIAGNOSTICS"):
+            downloaded = await self.ha.request("GET", f"/api/diagnostics/config_entry/{self.entry}")
+            data = downloaded["data"]
+            assert set(data) == {
+                "version",
+                "faulted",
+                "resources",
+                "policies",
+                "requirements",
+                "history",
+            }, data.keys()
+            assert data["version"] == 1 and isinstance(data["faulted"], bool)
+            assert len(data["history"]) <= 100
+            for collection in ("resources", "policies", "requirements"):
+                assert all(re.fullmatch(r"[0-9a-f]{12}", key) for key in data[collection])
+            resource_fields = {
+                "kind",
+                "mode",
+                "status",
+                "source",
+                "desired",
+                "observed",
+                "available",
+                "moving",
+                "restricted",
+                "reported_at",
+                "manual",
+                "last_command",
+                "attempts",
+                "next_attempt",
+            }
+            assert all(set(row) == resource_fields for row in data["resources"].values())
+            assert all(set(row) == {"enabled"} for row in data["policies"].values())
+            assert all(
+                set(row) == {"status", "selected_provider", "acquiring_provider"}
+                for row in data["requirements"].values()
+            )
+            assert all(
+                set(row) == {"resource", "status", "source", "target", "at"}
+                for row in data["history"]
+            )
+            encoded = json.dumps(data)
+            for private_value in (
+                self.resource,
+                self.entry,
+                self.cover,
+                "cover.sim_skylight",
+                "Lab Skylight",
+            ):
+                assert private_value not in encoded, "Diagnostics exposed identifying configuration"
+            (ARTIFACTS / "downloaded-diagnostics.json").write_text(json.dumps(downloaded, indent=2))
 
     async def soak(self):
         """Two full five-minute retry periods, using production timing defaults."""
@@ -607,6 +694,7 @@ async def main():
                     from .scenarios_airflow import run_airflow_scenarios
 
                     await run_airflow_scenarios(lab)
+                await lab.diagnostics()
             finally:
                 if lab.hap:
                     await lab.hap.close()

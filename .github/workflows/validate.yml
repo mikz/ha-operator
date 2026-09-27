@@ -64,13 +64,7 @@ jobs:
           ${{ matrix.python }} -c 'import importlib.metadata, os; assert importlib.metadata.version("homeassistant") == os.environ["EXPECTED_HA"]'
           ${{ matrix.python }} scripts/release.py verify --against-source
       - name: Test all production modules
-        run: |
-          mkdir -p artifacts
-          ${{ matrix.python }} -m pytest --cov=custom_components/ha_operator --cov-report=term-missing --cov-report=json:artifacts/coverage.json --junitxml=artifacts/pytest.xml
-          ${{ matrix.python }} scripts/coverage_gate.py artifacts/coverage.json
-      - name: Record locked environment
-        if: always()
-        run: uv pip freeze --python "${{ matrix.python }}" > artifacts/installed-dependencies.txt
+        run: ${{ matrix.python }} scripts/evidence.py tests --ha-version "${{ matrix.ha }}" --python "${{ matrix.python }}" --directory "artifacts/tests-${{ matrix.ha }}"
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -104,17 +98,38 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
-      - uses: hacs/action@main
+      - uses: actions/setup-python@v5
         with:
-          category: integration
-          comment: false
+          python-version: "3.14.7"
+      - name: Run official HACS image and record source-bound evidence
+        env:
+          INPUT_GITHUB_TOKEN: ${{ github.token }}
+        run: python scripts/evidence.py validator --validator hacs
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: validator-hacs
+          path: artifacts/validators/
+          if-no-files-found: error
+          retention-days: 30
 
   hassfest:
     name: Home Assistant hassfest
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
-      - uses: home-assistant/actions/hassfest@master
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14.7"
+      - name: Run official hassfest image and record source-bound evidence
+        run: python scripts/evidence.py validator --validator hassfest
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: validator-hassfest
+          path: artifacts/validators/
+          if-no-files-found: error
+          retention-days: 30
 
   lab:
     name: Isolated HA ${{ matrix.ha }} packaged E2E
@@ -154,7 +169,9 @@ jobs:
         if: always()
         with:
           name: lab-ha-${{ matrix.ha }}
-          path: artifacts/lab/
+          path: |
+            artifacts/lab/
+            !artifacts/lab/**/control/**
           if-no-files-found: error
           retention-days: 30
 
@@ -164,6 +181,10 @@ jobs:
     if: always()
     runs-on: ubuntu-24.04
     steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14.7"
       - name: Require every gate to succeed
         env:
           RESULTS: ${{ toJSON(needs) }}
@@ -190,15 +211,40 @@ jobs:
           path: evidence/
       - name: Bundle the tested artifact with its execution evidence
         run: |
-          cp evidence/release-package/ha_operator.zip ha_operator.zip
-          cp evidence/release-package/ha_operator.manifest.json ha_operator.manifest.json
-          zip -q -r ha_operator-evidence.zip evidence
+          python - <<'PY'
+          import json, shutil
+          from pathlib import Path
+          from scripts.evidence import build_evidence, LAB_CASES
+          root = Path.cwd()
+          dist = root / "dist"
+          dist.mkdir(exist_ok=True)
+          for name in ("ha_operator.zip", "ha_operator.manifest.json"):
+              shutil.copyfile(root / "evidence/release-package" / name, dist / name)
+          validators = root / "evidence/validators"
+          validators.mkdir(exist_ok=True)
+          for validator in ("hacs", "hassfest"):
+              for suffix in ("json", "log"):
+                  name = f"{validator}.{suffix}"
+                  shutil.copyfile(root / "evidence" / f"validator-{validator}" / name, validators / name)
+          labs = []
+          for summary in (root / "evidence").glob("lab-ha-*/*/summary.json"):
+              result = json.loads(summary.read_text())
+              if result.get("status") == "passed" and (result.get("ha_version"), result.get("scenario")) in LAB_CASES:
+                  labs.append(summary.parent)
+          build_evidence(
+              root, labs,
+              [root / f"evidence/tests-ha-{version}/tests-{version}" for version in ("2026.9.3", "2026.9.4")],
+              root / "evidence/guard-mutations/mutations.json", validators,
+              dist / "ha_operator-evidence.zip",
+          )
+          PY
       - uses: actions/upload-artifact@v4
         with:
           name: validated-release
           path: |
-            ha_operator.zip
-            ha_operator.manifest.json
-            ha_operator-evidence.zip
+            dist/ha_operator.zip
+            dist/ha_operator.manifest.json
+            dist/ha_operator-evidence.zip
+            dist/ha_operator-evidence.json
           if-no-files-found: error
           retention-days: 90

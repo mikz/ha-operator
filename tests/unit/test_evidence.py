@@ -6,7 +6,15 @@ from pathlib import Path
 
 import pytest
 
-from scripts.evidence import LAB_CASES, MUTANTS, TEST_FILES, build_evidence, validate_lab
+from scripts.evidence import (
+    ALL_SCENARIOS,
+    INITIAL_SCENARIOS,
+    LAB_CASES,
+    MUTANTS,
+    TEST_FILES,
+    build_evidence,
+    validate_lab,
+)
 from scripts.release import archive_bytes, build, digest
 
 
@@ -43,9 +51,12 @@ def complete_evidence(tmp_path):
                 "run_id": run.name,
                 "status": "passed",
                 "isolation": "passed",
+                "cleanup": "passed",
+                "completed_at": 600,
                 "artifact_sha256": manifest["sha256"],
             },
         )
+        write_json(run / "sanitized.json", {"run_id": run.name, "completed_at": 601})
         write_json(
             run / "prepared.json",
             {
@@ -55,11 +66,9 @@ def complete_evidence(tmp_path):
                 "images": dict.fromkeys(("ha", "runner", "simulator"), "sha256:" + "0" * 64),
             },
         )
-        names = ["LAB-ONBOARDING", "LAB-NATIVE-CONFIG-FLOW"]
-        if scenario == "all":
-            names += ["LAB-HAP-PAIR", "LAB-HAP-RESTART-DURABLE", "LAB-NATIVE-COVER"]
-        else:
-            names += ["LAB-REALISTIC-SOAK"]
+        names = sorted(
+            ALL_SCENARIOS if scenario == "all" else INITIAL_SCENARIOS | {"LAB-REALISTIC-SOAK"}
+        )
         write_json(
             run / "scenarios.json",
             [
@@ -75,6 +84,7 @@ def complete_evidence(tmp_path):
             "routes-simulator.json",
             "simulator-journal.json",
             "hap-accessories.json",
+            "downloaded-diagnostics.json",
         ):
             write_json(run / name, {})
         for name in ("hap-transcript.jsonl", "crash-events.jsonl", "ha.log"):
@@ -207,7 +217,7 @@ def test_rejects_mixed_archive_and_missing_required_runs(complete_evidence):
 def test_rejects_shortened_soak(complete_evidence):
     run = next(path for path in complete_evidence["labs"] if path.name.endswith("soak"))
     cases = json.loads((run / "scenarios.json").read_text())
-    cases[-1]["completed_at"] = 5
+    next(case for case in cases if case["id"] == "LAB-REALISTIC-SOAK")["completed_at"] = 5
     write_json(run / "scenarios.json", cases)
     manifest = json.loads(
         (complete_evidence["root"] / "dist/ha_operator.manifest.json").read_text()
@@ -239,4 +249,36 @@ def test_refuses_symlink_evidence(complete_evidence, tmp_path):
     target.write_text("not an evidence file")
     log.symlink_to(target)
     with pytest.raises(ValueError, match="plain file"):
+        build_evidence(**complete_evidence)
+
+
+def test_partial_all_without_airflow_cannot_pass(complete_evidence):
+    run = next(path for path in complete_evidence["labs"] if path.name.endswith("all"))
+    scenarios = json.loads((run / "scenarios.json").read_text())
+    write_json(
+        run / "scenarios.json",
+        [scenario for scenario in scenarios if scenario["id"] != "AIRFLOW-MANUAL-CLOSE-LAST-INLET"],
+    )
+    with pytest.raises(ValueError, match="Missing lab scenarios.*AIRFLOW-MANUAL-CLOSE-LAST-INLET"):
+        build_evidence(**complete_evidence)
+
+
+def test_diagnostics_download_must_exist(complete_evidence):
+    run = next(path for path in complete_evidence["labs"] if path.name.endswith("all"))
+    (run / "downloaded-diagnostics.json").unlink()
+    with pytest.raises(ValueError, match="Missing downloaded-diagnostics.json"):
+        build_evidence(**complete_evidence)
+
+
+def test_cleanup_and_matching_sanitization_are_required(complete_evidence):
+    run = complete_evidence["labs"][0]
+    change(run / "summary.json", cleanup="retained_by_request")
+    with pytest.raises(ValueError, match="Lab cleanup did not complete"):
+        build_evidence(**complete_evidence)
+    change(run / "summary.json", cleanup="passed")
+    change(run / "sanitized.json", run_id="another-run")
+    with pytest.raises(ValueError, match="Sanitization receipt"):
+        build_evidence(**complete_evidence)
+    (run / "sanitized.json").unlink()
+    with pytest.raises(FileNotFoundError, match="sanitized.json"):
         build_evidence(**complete_evidence)

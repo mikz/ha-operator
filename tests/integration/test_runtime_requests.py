@@ -7,6 +7,7 @@ import json
 import threading
 
 import pytest
+from homeassistant.core import Context
 from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
 from homeassistant.helpers import issue_registry as ir
 from pytest_homeassistant_custom_component.common import MockConfigEntry
@@ -914,3 +915,91 @@ async def test_manual_expiry_exact_deadline_dispatches_current_policy_target(
     assert runtime.manual("roof") is None
     assert runtime.decisions["roof"].target == Target(position=65)
     assert [call["data"]["position"] for call in calls] == [20, 81, 65]
+
+
+@pytest.mark.parametrize("origin", ["user", "parent", "none", "operator_correlated"])
+async def test_raw_context_never_creates_or_renews_manual_ownership(
+    runtime_factory, hass, clock, origin
+):
+    """Origin metadata on raw changes is evidence, never managed-command admission."""
+    contexts = []
+
+    async def raw_position_service(call):
+        contexts.append(call.context)
+        hass.states.async_set(
+            "cover.raw",
+            "open",
+            {"supported_features": 15, "current_position": call.data["position"]},
+            context=call.context,
+        )
+
+    hass.services.async_register("cover", "set_cover_position", raw_position_service)
+    runtime, _ = await runtime_factory(
+        policies={
+            "daytime": {"name": "Daytime", "kind": "state", "target": {"position": 70}},
+        }
+    )
+    await runtime.async_set_mode("roof", "live")
+    await hass.async_block_till_done()
+    assert contexts  # An actual operator dispatch supplied the correlation context.
+    operator_context = contexts[-1]
+    assert runtime.manual("roof") is None
+
+    def context():
+        if origin == "user":
+            return Context(user_id="a" * 32)
+        if origin == "parent":
+            return Context(parent_id="01J00000000000000000000000")
+        if origin == "operator_correlated":
+            return operator_context
+        return None
+
+    async def raw_changes():
+        hass.states.async_set(
+            "cover.raw",
+            "open",
+            {"supported_features": 15, "current_position": 37},
+            context=context(),
+        )
+        await hass.async_block_till_done()
+        assert runtime.observations["roof"].target == Target(position=37)
+        await hass.services.async_call(
+            "cover",
+            "set_cover_position",
+            {"entity_id": "cover.raw", "position": 38},
+            blocking=True,
+            context=context(),
+        )
+        await hass.async_block_till_done()
+        assert runtime.observations["roof"].target == Target(position=38)
+        # Repeat the unchanged report as well as the state/attribute transition.
+        hass.states.async_set(
+            "cover.raw",
+            "open",
+            {"supported_features": 15, "current_position": 38},
+            context=context(),
+        )
+        await hass.async_block_till_done()
+
+    without_manual = disk_state(runtime)
+    await raw_changes()
+    assert runtime.manual("roof") is None
+    assert runtime.store.state["manuals"] == {}
+    assert runtime.store.state["requests"] == {}
+    assert disk_state(runtime) == without_manual
+
+    clock[0] += 31
+    receipt = await runtime.async_request(
+        "roof", target={"position": 52}, duration=120, request_id="explicit-managed-command"
+    )
+    await hass.async_block_till_done()
+    operator_context = contexts[-1]
+    accepted = disk_state(runtime)
+    clock[0] += 15
+    await raw_changes()
+    lease = runtime.manual("roof")
+    assert lease.target == Target(position=52)
+    assert lease.expires_at == receipt["expires_at"]
+    assert lease.request_id == "explicit-managed-command"
+    assert disk_state(runtime) == accepted
+    assert runtime.store.state == accepted

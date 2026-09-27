@@ -42,9 +42,15 @@ def json_output(args, **kwargs):
     return json.loads(output(args, **kwargs))
 
 
-def write_json(path, value):
+def atomic_text(path, value):
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n")
+    temporary = path.with_name("." + path.name + ".tmp")
+    temporary.write_text(value)
+    temporary.replace(path)
+
+
+def write_json(path, value):
+    atomic_text(path, json.dumps(value, indent=2, sort_keys=True) + "\n")
 
 
 def image_id(reference):
@@ -162,9 +168,13 @@ def run_lab(args):
     if tuple(int(x) for x in engine.split(".")[:2]) < (29, 4):
         raise RuntimeError("Docker Engine >=29.4 is required for the verified isolation baseline")
     run_id = f"lab-{args.ha_version.replace('.', '-')}-{secrets.token_hex(4)}"
-    artifacts = ROOT / "artifacts/lab" / run_id
-    control = artifacts / "control"
-    control.mkdir(parents=True)
+    published = ROOT / "artifacts/lab" / run_id
+    staging = ROOT / ".lab/runs" / run_id
+    artifacts = staging / "artifacts"
+    control = staging / "control"
+    staging.mkdir(parents=True, mode=0o700)
+    control.mkdir(mode=0o700)
+    artifacts.mkdir(mode=0o700)
     subnet, ha_address = select_subnet()
     env = dict(
         os.environ,
@@ -239,7 +249,7 @@ def run_lab(args):
                     raise RuntimeError(f"{role} has an external route to {destination}")
         result["isolation"] = "passed"
         for role in ("simulator", "ha", "runner"):
-            (control / f"start-{role}").write_text(run_id + "\n")
+            atomic_text(control / f"start-{role}", run_id + "\n")
         deadline = time.monotonic() + args.timeout
         processed = set()
         while time.monotonic() < deadline:
@@ -285,34 +295,50 @@ def run_lab(args):
         result["error"] = f"{type(error).__name__}: {error}"
         raise
     finally:
-        # Finish writers before collecting/redacting evidence, including timeout paths.
-        if containers.get("runner"):
-            command(["docker", "stop", "--time", "10", containers["runner"]], check=False)
-        for role, container in containers.items():
-            log = command(["docker", "logs", container], check=False)
-            (artifacts / f"{role}.log").write_text(log.stdout + log.stderr)
-        result["completed_at"] = time.time()
-        write_json(artifacts / "summary.json", result)
-        if not args.keep:
-            command(
-                [*compose, "down", "--volumes", "--remove-orphans"],
-                env=env,
-                capture=False,
-                check=False,
-                timeout=120,
-            )
         secret_receipt = control / "secrets.json"
-        secret_values = json.loads(secret_receipt.read_text()) if secret_receipt.exists() else []
         try:
-            sanitize_artifacts(artifacts, secret_values)
-        except Exception:
-            result.update(status="failed", error="Evidence redaction did not complete")
+            # Raw evidence stays outside CI upload paths until redaction succeeds.
+            if containers.get("runner"):
+                command(["docker", "stop", "--time", "10", containers["runner"]], check=False)
+            for role, container in containers.items():
+                log = command(["docker", "logs", container], check=False)
+                (artifacts / f"{role}.log").write_text(log.stdout + log.stderr)
+            result["completed_at"] = time.time()
             write_json(artifacts / "summary.json", result)
-            raise
+            if not args.keep:
+                disposed = command(
+                    [*compose, "down", "--volumes", "--remove-orphans"],
+                    env=env,
+                    capture=False,
+                    check=False,
+                    timeout=120,
+                )
+                if disposed.returncode:
+                    result.update(status="failed", cleanup="failed", error="Lab disposal failed")
+                    write_json(artifacts / "summary.json", result)
+                    raise RuntimeError("Lab disposal failed; evidence remains in private staging")
+                result["cleanup"] = "passed"
+            else:
+                result["cleanup"] = "retained_by_request"
+            write_json(artifacts / "summary.json", result)
+            secret_values = (
+                json.loads(secret_receipt.read_text()) if secret_receipt.exists() else []
+            )
+            try:
+                sanitize_artifacts(artifacts, secret_values)
+            except Exception:
+                result.update(status="failed", error="Evidence redaction did not complete")
+                write_json(artifacts / "summary.json", result)
+                raise
+            write_json(
+                artifacts / "sanitized.json", {"run_id": run_id, "completed_at": time.time()}
+            )
+            published.parent.mkdir(parents=True, exist_ok=True)
+            artifacts.replace(published)
+            print(f"Lab {result['status']}: {published}")
         finally:
             secret_receipt.unlink(missing_ok=True)
             (control / ".secrets.tmp").unlink(missing_ok=True)
-        print(f"Lab {result['status']}: {artifacts}")
 
 
 def main():

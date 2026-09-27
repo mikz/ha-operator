@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -17,13 +18,38 @@ sys.path.insert(0, str(ROOT))
 
 from scripts.coverage_gate import check_coverage  # noqa: E402
 from scripts.mutation_gate import MUTANTS  # noqa: E402
-from scripts.release import archive_bytes, digest, verify  # noqa: E402
+from scripts.release import archive_bytes, digest, integration_files, verify  # noqa: E402
 from tests.lab.redaction import sanitize_artifacts  # noqa: E402
 
 VERSIONS = {"2026.9.3", "2026.9.4"}
 LAB_CASES = {("2026.9.3", "all"), ("2026.9.4", "all"), ("2026.9.3", "soak")}
+INITIAL_SCENARIOS = {"LAB-ONBOARDING", "LAB-NATIVE-CONFIG-FLOW", "LAB-RESOURCE-CONFIGURATION"}
+ALL_SCENARIOS = INITIAL_SCENARIOS | {
+    "OBSERVE-ZERO",
+    "COVER-RAIN-RETRY",
+    "COVER-SUPERSESSION",
+    "COVER-STOP",
+    "COVER-EXPIRY",
+    "COVER-RESTART",
+    "COVER-KILL",
+    "SCHEDULE-SLEEP-IN-DURABLE",
+    "SCHEDULE-ADJACENT-NATIVE-BLOCKS",
+    "OCCURRENCE-DST-IDENTITY-EXPIRY",
+    "LAB-HAP-PAIR",
+    "LAB-HAP-RESTART-DURABLE",
+    "LAB-NATIVE-COVER",
+    "LAB-DIAGNOSTICS",
+    "AIRFLOW-CONFIGURATION",
+    "FAN-OFF-DIRECTION-NO-AIRFLOW",
+    "AIRFLOW-UNMET-ALTERNATIVES-KEEP-EXTRACTING",
+    "AIRFLOW-MANUAL-CLOSE-LAST-INLET",
+    "AIRFLOW-MAKE-BEFORE-BREAK-PHYSICAL-CONFIRMATION",
+    "RELAY-REVERSAL-CONFIRMED-DEAD-TIME",
+}
 LAB_FILES = {
     "summary.json",
+    "sanitized.json",
+    "cleanup-verification.json",
     "prepared.json",
     "compose.json",
     "inspect.json",
@@ -37,6 +63,7 @@ LAB_FILES = {
     "hap-transcript.jsonl",
     "hap-accessories.json",
     "hap-durable-receipt.json",
+    "downloaded-diagnostics.json",
     "ha.log",
     "simulator.log",
     "runner.log",
@@ -71,6 +98,107 @@ def junit_counts(path: Path) -> dict[str, int]:
 
 def release_manifest(root: Path) -> dict:
     return verify(root / "dist/ha_operator.zip", root / "dist/ha_operator.manifest.json", root=root)
+
+
+def run_validator(root: Path, name: str, directory: Path, ref: str | None = None) -> dict:
+    """Run an official read-only validator and record its exact source and image."""
+    images = {
+        "hacs": "ghcr.io/hacs/action:main",
+        "hassfest": "ghcr.io/home-assistant/hassfest:latest",
+    }
+    require(name in images, "Unknown validator")
+    source = integration_files(root)
+    source_hashes = {
+        f"custom_components/ha_operator/{path}": digest(data)
+        for path, data in source.items()
+        if path != "LICENSE"
+    }
+    directory.mkdir(parents=True, exist_ok=True)
+    subprocess.run(["docker", "pull", images[name]], check=True, capture_output=True)
+    image = json.loads(
+        subprocess.check_output(
+            ["docker", "image", "inspect", images[name], "--format", "{{json .RepoDigests}}"],
+            text=True,
+        )
+    )[0]
+    environment = os.environ.copy()
+    command = ["docker", "run", "--rm"]
+    token = None
+    if name == "hacs":
+        ref = (
+            ref
+            or subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, text=True).strip()
+        )
+        require(
+            subprocess.run(
+                ["git", "diff", "--quiet", ref, "--", "custom_components/ha_operator"],
+                cwd=root,
+                check=False,
+            ).returncode
+            == 0,
+            "HACS must validate the committed integration source",
+        )
+        require(
+            not subprocess.check_output(
+                [
+                    "git",
+                    "ls-files",
+                    "--others",
+                    "--exclude-standard",
+                    "custom_components/ha_operator",
+                ],
+                cwd=root,
+                text=True,
+            ).strip(),
+            "HACS cannot validate uncommitted integration files",
+        )
+        token = (
+            environment.get("INPUT_GITHUB_TOKEN")
+            or subprocess.check_output(["gh", "auth", "token"], text=True).strip()
+        )
+        environment.update(
+            {
+                "INPUT_GITHUB_TOKEN": token,
+                "INPUT_REPOSITORY": "mikz/ha-operator",
+                "INPUT_CATEGORY": "integration",
+                "INPUT_COMMENT": "false",
+                "REPOSITORY_REF": ref,
+                "GITHUB_REPOSITORY": "mikz/ha-operator",
+            }
+        )
+        for key in (
+            "INPUT_GITHUB_TOKEN",
+            "INPUT_REPOSITORY",
+            "INPUT_CATEGORY",
+            "INPUT_COMMENT",
+            "REPOSITORY_REF",
+            "GITHUB_REPOSITORY",
+        ):
+            command.extend(("-e", key))
+    else:
+        command.extend(("-v", f"{root.resolve()}:/github/workspace:ro"))
+    command.append(image)
+    process = subprocess.run(
+        command, cwd=root, env=environment, capture_output=True, text=True, check=False
+    )
+    log = process.stdout + process.stderr
+    if token:
+        log = log.replace(token, "[REDACTED]")
+    logfile = directory / f"{name}.log"
+    logfile.write_text(log)
+    result = {
+        "status": "passed"
+        if process.returncode == 0 and integration_files(root) == source
+        else "failed",
+        "exit_code": process.returncode,
+        "image": image,
+        "source_sha256": source_hashes,
+        "log_sha256": digest(log.encode()),
+        "ref": ref,
+    }
+    write_json(directory / f"{name}.json", result)
+    require(result["status"] == "passed", f"{name} failed or source changed; see {logfile}")
+    return result
 
 
 def run_source_tests(root: Path, python: Path, version: str, directory: Path) -> dict:
@@ -110,6 +238,7 @@ def run_source_tests(root: Path, python: Path, version: str, directory: Path) ->
                     f"--junitxml={directory / 'junit.xml'}",
                 ],
                 cwd=root,
+                env={**os.environ, "COVERAGE_FILE": str(directory / ".coverage")},
                 stdout=log,
                 stderr=subprocess.STDOUT,
                 check=False,
@@ -147,11 +276,19 @@ def run_source_tests(root: Path, python: Path, version: str, directory: Path) ->
 def validate_lab(directory: Path, manifest: dict) -> tuple[str, str]:
     summary = read_json(directory / "summary.json")
     prepared = read_json(directory / "prepared.json")
+    sanitized = read_json(directory / "sanitized.json")
     case = (summary["ha_version"], summary["scenario"])
     require(case in LAB_CASES, f"Unexpected release lab case: {case}")
     require(
         summary.get("status") == "passed" and summary.get("isolation") == "passed",
         f"Lab run did not pass: {directory}",
+    )
+    require(summary.get("cleanup") == "passed", "Lab cleanup did not complete")
+    require(
+        sanitized.get("run_id") == summary.get("run_id")
+        and isinstance(sanitized.get("completed_at"), (int, float))
+        and sanitized["completed_at"] >= summary.get("completed_at", 0),
+        "Sanitization receipt does not match the completed lab run",
     )
     require(summary.get("artifact_sha256") == manifest["sha256"], "Lab tested another archive")
     require(
@@ -173,10 +310,15 @@ def validate_lab(directory: Path, manifest: dict) -> tuple[str, str]:
         "Lab contains an incomplete or failed scenario",
     )
     names = {case["id"] for case in scenarios}
-    required = {"LAB-ONBOARDING", "LAB-NATIVE-CONFIG-FLOW"}
+    required = INITIAL_SCENARIOS.copy()
     if case[1] == "all":
-        required |= {"LAB-HAP-PAIR", "LAB-HAP-RESTART-DURABLE", "LAB-NATIVE-COVER"}
-        for name in ("hap-transcript.jsonl", "hap-accessories.json", "crash-events.jsonl"):
+        required = ALL_SCENARIOS
+        for name in (
+            "hap-transcript.jsonl",
+            "hap-accessories.json",
+            "crash-events.jsonl",
+            "downloaded-diagnostics.json",
+        ):
             require((directory / name).is_file(), f"Missing {name}")
     else:
         required.add("LAB-REALISTIC-SOAK")
@@ -356,11 +498,13 @@ def build_evidence(
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=("tests", "build"))
+    parser.add_argument("command", choices=("tests", "validator", "build"))
     parser.add_argument("--root", type=Path, default=ROOT)
     parser.add_argument("--python", type=Path, default=Path(sys.executable))
     parser.add_argument("--ha-version", choices=sorted(VERSIONS))
     parser.add_argument("--directory", type=Path)
+    parser.add_argument("--validator", choices=("hacs", "hassfest"))
+    parser.add_argument("--ref")
     parser.add_argument("--lab-run", type=Path, action="append", default=[])
     parser.add_argument("--tests", type=Path, action="append", default=[])
     parser.add_argument("--mutations", type=Path, default=Path("artifacts/mutations.json"))
@@ -368,7 +512,10 @@ def main() -> None:
     parser.add_argument("--output", type=Path, default=Path("dist/ha_operator-evidence.zip"))
     args = parser.parse_args()
     try:
-        if args.command == "tests":
+        if args.command == "validator":
+            require(args.validator is not None, "validator requires --validator")
+            result = run_validator(args.root, args.validator, args.validators, args.ref)
+        elif args.command == "tests":
             require(
                 args.ha_version is not None and args.directory is not None,
                 "tests requires --ha-version and --directory",
@@ -382,7 +529,9 @@ def main() -> None:
             )
     except (ValueError, OSError, KeyError, ET.ParseError, subprocess.CalledProcessError) as error:
         parser.exit(1, f"Evidence gate failed: {error}\n")
-    print(json.dumps({"status": result["status"], "artifact_sha256": result["artifact_sha256"]}))
+    print(
+        json.dumps({"status": result["status"], "artifact_sha256": result.get("artifact_sha256")})
+    )
 
 
 if __name__ == "__main__":

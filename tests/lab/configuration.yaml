@@ -3,6 +3,7 @@ homeassistant:
 analytics:
 frontend:
 config:
+diagnostics:
 schedule:
 api:
 websocket_api:
