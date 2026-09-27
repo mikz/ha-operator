@@ -116,6 +116,24 @@ reproduce historical native timers or HomeKit delivery. Both steps preserve
 their scope in `artifacts/lab/<run_id>/shadow-replay.json`; physical consequences
 from the original recording remain `not_observed`.
 
+For the [seven-day observation](docs/shadow-deployment.md), preserve hourly export
+pages unchanged and list them in `hourly-index.json` as
+`{"schema": 1, "pages": [...]}`. Each entry contains `file` (relative to the
+index), `sha256` (the original page hash), `request_after` (the requested cursor,
+or `null` initially), and `capture_at` (UTC Unix seconds). Use `roles.json` to map
+cellar roles to sanitized entity aliases, and choose a new output file:
+
+```sh
+uv run python scripts/shadow_archive.py hourly-index.json --bindings roles.json --output seven-day-report.json
+```
+
+This offline report streams continuity checks and observed cellar-state episodes
+across the archive. It retains the recorder's original health flags; rotation or
+completeness guards alone do not prove that archived records were lost. A complete
+observed interval does not establish coverage of all seven days. This analysis
+does not run the bounded engine or native replay and makes no physical motor,
+airflow, or manual-actor claims.
+
 ## Install a release archive
 
 Keep the existing actuator configuration and automations available for rollback.
