@@ -430,11 +430,14 @@ async def test_cli_reads_real_recorder_export_without_private_names(tmp_path):
         await recorder.async_close()
 
 
-def test_cli_validated_complete_export_reports_bounded_zero_attempt_evidence(tmp_path):
+@pytest.mark.parametrize("rotations", [0, 1])
+def test_cli_validated_complete_export_reports_bounded_zero_attempt_evidence(tmp_path, rotations):
     from tests.unit.test_shadow_trace import make_trace
 
     source = tmp_path / "trace.json"
-    source.write_text(json.dumps(make_trace()))
+    payload = make_trace()
+    payload["health"]["rotations"] = rotations
+    source.write_text(json.dumps(payload))
     output = tmp_path / "report.json"
     report.main([str(source), "--output", str(output)])
     result = json.loads(output.read_text())
@@ -443,3 +446,4 @@ def test_cli_validated_complete_export_reports_bounded_zero_attempt_evidence(tmp
     assert result["capture"]["start_utc"] == "1970-01-01T00:01:40Z"
     assert result["capture"]["end_utc"] == "1970-01-01T00:01:42Z"
     assert result["capture"]["quality"]["sessions"]
+    assert result["capture"]["quality"]["health"] == payload["health"]

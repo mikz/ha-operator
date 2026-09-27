@@ -385,7 +385,7 @@ def test_trace_disk_caps_record_bytes_and_reports_sequence_gaps(tmp_path, monkey
     disk = TraceDisk(tmp_path / "trace", segment_bytes=1000)
     disk.load()
     result = disk.append([row(1, data={"large": "x" * 501}), row(2)])
-    assert result == {"rotations": 0, "oversized": 1, "durable": 2}
+    assert result == {"rotations": 0, "evictions": 0, "oversized": 1, "durable": 2}
     assert [record["sequence"] for record in disk.export(None, 100)["records"]] == [2]
     assert disk.export(None, 100)["gap"] is True
 
@@ -489,6 +489,109 @@ async def test_unclean_restart_reports_history_gap(trace_factory, intent):
     assert exported["health"]["history_gap"] is True
     assert exported["health"]["complete"] is False
     assert exported["records"][-1]["data"]["previous_session_closed"] is False
+
+
+async def test_rotation_without_eviction_preserves_complete_trace_and_clean_restart(
+    trace_factory, intent
+):
+    trace = trace_factory()
+    await trace.async_start(intent, True)
+    await trace.async_export()
+    trace.disk.segment_bytes = trace.disk._file(0).stat().st_size + 64
+    trace.record("input", {"padding": "x" * 200})
+
+    exported = await trace.async_export()
+    assert [record["sequence"] for record in exported["records"]] == [1, 2]
+    assert exported["gap"] is False
+    assert exported["health"]["rotations"] == 1
+    assert exported["health"]["history_gap"] is False
+    assert exported["health"]["complete"] is True
+
+    await trace.async_close()
+    other = trace_factory()
+    await other.async_start(intent, True)
+    restarted = await other.async_export()
+    assert restarted["health"]["unclean_previous"] is False
+    assert restarted["health"]["history_gap"] is False
+    assert restarted["health"]["complete"] is True
+
+
+async def test_actual_segment_eviction_marks_loss_before_and_after_clean_restart(
+    trace_factory, intent
+):
+    trace = trace_factory()
+    trace.disk.segments = 2
+    await trace.async_start(intent, True)
+    await trace.async_export()
+    first_size = trace.disk._file(0).stat().st_size
+    trace.disk.segment_bytes = first_size + 64
+    for _ in range(2):
+        trace.record("input", {"padding": "x" * (first_size - 200)})
+
+    exported = await trace.async_export()
+    assert [record["sequence"] for record in exported["records"]] == [2, 3]
+    assert exported["gap"] is True
+    assert exported["health"]["rotations"] == 2
+    assert exported["health"]["history_gap"] is True
+    assert exported["health"]["complete"] is False
+
+    await trace.async_close()
+    ended = await trace.async_export()
+    assert ended["records"][-1]["kind"] == "session_end"
+    assert ended["records"][-1]["data"]["history_gap"] is True
+    other = trace_factory()
+    await other.async_start(intent, True)
+    restarted = await other.async_export()
+    assert restarted["health"]["unclean_previous"] is False
+    assert restarted["health"]["history_gap"] is True
+    assert restarted["health"]["complete"] is False
+
+
+def test_recovery_rotation_with_full_retention_window_marks_evicted_history(tmp_path):
+    disk = TraceDisk(tmp_path / "trace", segment_bytes=200, segments=2)
+    disk.load()
+    disk.append([row(1), row(2)])
+    assert disk._file(1).exists()
+    with disk._file(0).open("ab") as stream:
+        stream.write(b'{"torn":')
+
+    loaded = disk.load()
+    assert loaded["history_gap"] is True
+    assert loaded["invalid"] == 1
+    disk.append([row(3)])
+    exported = disk.export(None, 100)
+    assert [record["sequence"] for record in exported["records"]] == [2, 3]
+    assert exported["gap"] is True
+
+
+async def test_uncertain_write_after_harmless_rotation_stays_incomplete_across_restart(
+    trace_factory, intent, monkeypatch
+):
+    trace = trace_factory()
+    await trace.async_start(intent, True)
+    await trace.async_export()
+    trace.disk.segment_bytes = trace.disk._file(0).stat().st_size + 64
+    original = trace.disk.append
+
+    def uncertain(records):
+        original(records)
+        raise OSError("Cannot confirm directory durability")
+
+    with monkeypatch.context() as context:
+        context.setattr(trace.disk, "append", uncertain)
+        trace.record("input", {"padding": "x" * 200})
+        exported = await trace.async_export()
+    assert [record["sequence"] for record in exported["records"]] == [1, 2]
+    assert exported["health"]["write_errors"] == 1
+    assert exported["health"]["complete"] is False
+    await trace.async_close()
+
+    other = trace_factory()
+    await other.async_start(intent, True)
+    restarted = await other.async_export()
+    assert restarted["health"]["unclean_previous"] is False
+    assert restarted["health"]["history_gap"] is True
+    assert restarted["health"]["complete"] is False
 
 
 async def test_queue_overflow_is_counted_and_followed_by_gap_record(

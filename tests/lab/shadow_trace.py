@@ -499,8 +499,7 @@ def _health(value: Any) -> None:
             and not health["unclean_previous"]
             and not health["history_gap"]
             and not any(
-                health[key]
-                for key in ("dropped_records", "write_errors", "rotations", "queued_records")
+                health[key] for key in ("dropped_records", "write_errors", "queued_records")
             )
             and health["last_sequence"] == health["durable_sequence"],
             "Contradictory complete health",
@@ -1133,7 +1132,9 @@ def validate_trace(payload: dict) -> NormalizedTrace:
         reasons.add("session_start_missing")
     if previous_sequence != final["through_sequence"]:
         reasons.add("tail_missing")
-    for key in ("dropped_records", "write_errors", "rotations", "queued_records"):
+    # Opening another retained segment is not loss. Eviction is recorded as
+    # history_gap; missing sequences and prefixes are checked independently.
+    for key in ("dropped_records", "write_errors", "queued_records"):
         if health[key]:
             reasons.add(key)
     if not health["enabled"] or not health["healthy"] or not health["complete"]:

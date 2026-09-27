@@ -81,8 +81,11 @@ Records retain the configured input fields, accepted intent, decisions, and
 dispatch context with pseudonymous identifiers. They omit arbitrary entity
 attributes, names, and credentials. A new session has a configuration and intent
 snapshot. Sequence numbers continue across sessions. The journal reports dropped
-records, write errors, rotation, heartbeat time, and cursor gaps; an incomplete
-trace is not complete evidence of behavior.
+records, write errors, rotation, heartbeat time, and cursor gaps. Segment rotation
+increments `rotations` without making a continuous retained trace incomplete.
+Evicting an old segment sets `history_gap`; dropped records, write errors, and
+other completeness guards still prevent a complete replay claim. Preserve the
+original health fields, including `complete: false` in older exports.
 
 The journal uses a queue of at most 512 records, a 64 KiB limit per record,
 32 rotating 2 MiB files, and a 60-second heartbeat. Recording and export do not
@@ -128,8 +131,9 @@ uv run python scripts/shadow_archive.py hourly-index.json --bindings roles.json 
 ```
 
 This offline report streams continuity checks and observed cellar-state episodes
-across the archive. It retains the recorder's original health flags; rotation or
-completeness guards alone do not prove that archived records were lost. A complete
+across the archive. It retains the recorder's original health flags and reports
+sequence/heartbeat continuity separately. A rotation counter alone does not prove
+loss, and an original `complete: false` is never rewritten as true. A complete
 observed interval does not establish coverage of all seven days. This analysis
 does not run the bounded engine or native replay and makes no physical motor,
 airflow, or manual-actor claims.

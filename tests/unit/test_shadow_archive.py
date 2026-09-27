@@ -199,12 +199,14 @@ def test_sequence_gap_and_heartbeat_gap_reset_carried_cellar_state(tmp_path):
 @pytest.mark.parametrize(
     "health,complete",
     [
+        ({"rotations": 1, "complete": True}, True),
         ({"rotations": 3, "complete": False}, True),
         ({"write_errors": 1, "healthy": False, "complete": False}, False),
         ({"dropped_records": 1, "healthy": False, "complete": False}, False),
         ({"unclean_previous": True, "complete": False}, False),
         ({"enabled": False, "complete": False}, False),
         ({"healthy": False, "complete": False}, False),
+        ({"rotations": 32, "history_gap": True, "complete": False}, False),
     ],
 )
 def test_health_retained_without_equating_rotation_with_lost_archive(tmp_path, health, complete):
@@ -212,8 +214,10 @@ def test_health_retained_without_equating_rotation_with_lost_archive(tmp_path, h
     path = write_index(tmp_path, page, [rows], health=health)
     result = archive.analyze_archive(path, BINDINGS)
     assert result["capture"]["complete_observed_interval"] is complete
-    assert result["recorder_health"]["incomplete_pages"] == 1
-    assert result["per_page_validation_reasons"]["incomplete_health"] == 1
+    assert result["recorder_health"]["incomplete_pages"] == (not health["complete"])
+    assert result["per_page_validation_reasons"].get("incomplete_health", 0) == (
+        not health["complete"]
+    )
     assert result["recorder_health"].get("rotations", 0) == health.get("rotations", 0)
     assert result["recorder_health"]["disabled_pages"] == (health.get("enabled") is False)
     assert result["recorder_health"]["unhealthy_pages"] == (health.get("healthy") is False)

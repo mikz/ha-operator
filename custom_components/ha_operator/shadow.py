@@ -514,18 +514,22 @@ class TraceDisk:
                     if stream.tell():
                         stream.seek(-1, os.SEEK_END)
                         if stream.read(1) != b"\n":
-                            self._rotate()
+                            state["history_gap"] |= self._rotate()
             return state
 
-    def _rotate(self) -> None:
-        self._file(self.segments - 1).unlink(missing_ok=True)
+    def _rotate(self) -> bool:
+        """Open another segment, reporting whether retained history was evicted."""
+        oldest = self._file(self.segments - 1)
+        evicted = oldest.exists()
+        oldest.unlink(missing_ok=True)
         for index in reversed(range(self.segments - 1)):
             if self._file(index).exists():
                 self._file(index).replace(self._file(index + 1))
+        return evicted
 
     def append(self, records: list[dict]) -> dict:
         with self.lock:
-            rotations, oversized, durable = 0, 0, 0
+            rotations, evictions, oversized, durable = 0, 0, 0, 0
             directory_changed = False
             for record in records:
                 encoded = (
@@ -536,7 +540,7 @@ class TraceDisk:
                     continue
                 path = self._file(0)
                 if path.exists() and path.stat().st_size + len(encoded) > self.segment_bytes:
-                    self._rotate()
+                    evictions += self._rotate()
                     rotations += 1
                 directory_changed |= not path.exists()
                 fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
@@ -551,7 +555,12 @@ class TraceDisk:
                     os.fsync(fd)
                 finally:
                     os.close(fd)
-            return {"rotations": rotations, "oversized": oversized, "durable": durable}
+            return {
+                "rotations": rotations,
+                "evictions": evictions,
+                "oversized": oversized,
+                "durable": durable,
+            }
 
     def export(self, after: int | None, limit: int, through: int | None = None) -> dict:
         with self.lock:
@@ -728,7 +737,6 @@ class ShadowTrace:
             "complete": self.enabled
             and not self.dropped
             and not self.write_errors
-            and not self.rotations
             and not self._unclean_previous
             and not self._history_gap
             and self.durable_sequence == self.sequence,
@@ -763,6 +771,7 @@ class ShadowTrace:
                 )
                 self.durable_sequence = max(self.durable_sequence, result["durable"])
                 self.rotations += result["rotations"]
+                self._history_gap |= bool(result["evictions"])
                 self.dropped += result["oversized"]
                 self._pending_gap += result["oversized"]
                 self.last_write = time()

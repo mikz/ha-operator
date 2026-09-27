@@ -420,7 +420,8 @@ def test_timer_allowlist_and_dispatch_external_receipts(tmp_path):
 
 
 @pytest.mark.parametrize(
-    "field", ["write_errors", "dropped_records", "rotations", "history_gap", "unclean_previous"]
+    "field",
+    ["write_errors", "dropped_records", "queued_records", "history_gap", "unclean_previous"],
 )
 def test_recorder_health_loss_prevents_complete_replay(field):
     payload = make_trace()
@@ -431,6 +432,26 @@ def test_recorder_health_loss_prevents_complete_replay(field):
     result = validate_trace(payload)
     assert result.report["replay_complete"] is False
     assert field in result.report["reasons"]
+
+
+@pytest.mark.parametrize("complete", [True, False])
+def test_retained_segment_rotation_preserves_original_health(complete):
+    payload = make_trace()
+    payload["health"].update(rotations=1, complete=complete)
+    original = deepcopy(payload)
+    result = validate_trace(payload)
+    assert result.report["replay_complete"] is complete
+    assert result.report["incomplete_reasons"] == ([] if complete else ["incomplete_health"])
+    assert result.report["health"] == original["health"]
+    assert payload == original
+
+
+def test_segment_eviction_stays_incomplete_even_with_contiguous_export():
+    payload = make_trace()
+    payload["health"].update(rotations=32, history_gap=True, complete=False)
+    result = validate_trace(payload)
+    assert not result.report["replay_complete"]
+    assert set(result.report["incomplete_reasons"]) == {"history_gap", "incomplete_health"}
 
 
 def test_duplicate_sequences_and_bad_page_cursors_are_rejected():
