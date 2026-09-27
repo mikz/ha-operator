@@ -1,0 +1,7 @@
+{
+  "name": "Example window baseline",
+  "kind": "state",
+  "resource_id": "WINDOW_RESOURCE_ID",
+  "priority": 0,
+  "target": {"position": 0}
+}

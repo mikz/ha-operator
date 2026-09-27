@@ -1,0 +1,72 @@
+blueprint:
+  name: HA Operator daily occurrence
+  description: >-
+    Submit one occurrence per local date, or consume it as skipped when sleep-in
+    is on. Restart and sleep-in ending do not replay missed occurrences.
+    Use an HA Operator occurrence policy with a resource in live mode.
+  domain: automation
+  input:
+    policy_id:
+      name: Occurrence policy ID
+      description: HA-generated subentry ID of an occurrence policy.
+      selector:
+        text:
+    occurrence_prefix:
+      name: Occurrence prefix
+      description: Short stable prefix identifying this daily event.
+      default: morning
+      selector:
+        text:
+    schedule_time:
+      name: Scheduled time
+      default: "06:50:00"
+      selector:
+        time:
+    skip_entity:
+      name: Sleep-in entity
+      description: On skips the occurrence; off submits it; unknown also skips it.
+      selector:
+        entity:
+          filter:
+            - domain: input_boolean
+            - domain: binary_sensor
+    validity_seconds:
+      name: Occurrence validity
+      description: Seconds after the scheduled event for which its request is valid.
+      default: 1200
+      selector:
+        number:
+          min: 1
+          max: 86400
+          step: 1
+          unit_of_measurement: s
+          mode: box
+variables:
+  operator_policy_id: !input policy_id
+  occurrence_prefix: !input occurrence_prefix
+  validity_seconds: !input validity_seconds
+triggers:
+  - trigger: time
+    at: !input schedule_time
+actions:
+  - variables:
+      operator_occurrence_id: "{{ occurrence_prefix ~ '-' ~ now().date().isoformat() }}"
+      operator_expires_at: "{{ as_timestamp(now()) + (validity_seconds | float) }}"
+  - choose:
+      - conditions:
+          - condition: state
+            entity_id: !input skip_entity
+            state: "off"
+        sequence:
+          - action: ha_operator.submit_occurrence
+            data:
+              policy_id: "{{ operator_policy_id }}"
+              occurrence_id: "{{ operator_occurrence_id }}"
+              expires_at: "{{ operator_expires_at }}"
+    default:
+      - action: ha_operator.skip_occurrence
+        data:
+          policy_id: "{{ operator_policy_id }}"
+          occurrence_id: "{{ operator_occurrence_id }}"
+          expires_at: "{{ operator_expires_at }}"
+mode: single

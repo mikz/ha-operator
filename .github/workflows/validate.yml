@@ -1,0 +1,204 @@
+name: Validate release
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: validate-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  package:
+    name: Build exact release artifact
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14.7"
+      - run: python scripts/release.py build
+      - run: python scripts/release.py verify --against-source
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-package
+          path: dist/
+          if-no-files-found: error
+          retention-days: 30
+
+  tests:
+    name: HA ${{ matrix.ha }} tests and coverage
+    runs-on: ubuntu-24.04
+    needs: package
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - ha: "2026.9.3"
+            project: .
+            python: .venv/bin/python
+          - ha: "2026.9.4"
+            project: compat/ha2026.9.4
+            python: compat/ha2026.9.4/.venv/bin/python
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-package
+          path: dist/
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.12.15"
+          python-version: "3.14.7"
+      - run: uv sync --locked --project "${{ matrix.project }}" --python 3.14.7
+      - name: Verify installed Home Assistant and package identity
+        env:
+          EXPECTED_HA: ${{ matrix.ha }}
+        run: |
+          ${{ matrix.python }} -c 'import importlib.metadata, os; assert importlib.metadata.version("homeassistant") == os.environ["EXPECTED_HA"]'
+          ${{ matrix.python }} scripts/release.py verify --against-source
+      - name: Test all production modules
+        run: |
+          mkdir -p artifacts
+          ${{ matrix.python }} -m pytest --cov=custom_components/ha_operator --cov-report=term-missing --cov-report=json:artifacts/coverage.json --junitxml=artifacts/pytest.xml
+          ${{ matrix.python }} scripts/coverage_gate.py artifacts/coverage.json
+      - name: Record locked environment
+        if: always()
+        run: uv pip freeze --python "${{ matrix.python }}" > artifacts/installed-dependencies.txt
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: tests-ha-${{ matrix.ha }}
+          path: artifacts/
+          if-no-files-found: error
+          retention-days: 30
+
+  mutations:
+    name: Safety guard mutation tests
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.12.15"
+          python-version: "3.14.7"
+      - run: uv sync --locked --python 3.14.7
+      - run: .venv/bin/ruff check .
+      - run: .venv/bin/python scripts/mutation_gate.py --output artifacts/mutations.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: guard-mutations
+          path: artifacts/
+          if-no-files-found: error
+          retention-days: 30
+
+  hacs:
+    name: HACS validation
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hacs/action@main
+        with:
+          category: integration
+          comment: false
+
+  hassfest:
+    name: Home Assistant hassfest
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: home-assistant/actions/hassfest@master
+
+  lab:
+    name: Isolated HA ${{ matrix.ha }} packaged E2E
+    needs: package
+    runs-on: ubuntu-24.04
+    timeout-minutes: 75
+    strategy:
+      fail-fast: false
+      matrix:
+        ha: ["2026.9.3", "2026.9.4"]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Pin the disposable runner's Docker Engine
+        uses: docker/setup-docker-action@v5
+        with:
+          version: v29.4.0
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-package
+          path: dist/
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.12.15"
+          python-version: "3.14.7"
+      - run: uv sync --locked --group lab --python 3.14.7
+      - name: Prepare images before runtime isolation
+        run: .venv/bin/python scripts/lab.py prepare --ha-version "${{ matrix.ha }}"
+      - name: Verify isolation and run every acceptance scenario
+        run: .venv/bin/python scripts/lab.py test --ha-version "${{ matrix.ha }}" --scenario all --timeout 1800
+      - name: Observe retries at production timing
+        if: matrix.ha == '2026.9.3'
+        run: .venv/bin/python scripts/lab.py test --ha-version "${{ matrix.ha }}" --scenario soak --timeout 1500
+      - name: Confirm release bytes remain identical
+        if: always()
+        run: .venv/bin/python scripts/release.py verify --against-source
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: lab-ha-${{ matrix.ha }}
+          path: artifacts/lab/
+          if-no-files-found: error
+          retention-days: 30
+
+  release-gates:
+    name: All release gates
+    needs: [package, tests, mutations, hacs, hassfest, lab]
+    if: always()
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Require every gate to succeed
+        env:
+          RESULTS: ${{ toJSON(needs) }}
+        run: |
+          python - <<'PY'
+          import json, os
+          from pathlib import Path
+          results = json.loads(os.environ["RESULTS"])
+          evidence = Path("evidence")
+          evidence.mkdir(exist_ok=True)
+          (evidence / "gate-results.json").write_text(json.dumps({
+              "results": results,
+              "repository": os.environ["GITHUB_REPOSITORY"],
+              "source_commit": os.environ["GITHUB_SHA"],
+              "run_id": os.environ["GITHUB_RUN_ID"],
+              "run_attempt": os.environ["GITHUB_RUN_ATTEMPT"],
+          }, indent=2) + "\n")
+          failed = [name for name, result in results.items() if result["result"] != "success"]
+          if failed:
+              raise SystemExit("Release gates did not pass: " + ", ".join(failed))
+          PY
+      - uses: actions/download-artifact@v4
+        with:
+          path: evidence/
+      - name: Bundle the tested artifact with its execution evidence
+        run: |
+          cp evidence/release-package/ha_operator.zip ha_operator.zip
+          cp evidence/release-package/ha_operator.manifest.json ha_operator.manifest.json
+          zip -q -r ha_operator-evidence.zip evidence
+      - uses: actions/upload-artifact@v4
+        with:
+          name: validated-release
+          path: |
+            ha_operator.zip
+            ha_operator.manifest.json
+            ha_operator-evidence.zip
+          if-no-files-found: error
+          retention-days: 90

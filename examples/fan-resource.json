@@ -1,0 +1,10 @@
+{
+  "name": "Example native fan",
+  "kind": "fan",
+  "entity_id": "fan.example_fan_raw",
+  "retry_interval": 300,
+  "command_interval": 30,
+  "movement_timeout": 120,
+  "manual_duration": 1800,
+  "default_target": {"on": true, "percentage": 50}
+}

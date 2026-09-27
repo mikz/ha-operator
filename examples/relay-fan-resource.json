@@ -1,0 +1,40 @@
+{
+  "name": "Example reversible fan",
+  "kind": "relay_fan",
+  "outputs": [
+    "switch.example_fan_power",
+    "switch.example_fan_inward",
+    "switch.example_fan_outward"
+  ],
+  "profiles": {
+    "off": {
+      "outputs": {
+        "switch.example_fan_power": false,
+        "switch.example_fan_inward": false,
+        "switch.example_fan_outward": false
+      }
+    },
+    "inward": {
+      "direction": "reverse",
+      "outputs": {
+        "switch.example_fan_power": true,
+        "switch.example_fan_inward": true,
+        "switch.example_fan_outward": false
+      }
+    },
+    "outward": {
+      "direction": "forward",
+      "outputs": {
+        "switch.example_fan_power": true,
+        "switch.example_fan_inward": false,
+        "switch.example_fan_outward": true
+      }
+    }
+  },
+  "reversal_dead_time": 2,
+  "retry_interval": 300,
+  "command_interval": 30,
+  "movement_timeout": 120,
+  "manual_duration": 1800,
+  "default_target": {"on": true, "profile": "inward"}
+}

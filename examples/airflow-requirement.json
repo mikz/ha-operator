@@ -1,0 +1,60 @@
+{
+  "name": "Example fireplace intake",
+  "activation_entities": [
+    "binary_sensor.example_fireplace_active",
+    "binary_sensor.example_extraction_active"
+  ],
+  "acquisition_timeout": 120,
+  "providers": [
+    {
+      "id": "passive_window",
+      "evidence": [
+        {
+          "entity_id": "binary_sensor.example_passive_window_contact",
+          "operator": "eq",
+          "value": "on",
+          "kind": "contact"
+        }
+      ]
+    },
+    {
+      "id": "motorized_window",
+      "resource_id": "WINDOW_RESOURCE_ID",
+      "target": {"position": 40},
+      "evidence": [
+        {
+          "entity_id": "cover.example_window_raw",
+          "attribute": "current_position",
+          "operator": "gte",
+          "value": 20,
+          "kind": "position"
+        }
+      ]
+    },
+    {
+      "id": "inward_fan",
+      "resource_id": "RELAY_FAN_RESOURCE_ID",
+      "target": {"on": true, "profile": "inward"},
+      "evidence": [
+        {
+          "entity_id": "switch.example_fan_power",
+          "operator": "eq",
+          "value": "on",
+          "kind": "relay"
+        },
+        {
+          "entity_id": "switch.example_fan_inward",
+          "operator": "eq",
+          "value": "on",
+          "kind": "relay"
+        },
+        {
+          "entity_id": "switch.example_fan_outward",
+          "operator": "eq",
+          "value": "off",
+          "kind": "relay"
+        }
+      ]
+    }
+  ]
+}

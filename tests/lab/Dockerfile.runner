@@ -1,0 +1,12 @@
+ARG PYTHON_BASE
+FROM ${PYTHON_BASE}
+RUN apt-get update && apt-get install -y --no-install-recommends iproute2 && rm -rf /var/lib/apt/lists/*
+COPY .lab/requirements-lab.txt /tmp/requirements.txt
+RUN pip install --no-cache-dir -r /tmp/requirements.txt
+RUN python -m playwright install-deps chromium
+RUN PLAYWRIGHT_DOWNLOAD_CONNECTION_TIMEOUT=120000 python -m playwright install chromium
+WORKDIR /app
+COPY tests/__init__.py /app/tests/__init__.py
+COPY tests/lab /app/tests/lab
+COPY tests/lab/gate.py /lab/gate.py
+ENV PYTHONUNBUFFERED=1

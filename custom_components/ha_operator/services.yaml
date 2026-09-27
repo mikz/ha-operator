@@ -1,0 +1,232 @@
+request:
+  name: Request control
+  description: Durably accept a manual target or hands-off lease for one live resource.
+  fields:
+    resource_id:
+      name: Resource ID
+      description: Resource subentry ID. Choose this or a managed resource entity, not both. Leave both empty only
+        to explain or reconcile every resource.
+      selector:
+        text: null
+    entity_id:
+      name: Managed resource entity
+      selector:
+        entity:
+          filter:
+            integration: ha_operator
+            domain:
+            - cover
+            - fan
+            - switch
+      description: The managed cover, fan, or switch belonging to one resource. Choose this or Resource ID, not
+        both.
+    mode:
+      name: Mode
+      default: target
+      selector:
+        select:
+          options:
+          - target
+          - hands_off
+    target:
+      name: Requested target
+      description: Target object with position, on, percentage, direction, or a configured fan profile. Required
+        in target mode; omit for hands-off mode.
+      selector:
+        object: null
+    duration:
+      name: Duration
+      description: Lease duration in seconds. Omit to use the resource manual duration; choose only one of duration,
+        absolute expiry, or until released.
+      selector:
+        number:
+          min: 0.1
+          max: 31536000
+          mode: box
+          unit_of_measurement: s
+          step: any
+    expires_at:
+      name: Absolute expiry
+      description: UTC Unix timestamp in seconds. The occurrence or manual lease cannot dispatch after this deadline.
+      selector:
+        number:
+          min: 0
+          max: 9999999999
+          mode: box
+          step: any
+    indefinite:
+      name: Until released
+      default: false
+      selector:
+        boolean: null
+      description: Hold manual ownership until explicitly released. Do not combine with duration or absolute expiry.
+    request_id:
+      name: Request ID
+      description: Optional idempotency key. Reuse only for retries of identical intent.
+      selector:
+        text: null
+    config_entry_id:
+      name: Configuration entry
+      description: Optional entry selector. Defaults to the single HA Operator integration.
+      advanced: true
+      selector:
+        config_entry:
+          integration: ha_operator
+release:
+  name: Resume automatic control
+  description: Release manual ownership while retaining current policies and requirements.
+  fields:
+    resource_id:
+      required: false
+      selector:
+        text: null
+      name: Resource ID
+      description: Resource subentry ID. Choose this or a managed resource entity, not both. Leave both empty only
+        to explain or reconcile every resource.
+    entity_id:
+      selector:
+        entity:
+          filter:
+            integration: ha_operator
+            domain:
+            - cover
+            - fan
+            - switch
+      name: Managed resource entity
+      description: The managed cover, fan, or switch belonging to one resource. Choose this or Resource ID, not
+        both.
+    config_entry_id:
+      name: Configuration entry
+      description: Optional entry selector. Defaults to the single HA Operator integration.
+      advanced: true
+      selector:
+        config_entry:
+          integration: ha_operator
+submit_occurrence:
+  name: Submit policy occurrence
+  description: Admit one occurrence with an absolute deadline; skipped or expired identities cannot replay.
+  fields:
+    policy_id:
+      required: true
+      selector:
+        text: null
+      name: Policy ID
+      description: Subentry ID of a configured occurrence policy, available in the native configuration entry.
+    occurrence_id:
+      required: true
+      selector:
+        text: null
+      name: Occurrence ID
+      description: Stable identity for this scheduled occurrence. Reusing a skipped, cancelled, or expired identity
+        cannot replay it.
+    expires_at:
+      required: true
+      description: UTC Unix timestamp in seconds. The occurrence or manual lease cannot dispatch after this deadline.
+      selector:
+        number:
+          min: 0
+          max: 9999999999
+          mode: box
+          step: any
+      name: Absolute expiry
+    config_entry_id:
+      name: Configuration entry
+      description: Optional entry selector. Defaults to the single HA Operator integration.
+      advanced: true
+      selector:
+        config_entry:
+          integration: ha_operator
+skip_occurrence:
+  name: Skip policy occurrence
+  description: Suppress a specific occurrence even if it has not been submitted yet.
+  fields:
+    policy_id:
+      required: true
+      selector:
+        text: null
+      name: Policy ID
+      description: Subentry ID of a configured occurrence policy, available in the native configuration entry.
+    occurrence_id:
+      required: true
+      selector:
+        text: null
+      name: Occurrence ID
+      description: Stable identity for this scheduled occurrence. Reusing a skipped, cancelled, or expired identity
+        cannot replay it.
+    expires_at:
+      required: true
+      description: UTC Unix timestamp in seconds. The occurrence or manual lease cannot dispatch after this deadline.
+      selector:
+        number:
+          min: 0
+          max: 9999999999
+          mode: box
+          step: any
+      name: Absolute expiry
+    config_entry_id:
+      name: Configuration entry
+      description: Optional entry selector. Defaults to the single HA Operator integration.
+      advanced: true
+      selector:
+        config_entry:
+          integration: ha_operator
+reconcile:
+  name: Reconcile
+  description: Evaluate current state without bypassing command spacing, restrictions, or observe mode. With no
+    target, reconcile every resource.
+  fields:
+    resource_id:
+      selector:
+        text: null
+      name: Resource ID
+      description: Resource subentry ID. Choose this or a managed resource entity, not both. Leave both empty only
+        to explain or reconcile every resource.
+    entity_id:
+      selector:
+        entity:
+          filter:
+            integration: ha_operator
+            domain:
+            - cover
+            - fan
+            - switch
+      name: Managed resource entity
+      description: The managed cover, fan, or switch belonging to one resource. Choose this or Resource ID, not
+        both.
+    config_entry_id:
+      name: Configuration entry
+      description: Optional entry selector. Defaults to the single HA Operator integration.
+      advanced: true
+      selector:
+        config_entry:
+          integration: ha_operator
+explain:
+  name: Explain current decision
+  description: Return candidates, observations, manual ownership, effective target, and next attempt. With no target,
+    explain every resource.
+  fields:
+    resource_id:
+      selector:
+        text: null
+      name: Resource ID
+      description: Resource subentry ID. Choose this or a managed resource entity, not both. Leave both empty only
+        to explain or reconcile every resource.
+    entity_id:
+      selector:
+        entity:
+          filter:
+            integration: ha_operator
+            domain:
+            - cover
+            - fan
+            - switch
+      name: Managed resource entity
+      description: The managed cover, fan, or switch belonging to one resource. Choose this or Resource ID, not
+        both.
+    config_entry_id:
+      name: Configuration entry
+      description: Optional entry selector. Defaults to the single HA Operator integration.
+      advanced: true
+      selector:
+        config_entry:
+          integration: ha_operator

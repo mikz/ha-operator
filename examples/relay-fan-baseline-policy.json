@@ -1,0 +1,7 @@
+{
+  "name": "Example relay fan baseline",
+  "kind": "state",
+  "resource_id": "RELAY_FAN_RESOURCE_ID",
+  "priority": 0,
+  "target": {"on": false, "profile": "off"}
+}

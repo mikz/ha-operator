@@ -1,0 +1,42 @@
+[project]
+name = "ha-operator"
+version = "0.1.0"
+description = "Observable, durable device reconciliation for Home Assistant"
+requires-python = ">=3.14.2,<3.15"
+dependencies = []
+
+[dependency-groups]
+dev = [
+  "pytest-homeassistant-custom-component==0.13.366",
+  "hypothesis>=6.150",
+  "pytest-cov>=7",
+  "ruff>=0.15",
+  "mypy>=1.19",
+]
+lab = ["aiohttp>=3.13", "aiohomekit==4.0.1", "playwright==1.63.0"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests/unit", "tests/integration", "tests/lab/test_isolation.py", "tests/lab/test_redaction.py"]
+addopts = "--strict-markers"
+filterwarnings = ["ignore::DeprecationWarning"]
+markers = ["integration: Home Assistant integration fixture tests"]
+
+[tool.coverage.run]
+branch = true
+source = ["custom_components/ha_operator"]
+
+[tool.coverage.report]
+show_missing = true
+
+[tool.ruff]
+target-version = "py314"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "ASYNC"]
+
+[tool.mypy]
+python_version = "3.14"
+ignore_missing_imports = true
+check_untyped_defs = true

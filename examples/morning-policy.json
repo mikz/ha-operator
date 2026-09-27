@@ -1,0 +1,7 @@
+{
+  "name": "Example morning opening",
+  "kind": "occurrence",
+  "resource_id": "BLIND_RESOURCE_ID",
+  "priority": 10,
+  "target": {"position": 100}
+}

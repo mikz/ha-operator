@@ -1,0 +1,28 @@
+homeassistant:
+  name: HA Operator Lab
+analytics:
+frontend:
+config:
+schedule:
+api:
+websocket_api:
+history:
+logbook:
+recorder:
+  purge_keep_days: 1
+persistent_notification:
+logger:
+  default: warning
+  logs:
+    custom_components.ha_operator: debug
+ha_operator_sim:
+  url: http://simulator:8099
+  poll_interval: 0.25
+homekit:
+  - name: HA Operator Lab
+    port: 21063
+    ip_address: LAB_HA_ADDRESS
+    advertise_ip: [LAB_HA_ADDRESS]
+    filter:
+      include_domains: [cover, fan]
+      exclude_entity_globs: ["cover.sim_*", "fan.sim_*"]

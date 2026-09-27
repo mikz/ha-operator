@@ -1,0 +1,9 @@
+{
+  "name": "Example ventilation demand",
+  "kind": "state",
+  "resource_id": "WINDOW_RESOURCE_ID",
+  "priority": 10,
+  "eligibility_entity": "binary_sensor.example_ventilation_needed",
+  "eligibility_state": "on",
+  "target": {"position": 40}
+}

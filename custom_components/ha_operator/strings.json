@@ -1,0 +1,327 @@
+{
+  "title": "HA Operator",
+  "config": {
+    "step": {
+      "user": {
+        "title": "HA Operator",
+        "description": "Create HA Operator, then add resources, policies, and airflow requirements. New resources remain in observe mode until you explicitly select live."
+      }
+    },
+    "abort": {
+      "single_instance_allowed": "Only one HA Operator integration is needed."
+    }
+  },
+  "config_subentries": {
+    "resource": {
+      "entry_type": "Resource",
+      "initiate_flow": {
+        "user": "Add resource"
+      },
+      "step": {
+        "user": {
+          "title": "Add resource",
+          "description": "Choose physical outputs and independent feedback. Resources start in observe mode. Relay profiles must specify every output and include an all-off profile. Native fans require a default target object; relay fans require a default profile target object. See the examples in the documentation.",
+          "data": {
+            "name": "Name",
+            "kind": "Device adapter",
+            "entity_id": "Physical device entity",
+            "outputs": "Owned relay switches",
+            "profiles": "Relay profiles",
+            "default_target": "Default fan target",
+            "reversal_dead_time": "Direction reversal dead time (seconds)",
+            "restriction_entity": "Restriction active entity",
+            "fault_entity": "Fault active entity",
+            "retry_interval": "Retry interval (seconds)",
+            "command_interval": "Minimum command interval (seconds)",
+            "movement_timeout": "Movement timeout (seconds)",
+            "tolerance": "Position tolerance (percentage points)",
+            "manual_duration": "Default manual duration (seconds)"
+          }
+        },
+        "reconfigure": {
+          "title": "Edit resource",
+          "description": "Choose physical outputs and independent feedback. Resources start in observe mode. Relay profiles must specify every output and include an all-off profile. Native fans require a default target object; relay fans require a default profile target object. See the examples in the documentation.",
+          "data": {
+            "name": "Name",
+            "kind": "Device adapter",
+            "entity_id": "Physical device entity",
+            "outputs": "Owned relay switches",
+            "profiles": "Relay profiles",
+            "default_target": "Default fan target",
+            "reversal_dead_time": "Direction reversal dead time (seconds)",
+            "restriction_entity": "Restriction active entity",
+            "fault_entity": "Fault active entity",
+            "retry_interval": "Retry interval (seconds)",
+            "command_interval": "Minimum command interval (seconds)",
+            "movement_timeout": "Movement timeout (seconds)",
+            "tolerance": "Position tolerance (percentage points)",
+            "manual_duration": "Default manual duration (seconds)"
+          }
+        }
+      },
+      "error": {
+        "invalid_configuration": "Invalid configuration: {detail}",
+        "managed_entity": "Choose a physical source entity instead of an HA Operator entity. {detail}",
+        "entity_not_found": "The source entity does not exist. {detail}",
+        "unsupported_capability": "The source cannot provide the required control or feedback. {detail}",
+        "duplicate_output": "Another resource already owns this output. {detail}",
+        "resource_not_found": "Select an existing resource. {detail}",
+        "overlapping_requirement": "Each controlled resource can belong to only one airflow requirement. {detail}"
+      },
+      "abort": {
+        "no_resources": "Add a resource before creating a policy.",
+        "reconfigure_successful": "Configuration updated."
+      }
+    },
+    "policy": {
+      "entry_type": "Policy",
+      "initiate_flow": {
+        "user": "Add policy"
+      },
+      "step": {
+        "user": {
+          "title": "Add policy",
+          "description": "Choose a resource and fixed target or native target source. Occurrence policies run only when submitted with an identity and expiry.",
+          "data": {
+            "name": "Name",
+            "resource_id": "Resource",
+            "kind": "Policy type",
+            "priority": "Priority",
+            "target": "Fixed target",
+            "eligibility_entity": "Eligibility entity",
+            "eligibility_state": "Eligible state",
+            "target_entity": "Target source entity",
+            "target_attribute": "Target attribute",
+            "target_field": "Target field"
+          }
+        },
+        "reconfigure": {
+          "title": "Edit policy",
+          "description": "Choose a resource and fixed target or native target source. Occurrence policies run only when submitted with an identity and expiry.",
+          "data": {
+            "name": "Name",
+            "resource_id": "Resource",
+            "kind": "Policy type",
+            "priority": "Priority",
+            "target": "Fixed target",
+            "eligibility_entity": "Eligibility entity",
+            "eligibility_state": "Eligible state",
+            "target_entity": "Target source entity",
+            "target_attribute": "Target attribute",
+            "target_field": "Target field"
+          }
+        }
+      },
+      "error": {
+        "invalid_configuration": "Invalid configuration: {detail}",
+        "managed_entity": "Choose a physical source entity instead of an HA Operator entity. {detail}",
+        "entity_not_found": "The source entity does not exist. {detail}",
+        "unsupported_capability": "The source cannot provide the required control or feedback. {detail}",
+        "duplicate_output": "Another resource already owns this output. {detail}",
+        "resource_not_found": "Select an existing resource. {detail}",
+        "overlapping_requirement": "Each controlled resource can belong to only one airflow requirement. {detail}"
+      },
+      "abort": {
+        "no_resources": "Add a resource before creating a policy.",
+        "reconfigure_successful": "Configuration updated."
+      }
+    },
+    "requirement": {
+      "entry_type": "Requirement",
+      "initiate_flow": {
+        "user": "Add requirement"
+      },
+      "step": {
+        "user": {
+          "title": "Add requirement",
+          "description": "Providers are an ordered list with id, optional resource_id and target, and evidence predicates. Every predicate must confirm physical state. An unmet requirement notifies and tries alternatives; it never stops extraction.",
+          "data": {
+            "name": "Name",
+            "activation_entities": "Activation entities (all must be on)",
+            "providers": "Ordered providers and confirmation evidence",
+            "acquisition_timeout": "Provider acquisition timeout (seconds)"
+          }
+        },
+        "reconfigure": {
+          "title": "Edit requirement",
+          "description": "Providers are an ordered list with id, optional resource_id and target, and evidence predicates. Every predicate must confirm physical state. An unmet requirement notifies and tries alternatives; it never stops extraction.",
+          "data": {
+            "name": "Name",
+            "activation_entities": "Activation entities (all must be on)",
+            "providers": "Ordered providers and confirmation evidence",
+            "acquisition_timeout": "Provider acquisition timeout (seconds)"
+          }
+        }
+      },
+      "error": {
+        "invalid_configuration": "Invalid configuration: {detail}",
+        "managed_entity": "Choose a physical source entity instead of an HA Operator entity. {detail}",
+        "entity_not_found": "The source entity does not exist. {detail}",
+        "unsupported_capability": "The source cannot provide the required control or feedback. {detail}",
+        "duplicate_output": "Another resource already owns this output. {detail}",
+        "resource_not_found": "Select an existing resource. {detail}",
+        "overlapping_requirement": "Each controlled resource can belong to only one airflow requirement. {detail}"
+      },
+      "abort": {
+        "no_resources": "Add a resource before creating a policy.",
+        "reconfigure_successful": "Configuration updated."
+      }
+    }
+  },
+  "issues": {
+    "storage_error": {
+      "title": "HA Operator cannot trust saved intent",
+      "description": "Actuation is inhibited because saved intent could not be read, validated, or saved reliably. Preserve a copy of the ha_operator.*.json snapshot in your Home Assistant configuration directory before making changes. Check disk space, file permissions, and the Home Assistant logs. Restore a known-good snapshot if the file is corrupt; do not discard accepted intent to hide the fault. After resolving the storage problem, select Reload from the HA Operator integration menu. The repair clears only after saved intent loads successfully."
+    },
+    "configuration_error": {
+      "title": "HA Operator configuration needs repair",
+      "description": "Control is stopped because the configuration is invalid: {detail}. Reconfigure or remove the policies and airflow requirements that reference a deleted resource; do not delete unrelated configuration. Then select Reload from the HA Operator integration menu. Native deletion remains available while setup is stopped. Existing accepted intent is preserved, and this repair clears once the configuration validates."
+    }
+  },
+  "exceptions": {
+    "configuration_error": {
+      "message": "Invalid HA Operator configuration: {detail}. Correct the configuration and reload the integration."
+    }
+  },
+  "services": {
+    "request": {
+      "name": "Request control",
+      "description": "Durably accept a manual target or hands-off lease for one live resource.",
+      "fields": {
+        "resource_id": {
+          "name": "Resource ID",
+          "description": "Resource subentry ID. Choose this or a managed resource entity, not both. Leave both empty only to explain or reconcile every resource."
+        },
+        "entity_id": {
+          "name": "Managed resource entity",
+          "description": "The managed cover, fan, or switch belonging to one resource. Choose this or Resource ID, not both."
+        },
+        "mode": {
+          "name": "Mode"
+        },
+        "target": {
+          "name": "Requested target",
+          "description": "Target object with position, on, percentage, direction, or a configured fan profile. Required in target mode; omit for hands-off mode."
+        },
+        "duration": {
+          "name": "Duration",
+          "description": "Lease duration in seconds. Omit to use the resource manual duration; choose only one of duration, absolute expiry, or until released."
+        },
+        "expires_at": {
+          "name": "Absolute expiry",
+          "description": "UTC Unix timestamp in seconds. The occurrence or manual lease cannot dispatch after this deadline."
+        },
+        "indefinite": {
+          "name": "Until released",
+          "description": "Hold manual ownership until explicitly released. Do not combine with duration or absolute expiry."
+        },
+        "request_id": {
+          "name": "Request ID",
+          "description": "Optional idempotency key. Reuse only for retries of identical intent."
+        },
+        "config_entry_id": {
+          "name": "Configuration entry",
+          "description": "Optional entry selector. Defaults to the single HA Operator integration."
+        }
+      }
+    },
+    "release": {
+      "name": "Resume automatic control",
+      "description": "Release manual ownership while retaining current policies and requirements.",
+      "fields": {
+        "resource_id": {
+          "name": "Resource ID",
+          "description": "Resource subentry ID. Choose this or a managed resource entity, not both. Leave both empty only to explain or reconcile every resource."
+        },
+        "entity_id": {
+          "name": "Managed resource entity",
+          "description": "The managed cover, fan, or switch belonging to one resource. Choose this or Resource ID, not both."
+        },
+        "config_entry_id": {
+          "name": "Configuration entry",
+          "description": "Optional entry selector. Defaults to the single HA Operator integration."
+        }
+      }
+    },
+    "submit_occurrence": {
+      "name": "Submit policy occurrence",
+      "description": "Admit one occurrence with an absolute deadline; skipped or expired identities cannot replay.",
+      "fields": {
+        "policy_id": {
+          "name": "Policy ID",
+          "description": "Subentry ID of a configured occurrence policy, available in the native configuration entry."
+        },
+        "occurrence_id": {
+          "name": "Occurrence ID",
+          "description": "Stable identity for this scheduled occurrence. Reusing a skipped, cancelled, or expired identity cannot replay it."
+        },
+        "expires_at": {
+          "description": "UTC Unix timestamp in seconds. The occurrence or manual lease cannot dispatch after this deadline.",
+          "name": "Absolute expiry"
+        },
+        "config_entry_id": {
+          "name": "Configuration entry",
+          "description": "Optional entry selector. Defaults to the single HA Operator integration."
+        }
+      }
+    },
+    "skip_occurrence": {
+      "name": "Skip policy occurrence",
+      "description": "Suppress a specific occurrence even if it has not been submitted yet.",
+      "fields": {
+        "policy_id": {
+          "name": "Policy ID",
+          "description": "Subentry ID of a configured occurrence policy, available in the native configuration entry."
+        },
+        "occurrence_id": {
+          "name": "Occurrence ID",
+          "description": "Stable identity for this scheduled occurrence. Reusing a skipped, cancelled, or expired identity cannot replay it."
+        },
+        "expires_at": {
+          "description": "UTC Unix timestamp in seconds. The occurrence or manual lease cannot dispatch after this deadline.",
+          "name": "Absolute expiry"
+        },
+        "config_entry_id": {
+          "name": "Configuration entry",
+          "description": "Optional entry selector. Defaults to the single HA Operator integration."
+        }
+      }
+    },
+    "reconcile": {
+      "name": "Reconcile",
+      "description": "Evaluate current state without bypassing command spacing, restrictions, or observe mode. With no target, reconcile every resource.",
+      "fields": {
+        "resource_id": {
+          "name": "Resource ID",
+          "description": "Resource subentry ID. Choose this or a managed resource entity, not both. Leave both empty only to explain or reconcile every resource."
+        },
+        "entity_id": {
+          "name": "Managed resource entity",
+          "description": "The managed cover, fan, or switch belonging to one resource. Choose this or Resource ID, not both."
+        },
+        "config_entry_id": {
+          "name": "Configuration entry",
+          "description": "Optional entry selector. Defaults to the single HA Operator integration."
+        }
+      }
+    },
+    "explain": {
+      "name": "Explain current decision",
+      "description": "Return candidates, observations, manual ownership, effective target, and next attempt. With no target, explain every resource.",
+      "fields": {
+        "resource_id": {
+          "name": "Resource ID",
+          "description": "Resource subentry ID. Choose this or a managed resource entity, not both. Leave both empty only to explain or reconcile every resource."
+        },
+        "entity_id": {
+          "name": "Managed resource entity",
+          "description": "The managed cover, fan, or switch belonging to one resource. Choose this or Resource ID, not both."
+        },
+        "config_entry_id": {
+          "name": "Configuration entry",
+          "description": "Optional entry selector. Defaults to the single HA Operator integration."
+        }
+      }
+    }
+  }
+}

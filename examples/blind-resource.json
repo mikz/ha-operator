@@ -1,0 +1,11 @@
+{
+  "name": "Example blind",
+  "kind": "cover",
+  "entity_id": "cover.example_blind_raw",
+  "retry_interval": 300,
+  "command_interval": 30,
+  "movement_timeout": 120,
+  "tolerance": 2,
+  "manual_duration": 1800,
+  "default_target": {"position": 100}
+}

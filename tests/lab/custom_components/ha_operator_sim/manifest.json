@@ -1,0 +1,9 @@
+{
+  "domain": "ha_operator_sim",
+  "name": "HA Operator Lab Simulator",
+  "version": "0.1.0",
+  "documentation": "https://github.com/ha-operator/ha-operator",
+  "codeowners": [],
+  "requirements": [],
+  "iot_class": "local_polling"
+}

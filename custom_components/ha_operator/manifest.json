@@ -1,0 +1,14 @@
+{
+  "domain": "ha_operator",
+  "name": "HA Operator",
+  "codeowners": ["@mikz"],
+  "config_flow": true,
+  "dependencies": [],
+  "documentation": "https://github.com/mikz/ha-operator",
+  "integration_type": "helper",
+  "iot_class": "local_push",
+  "issue_tracker": "https://github.com/mikz/ha-operator/issues",
+  "requirements": [],
+  "single_config_entry": true,
+  "version": "0.1.0"
+}

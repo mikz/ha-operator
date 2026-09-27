@@ -1,0 +1,332 @@
+#!/usr/bin/env python3
+"""Prepare and exercise a release in a private, disposable Home Assistant lab."""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import ipaddress
+import json
+import os
+import secrets
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+from tests.lab.isolation import validate_compose, validate_inspect, validate_routes  # noqa: E402
+from tests.lab.redaction import sanitize_artifacts  # noqa: E402
+
+SUPPORTED = ("2026.9.3", "2026.9.4")
+
+
+def command(args, *, env=None, capture=True, timeout=900, check=True):
+    return subprocess.run(
+        args,
+        cwd=ROOT,
+        env=env,
+        text=True,
+        capture_output=capture,
+        check=check,
+        timeout=timeout,
+    )
+
+
+def output(args, **kwargs):
+    return command(args, **kwargs).stdout.strip()
+
+
+def json_output(args, **kwargs):
+    return json.loads(output(args, **kwargs))
+
+
+def write_json(path, value):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n")
+
+
+def image_id(reference):
+    return output(["docker", "image", "inspect", "--format", "{{.Id}}", reference])
+
+
+def pinned_image(reference):
+    command(["docker", "pull", reference], capture=False)
+    data = json_output(["docker", "image", "inspect", reference])[0]
+    return data["RepoDigests"][0]
+
+
+def prepare(args):
+    """Only this phase is allowed to fetch/build dependencies."""
+    command([sys.executable, "scripts/release.py", "verify"], capture=False)
+    archive = ROOT / "dist/ha_operator.zip"
+    digest = hashlib.sha256(archive.read_bytes()).hexdigest()
+    prepared_dir = ROOT / ".lab"
+    prepared_dir.mkdir(exist_ok=True)
+    requirements = output(
+        [
+            "uv",
+            "export",
+            "--locked",
+            "--only-group",
+            "lab",
+            "--no-hashes",
+            "--no-emit-project",
+            "--format",
+            "requirements.txt",
+        ]
+    )
+    (prepared_dir / "requirements-lab.txt").write_text(requirements + "\n")
+    (prepared_dir / "requirements-sim.txt").write_text(requirements + "\n")
+    ha_base = pinned_image(f"ghcr.io/home-assistant/home-assistant:{args.ha_version}")
+    python_base = pinned_image("python:3.14.2-slim-bookworm")
+    references = {
+        "ha": f"ha-operator-lab-ha:{args.ha_version}-{digest[:12]}",
+        "simulator": "ha-operator-lab-simulator:local",
+        "runner": "ha-operator-lab-runner:local",
+    }
+    for role, reference in references.items():
+        command(
+            [
+                "docker",
+                "build",
+                "--pull=false",
+                "-f",
+                f"tests/lab/Dockerfile.{role}",
+                "--build-arg",
+                f"HA_BASE={ha_base}",
+                "--build-arg",
+                f"PYTHON_BASE={python_base}",
+                "-t",
+                reference,
+                ".",
+            ],
+            capture=False,
+            timeout=1800,
+        )
+    receipt = {
+        "ha_version": args.ha_version,
+        "artifact_sha256": digest,
+        "base_images": {"ha": ha_base, "python": python_base},
+        "images": {role: image_id(ref) for role, ref in references.items()},
+        "uv_lock_sha256": hashlib.sha256((ROOT / "uv.lock").read_bytes()).hexdigest(),
+        "prepared_at": time.time(),
+    }
+    write_json(prepared_dir / f"prepared-{args.ha_version}.json", receipt)
+    print(json.dumps(receipt, indent=2))
+
+
+def select_subnet():
+    """Use a nonoverlapping private subnet, never an existing external network."""
+    ids = output(["docker", "network", "ls", "-q"]).splitlines()
+    existing = json_output(["docker", "network", "inspect", *ids]) if ids else []
+    used = [
+        ipaddress.ip_network(config["Subnet"])
+        for network in existing
+        for config in network.get("IPAM", {}).get("Config") or []
+        if config.get("Subnet")
+    ]
+    candidates = list(range(16, 240))
+    secrets.SystemRandom().shuffle(candidates)
+    for third in candidates:
+        subnet = ipaddress.ip_network(f"172.30.{third}.0/24")
+        if not any(subnet.overlaps(item) for item in used if item.version == 4):
+            return str(subnet), str(subnet.network_address + 10)
+    raise RuntimeError("No unused lab subnet available")
+
+
+def collect_route_snapshot(container):
+    fields = {
+        "addresses": ["ip", "-j", "address", "show"],
+        "ipv4_routes": ["ip", "-j", "-4", "route", "show", "table", "all"],
+        "ipv6_routes": ["ip", "-j", "-6", "route", "show", "table", "all"],
+        "ipv4_rules": ["ip", "-j", "-4", "rule", "show"],
+        "ipv6_rules": ["ip", "-j", "-6", "rule", "show"],
+    }
+    return {
+        name: json_output(["docker", "exec", container, *args]) for name, args in fields.items()
+    }
+
+
+def run_lab(args):
+    """No pull/build/network fallback is permitted in this phase."""
+    receipt = json.loads((ROOT / ".lab" / f"prepared-{args.ha_version}.json").read_text())
+    archive_digest = hashlib.sha256((ROOT / "dist/ha_operator.zip").read_bytes()).hexdigest()
+    if archive_digest != receipt["artifact_sha256"]:
+        raise RuntimeError("Release differs from prepared image; run prepare again")
+    for image in receipt["images"].values():
+        if image_id(image) != image:
+            raise RuntimeError("Prepared image unavailable")
+    engine = output(["docker", "version", "--format", "{{.Server.Version}}"])
+    if tuple(int(x) for x in engine.split(".")[:2]) < (29, 4):
+        raise RuntimeError("Docker Engine >=29.4 is required for the verified isolation baseline")
+    run_id = f"lab-{args.ha_version.replace('.', '-')}-{secrets.token_hex(4)}"
+    artifacts = ROOT / "artifacts/lab" / run_id
+    control = artifacts / "control"
+    control.mkdir(parents=True)
+    subnet, ha_address = select_subnet()
+    env = dict(
+        os.environ,
+        **{
+            "LAB_RUN_ID": run_id,
+            "LAB_HA_VERSION": args.ha_version,
+            "LAB_ARTIFACT_DIR": str(artifacts),
+            "LAB_CONTROL_DIR": str(control),
+            "LAB_SUBNET": subnet,
+            "LAB_HA_ADDRESS": ha_address,
+            "LAB_SCENARIO": args.scenario,
+            "HA_LAB_IMAGE": receipt["images"]["ha"],
+            "SIM_LAB_IMAGE": receipt["images"]["simulator"],
+            "RUNNER_LAB_IMAGE": receipt["images"]["runner"],
+        },
+    )
+    compose = ["docker", "compose", "--project-name", run_id, "-f", "tests/lab/compose.yaml"]
+    effective = json_output([*compose, "config", "--format", "json"], env=env)
+    allowed_binds = (str(control), str(artifacts))
+    validate_compose(effective, allowed_bind_mounts=allowed_binds)
+    write_json(artifacts / "compose.json", effective)
+    write_json(artifacts / "prepared.json", receipt)
+    started = time.time()
+    result = {
+        "run_id": run_id,
+        "status": "failed",
+        "started_at": started,
+        "ha_version": args.ha_version,
+        "artifact_sha256": archive_digest,
+        "docker_engine": engine,
+        "scenario": args.scenario,
+    }
+    containers = {}
+    try:
+        command(
+            [*compose, "up", "--detach", "--no-build", "--pull", "never"],
+            env=env,
+            capture=False,
+            timeout=120,
+        )
+        containers = {
+            role: output([*compose, "ps", "-q", role], env=env)
+            for role in ("ha", "simulator", "runner")
+        }
+        if not all(containers.values()):
+            raise RuntimeError("Lab failed to create all expected containers")
+        inspected = json_output(["docker", "inspect", *containers.values()])
+        network = json_output(["docker", "network", "inspect", f"{run_id}_lab"])[0]
+        volumes = tuple(f"{run_id}_{name}" for name in ("ha_config", "sim_data", "runner_state"))
+        validate_inspect(
+            network,
+            inspected,
+            expected_project=run_id,
+            expected_container_ids=set(containers.values()),
+            allowed_bind_mounts=allowed_binds,
+            allowed_volume_names=volumes,
+        )
+        write_json(artifacts / "inspect.json", {"network": network, "containers": inspected})
+        for role, container in containers.items():
+            address = next(item for item in inspected if item["Id"] == container)[
+                "NetworkSettings"
+            ]["Networks"][f"{run_id}_lab"]["IPAddress"]
+            snapshot = collect_route_snapshot(container)
+            validate_routes(snapshot, subnet=subnet, ipv4_address=address)
+            write_json(artifacts / f"routes-{role}.json", snapshot)
+            # A route lookup does not send a packet toward any external destination.
+            for destination in ("1.1.1.1", "192.168.1.1", "192.168.65.1", "10.0.0.1"):
+                check = command(
+                    ["docker", "exec", container, "ip", "route", "get", destination], check=False
+                )
+                if check.returncode == 0:
+                    raise RuntimeError(f"{role} has an external route to {destination}")
+        result["isolation"] = "passed"
+        for role in ("simulator", "ha", "runner"):
+            (control / f"start-{role}").write_text(run_id + "\n")
+        deadline = time.monotonic() + args.timeout
+        processed = set()
+        while time.monotonic() < deadline:
+            for request in sorted(control.glob("request-*.json")):
+                if request.name in processed:
+                    continue
+                message = json.loads(request.read_text())
+                if message.get("run_id") != run_id or message.get("action") not in {
+                    "restart",
+                    "kill",
+                    "start",
+                }:
+                    raise RuntimeError("Invalid host crash request")
+                ha = json_output(["docker", "inspect", containers["ha"]])[0]
+                labels = ha["Config"].get("Labels", {})
+                if (
+                    labels.get("io.ha-operator.lab.run") != run_id
+                    or labels.get("io.ha-operator.lab.role") != "ha"
+                ):
+                    raise RuntimeError("Crash target identity changed")
+                action = message["action"]
+                if action == "kill":
+                    command(["docker", "kill", "--signal", "KILL", containers["ha"]])
+                elif action == "restart":
+                    command(["docker", "restart", "--time", "60", containers["ha"]], timeout=90)
+                else:
+                    command(["docker", "start", containers["ha"]])
+                ack = {**message, "completed_at": time.time(), "container_id": containers["ha"]}
+                write_json(control / request.name.replace("request-", "ack-"), ack)
+                with (artifacts / "crash-events.jsonl").open("a") as stream:
+                    stream.write(json.dumps(ack) + "\n")
+                processed.add(request.name)
+            runner = json_output(["docker", "inspect", containers["runner"]])[0]
+            if not runner["State"]["Running"]:
+                if runner["State"]["ExitCode"]:
+                    raise RuntimeError(f"Runner exited {runner['State']['ExitCode']}")
+                result["status"] = "passed"
+                break
+            time.sleep(0.5)
+        else:
+            raise TimeoutError("Lab runner exceeded its deadline")
+    except Exception as error:
+        result["error"] = f"{type(error).__name__}: {error}"
+        raise
+    finally:
+        # Finish writers before collecting/redacting evidence, including timeout paths.
+        if containers.get("runner"):
+            command(["docker", "stop", "--time", "10", containers["runner"]], check=False)
+        for role, container in containers.items():
+            log = command(["docker", "logs", container], check=False)
+            (artifacts / f"{role}.log").write_text(log.stdout + log.stderr)
+        result["completed_at"] = time.time()
+        write_json(artifacts / "summary.json", result)
+        if not args.keep:
+            command(
+                [*compose, "down", "--volumes", "--remove-orphans"],
+                env=env,
+                capture=False,
+                check=False,
+                timeout=120,
+            )
+        secret_receipt = control / "secrets.json"
+        secret_values = json.loads(secret_receipt.read_text()) if secret_receipt.exists() else []
+        try:
+            sanitize_artifacts(artifacts, secret_values)
+        except Exception:
+            result.update(status="failed", error="Evidence redaction did not complete")
+            write_json(artifacts / "summary.json", result)
+            raise
+        finally:
+            secret_receipt.unlink(missing_ok=True)
+            (control / ".secrets.tmp").unlink(missing_ok=True)
+        print(f"Lab {result['status']}: {artifacts}")
+
+
+def main():
+    if Path.cwd().resolve() != ROOT:
+        raise SystemExit(f"Run this command from {ROOT}")
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("command", choices=("prepare", "test"))
+    parser.add_argument("--ha-version", choices=SUPPORTED, default=SUPPORTED[0])
+    parser.add_argument("--scenario", choices=("smoke", "cover", "all", "soak"), default="all")
+    parser.add_argument("--timeout", type=float, default=900)
+    parser.add_argument("--keep", action="store_true", help="Keep failed lab for inspection")
+    args = parser.parse_args()
+    (prepare if args.command == "prepare" else run_lab)(args)
+
+
+if __name__ == "__main__":
+    main()
