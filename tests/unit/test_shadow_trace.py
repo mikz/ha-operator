@@ -536,3 +536,46 @@ def test_policy_target_fields_preserve_production_enum(field):
 def test_policy_target_field_rejects_unknown_and_sanitized_non_enum_values(field):
     with pytest.raises(TraceValidationError):
         validate_trace(_trace_with_policy_target_field(field))
+
+
+@pytest.mark.parametrize(
+    "settings",
+    [{}, {"direction": "reverse"}, {"percentage": 100}, {"direction": "forward", "percentage": 50}],
+)
+def test_durable_fan_selection_is_valid_trace_metadata(settings):
+    payload = make_trace()
+    payload["records"][0]["data"]["intent"]["manuals"][RESOURCE] = {
+        "resource_id": RESOURCE,
+        "mode": "target",
+        "target": {"on": False},
+        "expires_at": 200.0,
+        "request_id": None,
+        "source": "manual:entity",
+        "fan_settings": settings,
+    }
+    assert (
+        validate_trace(payload).records[0]["data"]["intent"]["manuals"][RESOURCE]["fan_settings"]
+        == settings
+    )
+
+
+@pytest.mark.parametrize(
+    "settings",
+    [
+        None,
+        [],
+        {"on": True},
+        {"direction": "unknown"},
+        {"direction": True},
+        {"percentage": True},
+        {"percentage": -1},
+        {"percentage": 101},
+    ],
+)
+def test_durable_fan_selection_rejects_invalid_trace_metadata(settings):
+    payload = make_trace()
+    payload["records"][0]["data"]["intent"]["manuals"][RESOURCE] = {
+        "fan_settings": settings,
+    }
+    with pytest.raises(TraceValidationError):
+        validate_trace(payload)

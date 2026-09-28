@@ -255,6 +255,7 @@ _FIELDS = (
         "id",
         "expires_at",
         "request_id",
+        "fan_settings",
         "occurrence_id",
         "context_id",
         "source",
@@ -607,9 +608,23 @@ _MODELS = {
 
 
 def _model(value: Any, kind: str, *, engine: bool = False) -> None:
-    _object(value, _MODELS[kind], required=_MODELS[kind] if engine and kind != "target" else set())
+    fields = _MODELS[kind] | ({"fan_settings"} if kind == "manual" and not engine else set())
+    _object(value, fields, required=_MODELS[kind] if engine and kind != "target" else set())
     for key, child in value.items():
-        if key == "target" and child is not None:
+        if key == "fan_settings":
+            _object(child, {"direction", "percentage"}, required=set())
+            if "direction" in child:
+                _require(
+                    type(child["direction"]) is str
+                    and child["direction"] in {"forward", "reverse"},
+                    "Invalid fan direction selection",
+                )
+            if "percentage" in child:
+                _require(
+                    type(child["percentage"]) in (int, float) and 0 <= child["percentage"] <= 100,
+                    "Invalid fan speed selection",
+                )
+        elif key == "target" and child is not None:
             _model(child, "target", engine=engine)
         elif key == "memory":
             _model(child, "memory", engine=engine)
