@@ -84,7 +84,7 @@ class OperatorFan(ResourceEntity, FanEntity):
         )
 
     async def async_set_direction(self, direction: str) -> None:
-        # Adapter normalization preserves observed off state for direction-only intent.
+        # Admission composes against accepted intent; feedback remains observational.
         await self.runtime.async_request(
             self.identifier, target={"direction": direction}, source="entity"
         )

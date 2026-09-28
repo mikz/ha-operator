@@ -457,6 +457,7 @@ def test_shadow_and_cellar_scenarios_are_mandatory():
         "SHADOW-TRACE-REPLAY",
     }
     assert CELLAR_SCENARIOS == {
+        "CELLAR-HAP-FAN-COMPOSITION",
         "CELLAR-CONFIGURATION",
         "CELLAR-REFUSED-POWER-DIRECTION",
         "CELLAR-OFF-FEEDBACK-REVERSAL",

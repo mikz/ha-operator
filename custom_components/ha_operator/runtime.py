@@ -80,6 +80,13 @@ def _validate_saved_state(state: dict) -> None:
             target=Target.from_dict(item["target"]) if item.get("target") else None,
             expires_at=item.get("expires_at"),
         )
+        if "fan_settings" in item:
+            settings = record(item["fan_settings"])
+            if set(settings) - {"percentage", "direction"}:
+                raise ValueError("Saved fan settings contain unsupported fields")
+            selected = Target.from_dict(settings)
+            if selected.direction not in {None, "forward", "reverse"}:
+                raise ValueError("Saved fan direction is invalid")
     for key, value in state["occurrences"].items():
         item = record(value)
         policy_id = text(item["policy_id"], "policy_id")
@@ -100,6 +107,8 @@ def _validate_saved_state(state: dict) -> None:
     for request_id, value in state["requests"].items():
         text(request_id, "request_id")
         item = record(value)
+        if item.get("fingerprint_kind", "normalized") not in {"normalized", "requested"}:
+            raise ValueError("Saved request fingerprint kind is invalid")
         fingerprint = item["fingerprint"]
         if (
             not isinstance(fingerprint, str)
@@ -432,12 +441,18 @@ class OperatorRuntime:
         if mode == "hands_off" and target is not None:
             raise ServiceValidationError("hands_off cannot carry a target")
         try:
-            normalized = (
+            requested = (
                 None
                 if mode == "hands_off"
-                else self.adapter(resource_id).normalize(
-                    target if isinstance(target, Target) else Target.from_dict(target or {})
-                )
+                else target
+                if isinstance(target, Target)
+                else Target.from_dict(target or {})
+            )
+            fan_command = requested is not None and config["kind"] in {"fan", "relay_fan"}
+            normalized = (
+                requested
+                if requested is None or fan_command
+                else self.adapter(resource_id).normalize(requested)
             )
         except (TypeError, ValueError) as err:
             raise ServiceValidationError(str(err)) from err
@@ -457,19 +472,23 @@ class OperatorRuntime:
         request_id = str(uuid4()) if request_id is None else request_id
         if not isinstance(request_id, str) or not 1 <= len(request_id) <= 128:
             raise ServiceValidationError("request_id must contain 1 to 128 characters")
-        fingerprint = hashlib.sha256(
-            json.dumps(
-                {
-                    "resource_id": resource_id,
-                    "mode": mode,
-                    "target": normalized.to_dict() if normalized else None,
-                    "duration": actual_duration,
-                    "expires_at": expires_at,
-                    "indefinite": indefinite,
-                },
-                sort_keys=True,
-            ).encode()
-        ).hexdigest()
+
+        def fingerprint_for(value):
+            return hashlib.sha256(
+                json.dumps(
+                    {
+                        "resource_id": resource_id,
+                        "mode": mode,
+                        "target": value.to_dict() if value else None,
+                        "duration": actual_duration,
+                        "expires_at": expires_at,
+                        "indefinite": indefinite,
+                    },
+                    sort_keys=True,
+                ).encode()
+            ).hexdigest()
+
+        fingerprint = fingerprint_for(normalized)
         receipt = {"request_id": request_id, "resource_id": resource_id, "expires_at": expiry}
         replayed = False
 
@@ -480,21 +499,40 @@ class OperatorRuntime:
             self._admit(resource_id)
             existing = state["requests"].get(request_id)
             if existing:
-                if existing["fingerprint"] != fingerprint:
+                expected = fingerprint
+                # Older snapshots fingerprinted the normalized target. Keep their
+                # receipts usable; new fan receipts identify the submitted command.
+                if fan_command and existing.get("fingerprint_kind") != "requested":
+                    try:
+                        expected = fingerprint_for(self.adapter(resource_id).normalize(requested))
+                    except (TypeError, ValueError) as err:
+                        raise ServiceValidationError(str(err)) from err
+                if existing["fingerprint"] != expected:
                     raise ServiceValidationError("request_id was already used for different intent")
                 receipt.update(existing["receipt"])
                 replayed = True
                 return
             if expiry is not None and expiry <= _now():
                 raise ServiceValidationError("expires_at must be in the future")
+            accepted = normalized
+            settings = None
+            if fan_command:
+                try:
+                    accepted, settings = self._fan_command(resource_id, requested, state)
+                except (TypeError, ValueError) as err:
+                    raise ServiceValidationError(str(err)) from err
             state["manuals"][resource_id] = {
                 "mode": mode,
-                "target": normalized.to_dict() if normalized else None,
+                "target": accepted.to_dict() if accepted else None,
                 "expires_at": expiry,
                 "request_id": request_id,
                 "source": source,
             }
+            if settings is not None:
+                state["manuals"][resource_id]["fan_settings"] = settings
             state["requests"][request_id] = {"fingerprint": fingerprint, "receipt": receipt}
+            if fan_command:
+                state["requests"][request_id]["fingerprint_kind"] = "requested"
 
         await self._commit(
             mutate,
@@ -506,6 +544,59 @@ class OperatorRuntime:
             },
         )
         return {**receipt, "accepted": True}
+
+    def _fan_command(self, resource_id: str, requested: Target, state: dict) -> tuple[Target, dict]:
+        """Compose under the intent writer lock, never from uncommitted state.
+
+        Fan protocols send power, speed and direction separately. An off relay
+        profile has no direction, so retain selected settings with its lease;
+        those settings are intent only and never become observed feedback.
+        """
+        adapter = self.adapter(resource_id)
+        if not requested.to_dict():
+            raise ValueError("Fan target must not be empty")
+        default = adapter.normalize(Target.from_dict(self.resources[resource_id]["default_target"]))
+        prior = state["manuals"].get(resource_id)
+        base = None
+        if (
+            prior
+            and prior["mode"] == "target"
+            and (prior["expires_at"] is None or prior["expires_at"] > _now())
+        ):
+            base = Target.from_dict({**prior["target"], **prior.get("fan_settings", {})})
+        if base is None:
+            # Bare on uses the configured profile until the user selects one.
+            base = (
+                default
+                if requested.to_dict() == {"on": True}
+                else adapter.read_observation(_now()).target
+            )
+        direction = requested.direction or (base.direction if base else None) or default.direction
+        percentage = (
+            requested.percentage or (base.percentage if base else None) or default.percentage
+        )
+        command = requested.to_dict()
+        if requested.profile is None:
+            if requested.on is None and requested.percentage is None and base is not None:
+                command["on"] = base.on
+            on = command.get("on")
+            if requested.percentage is not None:
+                on = requested.percentage > 0
+            if on:
+                if requested.percentage is None and percentage is not None:
+                    command["percentage"] = percentage
+                if requested.direction is None and direction is not None:
+                    command["direction"] = direction
+        normalized = adapter.normalize(Target.from_dict(command))
+        settings = {
+            key: value
+            for key, value in {
+                "direction": normalized.direction if normalized.on else direction,
+                "percentage": normalized.percentage if normalized.on else percentage,
+            }.items()
+            if value is not None
+        }
+        return normalized, settings
 
     async def async_release(self, resource_id: str) -> None:
         self._resource(resource_id)

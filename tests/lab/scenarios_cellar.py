@@ -49,6 +49,9 @@ async def run_cellar_scenarios(lab: Any) -> None:
         await cellar.stale_availability()
         await cellar.fallback()
         await cellar.manual_expiry()
+        from .scenarios_fan_hap import fan_hap
+
+        await fan_hap(cellar)
     finally:
         await cellar.activate(False)
         await cellar.signal("cellar_policy", False)

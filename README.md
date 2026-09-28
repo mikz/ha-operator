@@ -14,8 +14,9 @@ The [validation record](docs/scenarios.md#release-validation-record) identifies 
 tested archive and the limits of this evidence. Automated results are available
 in [GitHub Actions](https://github.com/mikz/ha-operator/actions/workflows/validate.yml).
 Development requires Python 3.14.2 or later within Python 3.14.
-The [0.1.1 release notes](docs/releases/0.1.1.md) describe shadow observation and
-link to its release-specific evidence.
+The [0.1.1 release notes](docs/releases/0.1.1.md) describe shadow observation.
+[0.1.2](docs/releases/0.1.2.md) fixes partial fan commands from native controls
+and HomeKit.
 
 ## Control behavior
 
@@ -39,6 +40,11 @@ link to its release-specific evidence.
 - Manual closure remains permitted when it makes airflow unmet. The integration
   reports the unmet requirement and can acquire another eligible provider. It
   never stops extraction as an airflow fallback.
+
+Fan controls compose separate power, speed, and direction commands against the
+latest accepted manual intent. A direction selected while off remains off and
+applies to the next on command within that lease. Expiry or release clears the
+selection; bare on then uses the configured default.
 
 Managed entities report observed state. An accepted request or successful Home
 Assistant action does not mean that a device moved. See the

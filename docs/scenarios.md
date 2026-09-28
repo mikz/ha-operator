@@ -243,3 +243,13 @@ The [migration inventory](migration.md#inventory-the-existing-control-paths)
 provides realistic fixture patterns. Recreate those patterns with fictional IDs
 and simulator devices. Never import production credentials or use the live
 household as an acceptance-test environment.
+
+## Native fan command composition (0.1.2)
+
+`CELLAR-HAP-FAN-COMPOSITION` sends real encrypted HAP writes to native and relay
+fans. With independent power refusal, it exercises On→Direction, Direction→On,
+combined Active/Direction/Speed, Off→Direction, and restart with pending intent.
+It requires durable accepted targets, observed-off state during refusal, the
+expected simulator profile after refusal clears, wire events, and no conflicting
+relay effects. Fixture tests cover concurrent writes, lease expiry/release,
+invalid saved settings, and idempotent command retries.

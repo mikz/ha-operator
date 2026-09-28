@@ -263,6 +263,9 @@ class _AirflowScenarios:
 
     async def alternatives(self) -> None:
         async with self.lab.scenario("AIRFLOW-UNMET-ALTERNATIVES-KEEP-EXTRACTING"):
+            # End the preceding explicit direction selection before testing the
+            # configured bare-on default for this independent scenario.
+            await self.ha.service("ha_operator", "release", {"resource_id": self.fan})
             await self.ha.service("fan", "turn_on", {"entity_id": self.fan_entity})
             await self.wait(
                 lambda: self.lab.physical("exhaust"),

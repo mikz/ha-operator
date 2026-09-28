@@ -358,8 +358,12 @@ class HAPClient:
                     if normalize_uuid(char["type"]) == expected:
                         matches.append(
                             CharacteristicRef(
-                                accessory["aid"], char["iid"], name, expected,
-                                actual_service, tuple(char.get("perms", [])),
+                                accessory["aid"],
+                                char["iid"],
+                                name,
+                                expected,
+                                actual_service,
+                                tuple(char.get("perms", [])),
                             )
                         )
         if len(matches) != 1:
@@ -388,6 +392,17 @@ class HAPClient:
         self._assert_secure()
         self._assert_success(result)
         self._record("write", aid=key[0], iid=key[1], value=value, secure=True)
+        self._check()
+
+    async def write_many(self, values: Iterable[tuple[CharacteristicRef, Any]]) -> None:
+        """Send multiple characteristics in one encrypted HAP request."""
+        self._check()
+        changes = [(*self._key(ref), value) for ref, value in values]
+        async with asyncio.timeout(self._timeout):
+            result = await self._pairing.put_characteristics(changes)
+        self._assert_secure()
+        self._assert_success(result)
+        self._record("write_many", characteristics=changes, secure=True)
         self._check()
 
     async def subscribe(self, refs: Iterable[CharacteristicRef | tuple[int, int]]) -> None:
