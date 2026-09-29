@@ -1,8 +1,42 @@
 """Host evidence must prove only the current lab's Docker objects were removed."""
 
+import argparse
+import hashlib
+import json
+
 import pytest
 
 from scripts import lab
+
+
+@pytest.mark.parametrize("change", ["edit", "add", "delete", "unbound_receipt"])
+def test_runtime_rejects_stale_harness_before_docker(monkeypatch, tmp_path, change):
+    monkeypatch.setattr(lab, "ROOT", tmp_path)
+    for name in ("scripts/lab.py", "tests/__init__.py", "uv.lock", "tests/lab/recipe.py"):
+        path = tmp_path / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("initial")
+    archive = tmp_path / "dist/ha_operator.zip"
+    archive.parent.mkdir()
+    archive.write_bytes(b"same release")
+    receipt = {
+        "artifact_sha256": hashlib.sha256(archive.read_bytes()).hexdigest(),
+        "lab_source_hashes": lab.lab_source_hashes(),
+    }
+    if change == "edit":
+        (tmp_path / "tests/lab/recipe.py").write_text("new assertions")
+    elif change == "add":
+        (tmp_path / "tests/lab/new_scenario.py").write_text("new scenario")
+    elif change == "delete":
+        (tmp_path / "tests/lab/recipe.py").unlink()
+    else:
+        del receipt["lab_source_hashes"]
+    prepared = tmp_path / ".lab/prepared-2026.9.3.json"
+    prepared.parent.mkdir()
+    prepared.write_text(json.dumps(receipt))
+    monkeypatch.setattr(lab, "command", lambda *a, **kw: pytest.fail("Docker must not start"))
+    with pytest.raises(RuntimeError, match="Lab sources differ"):
+        lab.run_lab(argparse.Namespace(ha_version="2026.9.3"))
 
 
 def test_prepared_versions_and_artifacts_do_not_replace_each_others_image_tags():

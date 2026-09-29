@@ -50,6 +50,10 @@ Managed entities report observed state. An accepted request or successful Home
 Assistant action does not mean that a device moved. See the
 [architecture and acknowledgement boundaries](docs/architecture.md).
 
+The [native timed window recipe](docs/window-control.md) combines expiring
+openings with a return policy, explicit position presets, and raw confirmation.
+Its isolated lab scenarios exercise native HA scripts and encrypted HomeKit commands.
+
 ## Record a passive shadow trace
 
 Version 0.1.1 adds three integration options:

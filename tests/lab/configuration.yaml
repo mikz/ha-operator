@@ -5,6 +5,13 @@ frontend:
 config:
 diagnostics:
 schedule:
+automation: !include automations.yaml
+script: !include scripts.yaml
+scene: !include scenes.yaml
+input_text:
+input_boolean:
+input_datetime:
+timer:
 api:
 websocket_api:
 history:
