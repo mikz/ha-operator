@@ -1,4 +1,7 @@
-"""Exercise native window migration configuration in the isolated packaged lab."""
+"""Exercise native window migration configuration in the isolated packaged lab.
+
+Assertions are test acceptance checks, never production safety guards.
+"""
 
 from __future__ import annotations
 
@@ -46,12 +49,24 @@ async def run_windows(lab):
             lambda state: "entity_id" in state,
         )
 
+    async def automation_config(key, entity, data):
+        previous = await ha.request("GET", "/api/states/" + entity, allow_error=True)
+        await ha.request("POST", "/api/config/automation/config/" + key, data)
+        # The native config endpoint schedules reload without waiting for it.
+        await eventually(
+            lambda: ha.request("GET", "/api/states/" + entity, allow_error=True),
+            lambda state: (
+                state.get("state") == "on"
+                and state.get("last_changed") != previous.get("last_changed")
+            ),
+        )
+
     async def helper(domain, kind, config):
         flow = await ha.request("POST", "/api/config/config_entries/flow", {"handler": domain})
         path = "/api/config/config_entries/flow/" + flow["flow_id"]
         await ha.request("POST", path, {"next_step_id": kind})
         result = await ha.request("POST", path, config)
-        assert result["type"] == "create_entry", result
+        assert result["type"] == "create_entry", result  # nosec B101
         return result["result"]["entry_id"]
 
     async def call(position=100, seconds=8, targets=None, **extra):
@@ -147,10 +162,10 @@ async def run_windows(lab):
             {"windows": {"entity_id": entities}, "duration": 8},
             allow_error=True,
         )
-        assert not rejected.get("service_response", {}).get("accepted"), rejected
-        assert not await commands_since(before)
+        assert not rejected.get("service_response", {}).get("accepted"), rejected  # nosec B101
+        assert not await commands_since(before)  # nosec B101
         for i in range(3):
-            assert (await explain(i))["manual"] is None
+            assert (await explain(i))["manual"] is None  # nosec B101
         await ha.ws("input_boolean/create", name="Lab Continuation")
         wrapper = preset("Lab guarded continuation", "script.lab_window_request", entities, 100, 8)
         wrapper["sequence"][-1:] = [
@@ -166,8 +181,8 @@ async def run_windows(lab):
             {},
             allow_error=True,
         )
-        assert (await ha.state("input_boolean.lab_continuation"))["state"] == "off"
-        assert not await commands_since(before)
+        assert (await ha.state("input_boolean.lab_continuation"))["state"] == "off"  # nosec B101
+        assert not await commands_since(before)  # nosec B101
         for i in range(3):
             await mode(i, "live")
 
@@ -175,7 +190,7 @@ async def run_windows(lab):
         await control(hidden_rain=True)
         await call(100, 20)
         original = (await explain())["manual"]
-        assert original["target"]["position"] == 100
+        assert original["target"]["position"] == 100  # nosec B101
         await ha.request(
             "POST",
             "/api/config/scene/config/lab_window_micro",
@@ -190,9 +205,9 @@ async def run_windows(lab):
             lambda state: "entity_id" in state,
         )
         await ha.service("scene", "turn_on", {"entity_id": "scene.lab_window_micro"})
-        assert (await explain())["manual"]["request_id"] == original["request_id"]
+        assert (await explain())["manual"]["request_id"] == original["request_id"]  # nosec B101
         await ha.service("script", "lab_micro_vent", {}, response=True)
-        assert (await explain())["manual"]["target"]["position"] == baseline
+        assert (await explain())["manual"]["target"]["position"] == baseline  # nosec B101
         await control(hidden_rain=False)
         await position(baseline)
 
@@ -204,7 +219,7 @@ async def run_windows(lab):
         await position(baseline)
         await control(hidden_rain=False)
         await position(100)
-        assert (await explain())["manual"]["expires_at"] == accepted["expires_at"]
+        assert (await explain())["manual"]["expires_at"] == accepted["expires_at"]  # nosec B101
         await eventually(
             lambda: lab.physical(devices[0]),
             lambda state: abs(state["position"] - baseline) <= 2,
@@ -218,27 +233,29 @@ async def run_windows(lab):
         before = (await lab.sim())["journal_seq"]
         await control(hidden_rain=False)
         await asyncio.sleep(2.3)
-        assert not [
-            item
-            for item in await commands_since(before)
-            if item["data"].get("position", 0) > baseline
-        ]
+        assert (
+            not [  # nosec B101
+                item
+                for item in await commands_since(before)
+                if item["data"].get("position", 0) > baseline
+            ]
+        )
         await position(baseline)
 
     async with lab.scenario("WINDOW-INDEPENDENT-EXPIRY-IDEMPOTENCY-SUPERSESSION"):
         deadline = time.time() + 6
         response = await call(60, 6, expires_at=deadline, request_id="fixed-window-request")
-        assert response["service_response"]["accepted"]
+        assert response["service_response"]["accepted"]  # nosec B101
         await call(60, 6, expires_at=deadline, request_id="fixed-window-request")
-        assert (await explain())["manual"]["expires_at"] == deadline
+        assert (await explain())["manual"]["expires_at"] == deadline  # nosec B101
         await call(35, 12, [entities[1]])
         await call(baseline, 3)
         await position(baseline)
         await position(35, 1)
-        assert (await explain(1))["manual"]["target"]["position"] == 35
+        assert (await explain(1))["manual"]["target"]["position"] == 35  # nosec B101
         await asyncio.sleep(6.5)
         await position(baseline)
-        assert (await explain(1))["manual"]["target"]["position"] == 35
+        assert (await explain(1))["manual"]["target"]["position"] == 35  # nosec B101
 
     async with lab.scenario("WINDOW-MULTI-PREFLIGHT-AND-GROUP-AVERAGE"):
         await mode(2, "observe")
@@ -249,8 +266,8 @@ async def run_windows(lab):
             {"windows": {"entity_id": "cover.lab_window_group"}, "position": 45, "duration": 10},
             allow_error=True,
         )
-        assert not failure.get("service_response", {}).get("accepted"), failure
-        assert [(await explain(i))["manual"] for i in range(3)] == original
+        assert not failure.get("service_response", {}).get("accepted"), failure  # nosec B101
+        assert [(await explain(i))["manual"] for i in range(3)] == original  # nosec B101
         await mode(2, "live")
         for i, value in enumerate((0, 7, 14)):
             await ha.service("ha_operator", "release", {"resource_id": resources[i]})
@@ -264,7 +281,7 @@ async def run_windows(lab):
         )
         await call(baseline, 8, ["cover.lab_window_group"])
         for i in range(3):
-            assert (await explain(i))["manual"]["target"]["position"] == baseline
+            assert (await explain(i))["manual"]["target"]["position"] == baseline  # nosec B101
             await control(i, hidden_rain=False, refuse_actions=[])
             await position(baseline, i)
 
@@ -285,7 +302,7 @@ async def run_windows(lab):
         await control(2, position=baseline, hidden_rain=False, refuse_actions=[])
 
     async with lab.scenario("WINDOW-NO-PHYSICAL-STOP"):
-        assert not (await ha.state(entities[2]))["attributes"]["supported_features"] & 8
+        assert not (await ha.state(entities[2]))["attributes"]["supported_features"] & 8  # nosec B101
         await ha.service(
             "ha_operator",
             "request",
@@ -293,9 +310,11 @@ async def run_windows(lab):
         )
         before = (await lab.sim())["journal_seq"]
         await asyncio.sleep(1.5)
-        assert not [
-            item for item in await commands_since(before) if item["device_id"] == devices[2]
-        ]
+        assert (
+            not [  # nosec B101
+                item for item in await commands_since(before) if item["device_id"] == devices[2]
+            ]
+        )
         await ha.service("ha_operator", "release", {"resource_id": resources[2]})
 
     async with lab.scenario("WINDOW-TIMER-OCCURRENCE-CANCEL-RESTART"):
@@ -329,19 +348,49 @@ async def run_windows(lab):
             {"id": "lab_window_timer", **config},
         )
         await ha.service("ha_operator", "release", {"resource_id": resources[0]})
+        await ha.service(
+            "input_text",
+            "set_value",
+            {
+                "entity_id": record,
+                "value": json.dumps(
+                    {"v": 1, "phase": "idle", "initialized_at": time.time()},
+                    separators=(",", ":"),
+                ),
+            },
+        )
         await ha.service("input_boolean", "turn_on", {"entity_id": "input_boolean.lab_timer_ready"})
         await ha.service("timer", "start", {"entity_id": timer})
         await ha.service("timer", "cancel", {"entity_id": timer})
         await asyncio.sleep(5.3)
         await position(baseline)
         await ha.service("timer", "start", {"entity_id": timer})
+        armed = json.loads((await ha.state(record))["state"])
+        await ha.service("timer", "start", {"entity_id": timer, "duration": "00:01:30"})
+        await eventually(
+            lambda: ha.state(record),
+            lambda state: json.loads(state["state"]).get("id") != armed["id"],
+            timeout=5,
+        )
+        await position(100)
+        admitted = json.loads((await ha.state(record))["state"])
+        await ha.service("timer", "start", {"entity_id": timer, "duration": "00:02:00"})
+        await eventually(
+            lambda: ha.state(record),
+            lambda state: json.loads(state["state"]).get("id") != admitted["id"],
+            timeout=5,
+        )
+        await position(baseline)
         await position(100)
         await ha.service("timer", "pause", {"entity_id": timer})
         await position(baseline)
         await ha.service("timer", "start", {"entity_id": timer})
         await asyncio.sleep(5.3)
         await position(baseline)
+        await ha.service("timer", "start", {"entity_id": timer, "duration": "00:01:00"})
+        await position(100)
         await ha.service("timer", "cancel", {"entity_id": timer})
+        await position(baseline)
 
     async with lab.scenario("WINDOW-COLD-POLICY-MANUAL-PRECEDENCE"):
         await ha.ws("input_text/create", name="Lab Cold Epoch", max=255)
@@ -385,6 +434,8 @@ async def run_windows(lab):
             lambda state: abs(state["position"] - baseline) <= 2,
             timeout=15,
         )
+        await lab.sim("POST", "/admin/devices/cellar_target", {"value": 20})
+        await eventually(lambda: ha.state(cold), lambda state: state["state"] == "off")
 
     for action in ("restart", "kill"):
         async with lab.scenario("WINDOW-EXPIRED-OPENING-" + action.upper()):
@@ -412,7 +463,7 @@ async def run_windows(lab):
                     },
                 )
                 await asyncio.sleep(5.3)
-                assert (await explain())["decision"]["target"]["position"] == baseline
+                assert (await explain())["decision"]["target"]["position"] == baseline  # nosec B101
             await control(hidden_rain=True)
             await call(100, 3)
             simulator_id = (await lab.sim(path="/health"))["instance_id"]
@@ -420,18 +471,90 @@ async def run_windows(lab):
             if action == "kill":
                 await lab.crash("start")
             await lab.ready()
-            assert (await ha.state("input_boolean.lab_timer_ready"))["state"] == "on"
-            assert (await ha.state(record))["state"] == "{}"
-            assert (await lab.sim(path="/health"))["instance_id"] == simulator_id
+            assert (await ha.state("input_boolean.lab_timer_ready"))["state"] == "on"  # nosec B101
+            assert json.loads((await ha.state(record))["state"])["phase"] == "idle"  # nosec B101
+            assert (await lab.sim(path="/health"))["instance_id"] == simulator_id  # nosec B101
             before = (await lab.sim())["journal_seq"]
             await control(hidden_rain=False)
             await position(baseline)
             await asyncio.sleep(2.2)
-            assert not [
-                item
-                for item in await commands_since(before)
-                if item["data"].get("position", 0) > baseline
-            ]
+            assert (
+                not [  # nosec B101
+                    item
+                    for item in await commands_since(before)
+                    if item["data"].get("position", 0) > baseline
+                ]
+            )
+            if action == "restart":
+                await ha.service("timer", "start", {"entity_id": timer})
+                await position(100)
+                await ha.service("timer", "cancel", {"entity_id": timer})
+                await position(baseline)
+
+    async with lab.scenario("WINDOW-PAUSED-TIMER-RESTORATION"):
+        await ha.service("timer", "start", {"entity_id": timer})
+        await position(100)
+        await ha.service("timer", "pause", {"entity_id": timer})
+        await position(baseline)
+        await lab.crash("restart")
+        await lab.ready()
+        assert json.loads((await ha.state(record))["state"])["phase"] == "paused"  # nosec B101
+        await ha.service("timer", "start", {"entity_id": timer})
+        await asyncio.sleep(5.3)
+        await position(baseline)
+        await ha.service("timer", "start", {"entity_id": timer})
+        await position(100)
+        await ha.service("timer", "cancel", {"entity_id": timer})
+        await position(baseline)
+
+    async with lab.scenario("WINDOW-TIMER-PAUSE-WITHDRAWAL-FAILURE"):
+        import copy
+
+        broken = copy.deepcopy(config)
+
+        def break_withdrawal(value):
+            if isinstance(value, dict):
+                if value.get("action") == "ha_operator.skip_occurrence":
+                    value["data"]["policy_id"] = "missing-policy"
+                for child in value.values():
+                    break_withdrawal(child)
+            elif isinstance(value, list):
+                for child in value:
+                    break_withdrawal(child)
+
+        await ha.service("timer", "start", {"entity_id": timer})
+        await position(100)
+        original = json.loads((await ha.state(record))["state"])
+        break_withdrawal(broken)
+        await automation_config(
+            "lab_window_timer",
+            "automation.timed_window_occurrence",
+            {"id": "lab_window_timer", **broken},
+        )
+        await ha.service("timer", "pause", {"entity_id": timer})
+        paused = await eventually(
+            lambda: ha.state(record),
+            lambda state: json.loads(state["state"]).get("phase") == "paused",
+        )
+        assert json.loads(paused["state"])["id"] == original["id"]  # nosec B101
+        await ha.service("timer", "start", {"entity_id": timer})
+        await asyncio.sleep(0.3)
+        assert json.loads((await ha.state(record))["state"])["id"] == original["id"]  # nosec B101
+        await automation_config(
+            "lab_window_timer",
+            "automation.timed_window_occurrence",
+            {"id": "lab_window_timer", **config},
+        )
+        await ha.service("timer", "start", {"entity_id": timer})
+        await position(baseline)
+        await eventually(
+            lambda: ha.state(record),
+            lambda state: json.loads(state["state"])["phase"] == "idle",
+        )
+        await ha.service("timer", "start", {"entity_id": timer})
+        await position(100)
+        await ha.service("timer", "cancel", {"entity_id": timer})
+        await position(baseline)
 
     await lab.homekit()
     async with lab.scenario("WINDOW-SAME-VALUE-HAP-REPLACES-INTENT"):
@@ -466,10 +589,14 @@ async def run_windows(lab):
             },
         )
         await lab.sim("POST", "/admin/devices/cellar_target", {"value": 10})
+        await eventually(
+            lambda: ha.state("sensor.sim_cellar_target"),
+            lambda state: float(state["state"]) == 10,
+        )
         await ha.service("ha_operator", "release", {"resource_id": resources[1]})
-        await ha.request(
-            "POST",
-            "/api/config/automation/config/lab_window_automatic",
+        await automation_config(
+            "lab_window_automatic",
+            "automation.lab_automatic_window",
             {
                 "id": "lab_window_automatic",
                 "alias": "Lab automatic window",
@@ -586,15 +713,15 @@ async def run_windows(lab):
         await ha.ws("config/entity_registry/update", entity_id=old, new_entity_id=logical)
         await ha.reload_entry(group_entry)
         after_registry = await ha.ws("config/entity_registry/get", entity_id=logical)
-        assert after_registry["unique_id"] == before_registry["unique_id"]
-        assert after_registry["platform"] == "ha_operator"
+        assert after_registry["unique_id"] == before_registry["unique_id"]  # nosec B101
+        assert after_registry["platform"] == "ha_operator"  # nosec B101
         await ha.service(
             "cover",
             "set_cover_position",
             {"entity_id": "cover.lab_migration_group", "position": 35},
         )
         await position(35, 2)
-        assert (await explain(2))["manual"]["target"]["position"] == 35
+        assert (await explain(2))["manual"]["target"]["position"] == 35  # nosec B101
         await ha.ws("config/entity_registry/update", entity_id=logical, new_entity_id=old)
         await ha.service("ha_operator", "release", {"resource_id": resources[2]})
 
@@ -649,14 +776,16 @@ async def run_windows(lab):
             current = (
                 await ha.service("ha_operator", "explain", {"resource_id": fan}, response=True)
             )["service_response"]["resources"][fan]["manual"]
-            assert current == original
+            assert current == original  # nosec B101
         events = [
             item
             for item in await lab.journal()
             if item["seq"] > marker and item["device_id"].startswith("cellar_")
         ]
-        assert not [
-            item
-            for item in events
-            if item["kind"] == "command" and item["data"]["action"] == "turn_off"
-        ]
+        assert (
+            not [  # nosec B101
+                item
+                for item in events
+                if item["kind"] == "command" and item["data"]["action"] == "turn_off"
+            ]
+        )

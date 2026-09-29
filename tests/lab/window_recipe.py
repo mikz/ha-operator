@@ -260,6 +260,15 @@ def timer_automation(timer, record, policy_id, managed, ready, *, qualify=60, du
             }
         ],
     }
+    gate = "{{ trigger.id == 'startup' or is_state(" + literal(ready) + ", 'on') }}"
+
+    def marker(phase):
+        return save(
+            "{{ dict(v=1, phase="
+            + literal(phase)
+            + ", initialized_at=episode.initialized_at) | to_json }}"
+        )
+
     return {
         "alias": "Timed window occurrence",
         "mode": "queued",
@@ -271,42 +280,78 @@ def timer_automation(timer, record, policy_id, managed, ready, *, qualify=60, du
                 "event_data": {"entity_id": timer},
                 "id": "start",
             },
+            {
+                "trigger": "event",
+                "event_type": "timer.restarted",
+                "event_data": {"entity_id": timer},
+                "id": "restart",
+            },
             *[
                 {
                     "trigger": "event",
                     "event_type": "timer." + event,
                     "event_data": {"entity_id": timer},
-                    "id": "cancel",
+                    "id": "pause" if event == "paused" else "cancel",
                 }
                 for event in ("cancelled", "paused")
             ],
             {"trigger": "time_pattern", "seconds": "/5", "id": "wake"},
             {"trigger": "homeassistant", "event": "start", "id": "startup"},
         ],
+        "conditions": [{"condition": "template", "value_template": gate}],
         "actions": [
+            {"condition": "template", "value_template": gate},
+            {"variables": {"episode": "{{ states(" + literal(record) + ") | from_json(none) }}"}},
             {
-                "condition": "template",
-                "value_template": "{{ trigger.id == 'startup' or is_state("
-                + literal(ready)
-                + ", 'on') }}",
+                "if": "{{ trigger.id == 'startup' }}",
+                "then": [
+                    {"action": "input_boolean.turn_off", "target": {"entity_id": ready}},
+                    check(
+                        "{{ episode is not mapping or states("
+                        + literal(timer)
+                        + ") not in ['active','paused','idle'] or (episode and (episode.get('v') != 1 or episode.get('phase') not in ['idle','paused','armed','admitted','replacing'] or (episode.get('id') and (episode.get('id') is not string or episode.get('expires') is not number)))) }}",
+                        "Cannot initialize timer clock from unknown state.",
+                    ),
+                    save(
+                        "{{ dict(episode, v=1, initialized_at=as_timestamp(now()), phase=('paused' if is_state("
+                        + literal(timer)
+                        + ", 'paused') else ('admitted' if episode.get('phase') == 'admitted' else 'idle'))) | to_json }}"
+                    ),
+                    {
+                        "if": "{{ is_state(" + literal(timer) + ", 'paused') }}",
+                        "then": [
+                            cancel,
+                            save(
+                                "{{ dict(v=1, phase='paused', initialized_at=as_timestamp(now())) | to_json }}"
+                            ),
+                        ],
+                    },
+                    {"action": "input_boolean.turn_on", "target": {"entity_id": ready}},
+                    {"stop": "Timer clock initialized without a new occurrence."},
+                ],
             },
-            {"variables": {"episode": "{{ states(" + literal(record) + ") | from_json({}) }}"}},
-            {
-                "if": "{{ episode is not mapping or (episode and (episode.get('v') != 1 or episode.get('due') is not number or episode.get('expires') is not number or episode.get('id') is not string or episode.get('phase') not in ['armed','admitted'])) }}",
-                "then": [save("{}"), {"stop": "Malformed timer record; disarmed."}],
-            },
+            check(
+                "{{ episode is not mapping or episode.get('v') != 1 or episode.get('initialized_at') is not number or episode.get('phase') not in ['idle','paused','armed','admitted','replacing'] or (episode.get('id') and (episode.get('expires') is not number or episode.get('id') is not string)) or (episode.get('phase') in ['armed','admitted'] and (episode.get('due') is not number or not episode.get('id'))) }}",
+                "Malformed or uninitialized timer clock; initialize it before admitting events.",
+            ),
+            check(
+                "{{ trigger.platform == 'event' and as_timestamp(trigger.event.time_fired) <= episode.initialized_at }}",
+                "Discarding an event captured before timer-clock initialization.",
+            ),
             {
                 "choose": [
                     {
-                        "conditions": "{{ trigger.id == 'startup' }}",
+                        "conditions": "{{ trigger.id == 'restart' and episode.phase == 'paused' }}",
                         "sequence": [
-                            {"if": "{{ episode.get('phase') == 'armed' }}", "then": [save("{}")]},
-                            {"action": "input_boolean.turn_on", "target": {"entity_id": ready}},
+                            cancel,
+                            marker("idle"),
+                            {"stop": "Paused timer resumed without a new opening."},
                         ],
                     },
                     {
-                        "conditions": "{{ trigger.id == 'start' }}",
+                        "conditions": "{{ trigger.id in ['start','restart'] }}",
                         "sequence": [
+                            save("{{ dict(episode, phase='replacing') | to_json }}"),
                             cancel,
                             {
                                 "variables": {
@@ -314,7 +359,7 @@ def timer_automation(timer, record, policy_id, managed, ready, *, qualify=60, du
                                 }
                             },
                             save(
-                                "{{ dict(v=1, id='timer-' ~ epoch, due=epoch + "
+                                "{{ dict(v=1, initialized_at=episode.initialized_at, id='timer-' ~ epoch, due=epoch + "
                                 + str(qualify)
                                 + ", expires=epoch + "
                                 + str(qualify + duration)
@@ -325,10 +370,15 @@ def timer_automation(timer, record, policy_id, managed, ready, *, qualify=60, du
                         ],
                     },
                     {
-                        "conditions": "{{ trigger.id == 'cancel' }}",
+                        "conditions": "{{ trigger.id in ['pause','cancel'] }}",
                         "sequence": [
+                            save(
+                                "{{ dict(episode, phase=('paused' if trigger.id == 'pause' else 'idle')) | to_json }}"
+                            ),
                             cancel,
-                            save("{}"),
+                            save(
+                                "{{ dict(v=1, initialized_at=episode.initialized_at, phase=('paused' if trigger.id == 'pause' else 'idle')) | to_json }}"
+                            ),
                         ],
                     },
                     {

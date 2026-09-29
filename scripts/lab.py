@@ -71,6 +71,20 @@ def image_references(ha_version, digest):
     }
 
 
+def lab_source_hashes():
+    """Bind prepared images to the harness that runtime will actually execute."""
+    files = [ROOT / "scripts/lab.py", ROOT / "tests/__init__.py", ROOT / "uv.lock"]
+    files.extend(
+        path
+        for path in (ROOT / "tests/lab").rglob("*")
+        if path.is_file() and "__pycache__" not in path.parts and path.suffix != ".pyc"
+    )
+    return {
+        str(path.relative_to(ROOT)): hashlib.sha256(path.read_bytes()).hexdigest()
+        for path in sorted(files)
+    }
+
+
 def prepare(args):
     """Only this phase is allowed to fetch/build dependencies."""
     command([sys.executable, "scripts/release.py", "verify"], capture=False)
@@ -78,6 +92,7 @@ def prepare(args):
     digest = hashlib.sha256(archive.read_bytes()).hexdigest()
     prepared_dir = ROOT / ".lab"
     prepared_dir.mkdir(exist_ok=True)
+    sources = lab_source_hashes()
     requirements = output(
         [
             "uv",
@@ -115,12 +130,15 @@ def prepare(args):
             capture=False,
             timeout=1800,
         )
+    if sources != lab_source_hashes():
+        raise RuntimeError("Lab sources changed during image preparation; run prepare again")
     receipt = {
         "ha_version": args.ha_version,
         "artifact_sha256": digest,
         "base_images": {"ha": ha_base, "python": python_base},
         "images": {role: image_id(ref) for role, ref in references.items()},
         "uv_lock_sha256": hashlib.sha256((ROOT / "uv.lock").read_bytes()).hexdigest(),
+        "lab_source_hashes": sources,
         "prepared_at": time.time(),
     }
     write_json(prepared_dir / f"prepared-{args.ha_version}.json", receipt)
@@ -187,6 +205,8 @@ def run_lab(args):
     archive_digest = hashlib.sha256((ROOT / "dist/ha_operator.zip").read_bytes()).hexdigest()
     if archive_digest != receipt["artifact_sha256"]:
         raise RuntimeError("Release differs from prepared image; run prepare again")
+    if receipt.get("lab_source_hashes") != lab_source_hashes():
+        raise RuntimeError("Lab sources differ from prepared images; run prepare again")
     for image in receipt["images"].values():
         if image_id(image) != image:
             raise RuntimeError("Prepared image unavailable")

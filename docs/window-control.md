@@ -36,10 +36,13 @@ average position also does not establish that every member reached its target.
 
 ## Automatic requests and confirmation
 
-The timer recipe gives each fresh start an identity and absolute expiry. Pause,
-cancel, and replacement suppress the prior occurrence. A resumed timer does not
-create a new opening. Startup discards unadmitted timer qualifications; Operator
-restores already accepted occurrences through its own durable store.
+The timer recipe gives each fresh start, including a restart while active, an
+identity and absolute expiry. Pause, cancel, and replacement suppress the prior
+occurrence. A paused marker distinguishes resume from active restart. It is saved
+before withdrawal, so a failed withdrawal cannot turn resume into a new opening.
+Startup reconciles that marker with the restored timer state and invalidates
+unadmitted qualifications. A timestamp rejects events captured before readiness.
+Operator restores already accepted occurrences through its own durable store.
 
 The temperature recipe keeps a qualification deadline in a native helper. A
 fresh numeric HA report is required after startup. Unknown values preserve the
@@ -53,6 +56,9 @@ Create each clock's readiness helper and the cold eligibility boolean with
 freshness, then enables that clock's readiness helper last. Qualification actions
 reject a closed or unavailable readiness gate. After installing or reloading
 these automations, initialize their records before enabling readiness.
+The timer record starts as `{"v":1,"phase":"idle","initialized_at":UTC_EPOCH}`;
+use `"paused"` when the existing timer is paused. Set `UTC_EPOCH` to the actual
+initialization time. Unknown or malformed timer records inhibit admission.
 
 Native helper restoration is weaker than Operator's atomic persistence. Helpers
 track qualification and alert clocks, not durable command acceptance. Only the
@@ -83,6 +89,8 @@ integration through native scripts, helpers, scenes, registry changes, and
 encrypted HomeKit commands. Simulator effects establish movement and ordering.
 Accelerated timing verifies behavior without claiming a production-duration
 observation period.
+Prepared-image receipts include the lab source hashes. A changed recipe, runner,
+or simulator requires preparing the images again before another accepted run.
 
 Use the [migration runbook](migration.md) for ownership transfer and rollback.
 Inspect every saved consumer after a registry rename. Keep the group and shared
