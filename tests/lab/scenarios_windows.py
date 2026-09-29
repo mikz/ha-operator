@@ -767,15 +767,30 @@ async def run_windows(lab):
             {"resource_id": fan, "target": {"profile": "inward"}, "duration": 120},
         )
         await eventually(lambda: lab.physical("cellar_inward_relay"), lambda state: state["on"])
-        original = (
-            await ha.service("ha_operator", "explain", {"resource_id": fan}, response=True)
-        )["service_response"]["resources"][fan]["manual"]
+
+        async def settled_fan():
+            async def state():
+                return (
+                    await ha.service("ha_operator", "explain", {"resource_id": fan}, response=True)
+                )["service_response"]["resources"][fan]
+
+            return await eventually(
+                state,
+                lambda value: (
+                    value["decision"]["status"] == "satisfied"
+                    and value["observation"]["target"]["profile"] == "inward"
+                ),
+            )
+
+        # Physical effect can precede HA's next poll. This case reloads a settled
+        # fan, not one whose initial relay transition is still unconfirmed.
+        settled = await settled_fan()
+        original = settled["manual"]
+        (ARTIFACTS / "window-fan-before-reload.json").write_text(json.dumps(settled, indent=2))
         marker = (await lab.sim())["journal_seq"]
         for _ in range(3):
             await ha.reload_entry(lab.entry)
-            current = (
-                await ha.service("ha_operator", "explain", {"resource_id": fan}, response=True)
-            )["service_response"]["resources"][fan]["manual"]
+            current = (await settled_fan())["manual"]
             assert current == original  # nosec B101
         events = [
             item
