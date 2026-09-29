@@ -724,6 +724,12 @@ async def main():
             lab = Lab(session, page)
             try:
                 await lab.bootstrap()
+                if os.environ["LAB_SCENARIO"] == "windows":
+                    from .scenarios_windows import run_windows
+
+                    await run_windows(lab)
+                    await lab.diagnostics()
+                    return
                 if os.environ["LAB_SCENARIO"] == "replay":
                     from .scenarios_shadow import run_external_replay
 

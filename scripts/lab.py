@@ -390,7 +390,7 @@ def main():
     parser.add_argument("--ha-version", choices=SUPPORTED, default=SUPPORTED[0])
     parser.add_argument(
         "--scenario",
-        choices=("smoke", "cover", "all", "soak", "cellar", "shadow", "replay"),
+        choices=("smoke", "cover", "all", "soak", "cellar", "windows", "shadow", "replay"),
         default="all",
     )
     parser.add_argument("--timeout", type=float, default=900)

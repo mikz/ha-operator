@@ -29,10 +29,18 @@ def main():
         if receipt.exists() and receipt.read_text().strip() != digest:
             raise SystemExit("Persistent configuration contains another release")
         if not receipt.exists():
-            configuration = Path("/lab/configuration.yaml").read_text().replace(
-                "LAB_HA_ADDRESS", os.environ["LAB_HA_ADDRESS"]
+            configuration = (
+                Path("/lab/configuration.yaml")
+                .read_text()
+                .replace("LAB_HA_ADDRESS", os.environ["LAB_HA_ADDRESS"])
             )
             (config / "configuration.yaml").write_text(configuration)
+            for filename, initial in (
+                ("automations.yaml", "[]\n"),
+                ("scripts.yaml", "{}\n"),
+                ("scenes.yaml", "[]\n"),
+            ):
+                (config / filename).write_text(initial)
             target = config / "custom_components"
             target.mkdir(exist_ok=True)
             shutil.copytree("/opt/ha-operator/integration", target / "ha_operator")
