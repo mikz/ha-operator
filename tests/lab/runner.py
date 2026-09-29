@@ -277,6 +277,16 @@ class Lab:
             await self.page.goto(self.ha.base + "/", wait_until="domcontentloaded")
             await self.page.get_by_role("button", name="Create my smart home").click()
             password = secrets.token_urlsafe(24)
+            if os.environ["LAB_SCENARIO"] == "observability":
+                # Host-owned 0700 control directory; never part of published evidence.
+                (CONTROL / "preview-login.json").write_text(
+                    json.dumps(
+                        {
+                            "username": "lab_operator",
+                            "password": password,
+                        }
+                    )
+                )
             self.record_secret(password)
             for name, value in (
                 ("name", "Lab Operator"),
@@ -724,6 +734,12 @@ async def main():
             lab = Lab(session, page)
             try:
                 await lab.bootstrap()
+                if os.environ["LAB_SCENARIO"] == "observability":
+                    from .scenarios_observability import run_observability
+
+                    await run_observability(lab)
+                    await lab.diagnostics()
+                    return
                 if os.environ["LAB_SCENARIO"] == "windows":
                     from .scenarios_windows import run_windows
 

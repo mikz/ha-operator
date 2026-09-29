@@ -2,6 +2,8 @@ homeassistant:
   name: HA Operator Lab
 analytics:
 frontend:
+lovelace:
+  mode: storage
 config:
 diagnostics:
 schedule:
@@ -10,6 +12,9 @@ script: !include scripts.yaml
 scene: !include scenes.yaml
 input_text:
 input_boolean:
+  demo_evening:
+    name: Evening ventilation
+    initial: false
 input_datetime:
 timer:
 api:

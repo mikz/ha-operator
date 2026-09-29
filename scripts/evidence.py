@@ -22,8 +22,28 @@ from scripts.release import archive_bytes, digest, integration_files, verify  # 
 from tests.lab.redaction import sanitize_artifacts  # noqa: E402
 
 VERSIONS = {"2026.9.3", "2026.9.4"}
-LAB_CASES = {("2026.9.3", "all"), ("2026.9.4", "all"), ("2026.9.3", "soak")}
+LAB_CASES = {
+    ("2026.9.3", "all"),
+    ("2026.9.4", "all"),
+    ("2026.9.3", "soak"),
+    ("2026.9.3", "observability"),
+    ("2026.9.4", "observability"),
+}
 INITIAL_SCENARIOS = {"LAB-ONBOARDING", "LAB-NATIVE-CONFIG-FLOW", "LAB-RESOURCE-CONFIGURATION"}
+OBSERVABILITY_SCENARIOS = INITIAL_SCENARIOS | {
+    "OBS-NATIVE-ENTITIES",
+    "OBS-REASON-CHANGE-NO-DISPATCH",
+    "OBS-EXPIRY-AND-RECORDER",
+    "OBS-FAN-PROFILE-REASON",
+    "OBS-NATIVE-DASHBOARD",
+    "LAB-DIAGNOSTICS",
+}
+OBSERVABILITY_FILES = {
+    "observability-history.json",
+    "observability-activity.json",
+    "observability-dashboard.json",
+    "observability-dashboard.png",
+}
 SHADOW_SCENARIOS = {
     "SHADOW-LOCK-ZERO-COMMANDS",
     "SHADOW-LOCK-RELOAD-RESTART",
@@ -72,31 +92,35 @@ ALL_SCENARIOS = (
         "RELAY-REVERSAL-CONFIRMED-DEAD-TIME",
     }
 )
-LAB_FILES = SHADOW_FILES | {
-    "summary.json",
-    "sanitized.json",
-    "cleanup-verification.json",
-    "prepared.json",
-    "compose.json",
-    "inspect.json",
-    "scenarios.json",
-    "routes-ha.json",
-    "routes-simulator.json",
-    "routes-runner.json",
-    "simulator-journal.json",
-    "crash-events.jsonl",
-    "trace.zip",
-    "hap-transcript.jsonl",
-    "hap-accessories.json",
-    "hap-durable-receipt.json",
-    "downloaded-diagnostics.json",
-    "ha.log",
-    "simulator.log",
-    "runner.log",
-    "onboarding-complete.png",
-    "integration-configured.png",
-    "native-cover-closed.png",
-}
+LAB_FILES = (
+    SHADOW_FILES
+    | OBSERVABILITY_FILES
+    | {
+        "summary.json",
+        "sanitized.json",
+        "cleanup-verification.json",
+        "prepared.json",
+        "compose.json",
+        "inspect.json",
+        "scenarios.json",
+        "routes-ha.json",
+        "routes-simulator.json",
+        "routes-runner.json",
+        "simulator-journal.json",
+        "crash-events.jsonl",
+        "trace.zip",
+        "hap-transcript.jsonl",
+        "hap-accessories.json",
+        "hap-durable-receipt.json",
+        "downloaded-diagnostics.json",
+        "ha.log",
+        "simulator.log",
+        "runner.log",
+        "onboarding-complete.png",
+        "integration-configured.png",
+        "native-cover-closed.png",
+    }
+)
 TEST_FILES = {"result.json", "coverage.json", "junit.xml", "pytest.log", "dependencies.txt"}
 
 
@@ -362,6 +386,10 @@ def validate_lab(directory: Path, manifest: dict) -> tuple[str, str]:
         ):
             require((directory / name).is_file(), f"Missing {name}")
         validate_shadow_replay(directory, manifest)
+    elif case[1] == "observability":
+        required = OBSERVABILITY_SCENARIOS
+        for name in OBSERVABILITY_FILES:
+            require((directory / name).is_file(), f"Missing {name}")
     else:
         required.add("LAB-REALISTIC-SOAK")
         soak = next((item for item in scenarios if item["id"] == "LAB-REALISTIC-SOAK"), {})
@@ -539,8 +567,8 @@ def build_evidence(
     require(bool(manifest.get("source_commit")), "Release must identify its source commit")
     selected = [validate_lab(directory, manifest) for directory in labs]
     require(
-        len(selected) == 3 and set(selected) == LAB_CASES,
-        "Need exactly both HA all runs and baseline soak",
+        len(selected) == len(LAB_CASES) and set(selected) == LAB_CASES,
+        "Need both HA all runs, both observability runs, and baseline soak",
     )
     versions = [validate_tests(directory, manifest, root) for directory in tests]
     require(

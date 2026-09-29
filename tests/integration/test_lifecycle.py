@@ -40,7 +40,7 @@ async def test_real_setup_observe_registry_and_reload(hass, tmp_path):
     records = [
         item for item in registry.entities.values() if item.config_entry_id == entry.entry_id
     ]
-    assert len(records) == 10
+    assert len(records) == 12
     assert {item.config_subentry_id for item in records} == {"roof"}
     assert len({item.device_id for item in records}) == 1
     assert raw.commands == []
@@ -48,7 +48,7 @@ async def test_real_setup_observe_registry_and_reload(hass, tmp_path):
     assert (
         registry.async_get(managed_id(hass, "sensor", key="next_attempt")).disabled_by is not None
     )
-    assert len(entry.runtime_data._tasks) == 1 and len(entry.runtime_data._listeners) == 8
+    assert len(entry.runtime_data._tasks) == 1 and len(entry.runtime_data._listeners) == 10
     for _ in range(3):
         previous = entry.runtime_data
         assert await hass.config_entries.async_reload(entry.entry_id)

@@ -399,6 +399,8 @@ def run_lab(args):
         finally:
             secret_receipt.unlink(missing_ok=True)
             (control / ".secrets.tmp").unlink(missing_ok=True)
+            if not args.keep:
+                (control / "preview-login.json").unlink(missing_ok=True)
     return published
 
 
@@ -410,7 +412,17 @@ def main():
     parser.add_argument("--ha-version", choices=SUPPORTED, default=SUPPORTED[0])
     parser.add_argument(
         "--scenario",
-        choices=("smoke", "cover", "all", "soak", "cellar", "windows", "shadow", "replay"),
+        choices=(
+            "smoke",
+            "cover",
+            "all",
+            "soak",
+            "cellar",
+            "windows",
+            "shadow",
+            "replay",
+            "observability",
+        ),
         default="all",
     )
     parser.add_argument("--timeout", type=float, default=900)

@@ -12,6 +12,8 @@ from scripts.evidence import (
     INITIAL_SCENARIOS,
     LAB_CASES,
     MUTANTS,
+    OBSERVABILITY_FILES,
+    OBSERVABILITY_SCENARIOS,
     SHADOW_FILES,
     SHADOW_SCENARIOS,
     TEST_FILES,
@@ -82,8 +84,14 @@ def complete_evidence(tmp_path):
             },
         )
         names = sorted(
-            ALL_SCENARIOS if scenario == "all" else INITIAL_SCENARIOS | {"LAB-REALISTIC-SOAK"}
+            ALL_SCENARIOS
+            if scenario == "all"
+            else OBSERVABILITY_SCENARIOS
+            if scenario == "observability"
+            else INITIAL_SCENARIOS | {"LAB-REALISTIC-SOAK"}
         )
+        for name in OBSERVABILITY_FILES:
+            (run / name).write_text("{}")
         write_json(
             run / "scenarios.json",
             [
@@ -109,16 +117,18 @@ def complete_evidence(tmp_path):
             run / "shadow-trace.json",
             {
                 "schema": 1,
-                "pages": [{
-                    "schema": 1,
-                    "integration_version": manifest["version"],
-                    "component_sha256": manifest["component_sha256"],
-                    "config_hash": "a" * 64,
-                    "gap": False,
-                    "more": False,
-                    "health": {"enabled": True, "healthy": True},
-                    "records": [{"sequence": 1, "kind": "decision"}],
-                }],
+                "pages": [
+                    {
+                        "schema": 1,
+                        "integration_version": manifest["version"],
+                        "component_sha256": manifest["component_sha256"],
+                        "config_hash": "a" * 64,
+                        "gap": False,
+                        "more": False,
+                        "health": {"enabled": True, "healthy": True},
+                        "records": [{"sequence": 1, "kind": "decision"}],
+                    }
+                ],
             },
         )
         write_json(
@@ -258,7 +268,7 @@ def test_bundle_contains_only_selected_successes_and_preserves_release_bytes(com
     first = build_evidence(**arguments)
     content = arguments["output"].read_bytes()
     assert first["status"] == "passed"
-    assert len(first["checks"]["lab"]) == 3
+    assert len(first["checks"]["lab"]) == len(LAB_CASES)
     assert build_evidence(**arguments) == first
     assert arguments["output"].read_bytes() == content
     with zipfile.ZipFile(arguments["output"]) as bundle:
@@ -289,7 +299,7 @@ def test_rejects_mixed_archive_and_missing_required_runs(complete_evidence):
     with pytest.raises(ValueError, match="another archive"):
         build_evidence(**complete_evidence)
     complete_evidence["labs"] = complete_evidence["labs"][1:]
-    with pytest.raises(ValueError, match="exactly both"):
+    with pytest.raises(ValueError, match="Need both"):
         build_evidence(**complete_evidence)
 
 
@@ -326,7 +336,7 @@ def test_sanitized_junit_has_explicit_provenance_and_valid_delivered_hashes(comp
     original_junit = junit.read_bytes()
     index = build_evidence(**complete_evidence)
     with zipfile.ZipFile(complete_evidence["output"]) as bundle:
-        prefix = f'evidence/tests/{original["ha_version"]}/'
+        prefix = f"evidence/tests/{original['ha_version']}/"
         delivered = json.loads(bundle.read(prefix + "result.json"))
         assert delivered["files"]["junit.xml"] == digest(bundle.read(prefix + "junit.xml"))
         assert b"[REDACTED]" in bundle.read(prefix + "junit.xml")

@@ -31,10 +31,14 @@ class OperatorSwitch(ResourceEntity, SwitchEntity):
         return target.on if target else None
 
     async def async_turn_on(self, **kwargs: Any) -> None:
-        await self.runtime.async_request(self.identifier, target={"on": True}, source="entity")
+        await self.runtime.async_request(
+            self.identifier, target={"on": True}, source="entity", context=self._context
+        )
 
     async def async_turn_off(self, **kwargs: Any) -> None:
-        await self.runtime.async_request(self.identifier, target={"on": False}, source="entity")
+        await self.runtime.async_request(
+            self.identifier, target={"on": False}, source="entity", context=self._context
+        )
 
 
 class PolicySwitch(OperatorEntity, SwitchEntity):

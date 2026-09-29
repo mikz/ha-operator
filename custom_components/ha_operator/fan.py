@@ -71,20 +71,25 @@ class OperatorFan(ResourceEntity, FanEntity):
         target: dict[str, Any] = {"on": True}
         if percentage is not None:
             target.update(percentage=percentage, on=percentage > 0)
-        await self.runtime.async_request(self.identifier, target=target, source="entity")
+        await self.runtime.async_request(
+            self.identifier, target=target, source="entity", context=self._context
+        )
 
     async def async_turn_off(self, **kwargs: Any) -> None:
-        await self.runtime.async_request(self.identifier, target={"on": False}, source="entity")
+        await self.runtime.async_request(
+            self.identifier, target={"on": False}, source="entity", context=self._context
+        )
 
     async def async_set_percentage(self, percentage: int) -> None:
         await self.runtime.async_request(
             self.identifier,
             target={"percentage": percentage, "on": percentage > 0},
             source="entity",
+            context=self._context,
         )
 
     async def async_set_direction(self, direction: str) -> None:
         # Admission composes against accepted intent; feedback remains observational.
         await self.runtime.async_request(
-            self.identifier, target={"direction": direction}, source="entity"
+            self.identifier, target={"direction": direction}, source="entity", context=self._context
         )

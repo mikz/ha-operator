@@ -5,13 +5,16 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Any
 
-from homeassistant.components.sensor import SensorDeviceClass, SensorEntity
+from homeassistant.components.sensor import SensorDeviceClass, SensorEntity, SensorStateClass
+from homeassistant.const import PERCENTAGE
 from homeassistant.helpers.entity import EntityCategory
 
 from .entity import OperatorEntity
 
 RESOURCE_SENSORS = {
     "desired": "Desired target",
+    "observed": "Observed",
+    "reason": "Reason",
     "status": "Control status",
     "expiry": "Manual expiry",
     "next_attempt": "Next attempt",
@@ -57,6 +60,11 @@ class ResourceSensor(OperatorEntity, SensorEntity):
     def __init__(self, runtime: Any, identifier: str, key: str) -> None:
         super().__init__(runtime, identifier, key, RESOURCE_SENSORS[key])
         self.key = key
+        if key in {"desired", "observed"} and runtime.resources[identifier]["kind"] == "cover":
+            self._attr_native_unit_of_measurement = PERCENTAGE
+            self._attr_suggested_display_precision = 0
+            if key == "observed":
+                self._attr_state_class = SensorStateClass.MEASUREMENT
         if key in {"expiry", "next_attempt"}:
             self._attr_device_class = SensorDeviceClass.TIMESTAMP
         if key in {"next_attempt", "attempts"}:
@@ -65,6 +73,14 @@ class ResourceSensor(OperatorEntity, SensorEntity):
 
     @property
     def native_value(self) -> float | str | datetime | None:
+        if self.key == "observed":
+            observation = self.runtime.observations.get(self.identifier)
+            return (
+                target_value(observation.target) if observation and observation.available else None
+            )
+        if self.key == "reason":
+            selection = self.runtime.selections.get(self.identifier)
+            return selection.selection_reason if selection else None
         if self.key == "expiry":
             lease = self.runtime.manual(self.identifier)
             stamp = lease.expires_at if lease else None
@@ -83,12 +99,29 @@ class ResourceSensor(OperatorEntity, SensorEntity):
 
     @property
     def extra_state_attributes(self) -> dict[str, Any] | None:
-        if self.key == "desired":
+        if self.key in {"desired", "reason"}:
             decision = self.runtime.decisions.get(self.identifier)
-            return {"target": decision.target.to_dict() if decision and decision.target else None}
+            selection = self.runtime.selections.get(self.identifier)
+            return {
+                "target": decision.target.to_dict() if decision and decision.target else None,
+                **(selection.attributes() if selection else {}),
+                **self.linked_entities,
+            }
+        if self.key == "observed":
+            observation = self.runtime.observations.get(self.identifier)
+            target = observation.target if observation and observation.available else None
+            return {"target": target.to_dict() if target else None, **self.linked_entities}
         if self.key == "status":
             decision = self.runtime.decisions.get(self.identifier)
-            return {"reason": decision.reason, "source": decision.source} if decision else None
+            return (
+                {
+                    "reason": decision.reason,
+                    "execution_reason": decision.reason,
+                    "source": decision.source,
+                }
+                if decision
+                else None
+            )
         return None
 
 

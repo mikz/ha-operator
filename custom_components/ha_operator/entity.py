@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from homeassistant.core import callback
+from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.device_registry import DeviceEntryType, DeviceInfo
 from homeassistant.helpers.entity import Entity
 
@@ -38,6 +40,34 @@ class OperatorEntity(Entity):
     async def async_added_to_hass(self) -> None:
         await super().async_added_to_hass()
         self.async_on_remove(self.runtime.subscribe(self.async_write_ha_state))
+        self.async_on_remove(
+            self.hass.bus.async_listen(er.EVENT_ENTITY_REGISTRY_UPDATED, self._registry_updated)
+        )
+
+    @callback
+    def _registry_updated(self, event) -> None:
+        """Resolve links again after a rename without waking actuator workers."""
+        self.async_schedule_update_ha_state()
+
+    @property
+    def linked_entities(self) -> dict[str, str]:
+        if self.hass is None:
+            return {}
+        registry = er.async_get(self.hass)
+        kind = self.runtime.resources[self.identifier]["kind"]
+        managed_domain = "fan" if kind == "relay_fan" else kind
+        return {
+            f"{key}_entity": entity_id
+            for key in ("managed", "desired", "observed", "reason", "status")
+            if (
+                entity_id := registry.async_get_entity_id(
+                    managed_domain if key == "managed" else "sensor",
+                    DOMAIN,
+                    f"{self.identifier}_{key}",
+                )
+            )
+            is not None
+        }
 
 
 class ResourceEntity(OperatorEntity):

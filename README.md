@@ -202,9 +202,14 @@ not invent another occurrence. The [daily occurrence blueprint](examples/daily-o
 demonstrates submission and sleep-in skipping through native HA automation.
 
 Resource buttons provide **Resume automatic** and **Reconcile**. Policy switches
-control enablement. Resource sensors expose desired target, control status, and
-manual expiry; optional diagnostic sensors expose command attempts and next
-attempt. Requirements expose status, selected provider, and an unmet indicator.
+control enablement. Each resource exposes **Desired target**, **Observed**, **Reason**,
+**Control status**, and **Manual expiry** on its native device page. Cover positions
+use percentages, so Desired and Observed can share a History graph. Desired carries
+the selected source and request identity as attributes; Reason provides a separate
+timeline when the cause changes at the same target. Optional diagnostic sensors
+expose command attempts and next attempt. Requirements expose status, selected
+provider, and an unmet indicator. See [status and history](docs/observability.md)
+for attribute contracts and the isolated browser demo.
 
 Use `select.select_option` for resource mode and `cover.stop_cover` for supported
 managed covers. There are no custom `ha_operator.set_mode` or `ha_operator.stop`

@@ -75,6 +75,7 @@ def fake_runtime():
             "plug": Observation(Target(on=False), True),
         },
         decisions={},
+        selections={},
         requirement_results={"air": result},
         next_attempts={},
         attempts={},
@@ -105,7 +106,7 @@ def fake_runtime():
         (cover, {"roof": 1}),
         (fan, {"native": 1, "relay": 1}),
         (switch, {"plug": 1, "morning": 1}),
-        (sensor, {"roof": 5, "native": 5, "relay": 5, "plug": 5, "air": 2}),
+        (sensor, {"roof": 7, "native": 7, "relay": 7, "plug": 7, "air": 2}),
         (binary_sensor, {"roof": 1, "native": 1, "relay": 1, "plug": 1, "air": 1}),
         (button, {"roof": 2, "native": 2, "relay": 2, "plug": 2}),
         (select, {"roof": 1, "native": 1, "relay": 1, "plug": 1}),
@@ -133,15 +134,19 @@ async def test_cover_commands_do_not_claim_motion(fake_runtime):
     assert entity.supported_features == CoverEntityFeature(15)
     await entity.async_open_cover()
     fake_runtime.async_request.assert_awaited_with(
-        "roof", target={"position": 100}, source="entity"
+        "roof", target={"position": 100}, source="entity", context=None
     )
     assert entity.is_closed  # successful admission does not change physical feedback
     await entity.async_close_cover()
-    fake_runtime.async_request.assert_awaited_with("roof", target={"position": 0}, source="entity")
+    fake_runtime.async_request.assert_awaited_with(
+        "roof", target={"position": 0}, source="entity", context=None
+    )
     await entity.async_set_cover_position(position=42)
-    fake_runtime.async_request.assert_awaited_with("roof", target={"position": 42}, source="entity")
+    fake_runtime.async_request.assert_awaited_with(
+        "roof", target={"position": 42}, source="entity", context=None
+    )
     await entity.async_stop_cover()
-    fake_runtime.async_stop.assert_awaited_once_with("roof")
+    fake_runtime.async_stop.assert_awaited_once_with("roof", context=None)
     fake_runtime.adapter("roof").supported_features = 7
     assert not entity.supported_features & CoverEntityFeature.STOP
     assert entity.extra_state_attributes == {"control_mode": "observe"}
@@ -168,24 +173,28 @@ async def test_fan_commands_and_features(fake_runtime):
     with pytest.raises(ServiceValidationError, match="Preset modes"):
         await entity.async_turn_on(preset_mode="sleep")
     await entity.async_turn_on()
-    fake_runtime.async_request.assert_awaited_with("native", target={"on": True}, source="entity")
+    fake_runtime.async_request.assert_awaited_with(
+        "native", target={"on": True}, source="entity", context=None
+    )
     await entity.async_turn_on(percentage=50)
     fake_runtime.async_request.assert_awaited_with(
-        "native", target={"on": True, "percentage": 50}, source="entity"
+        "native", target={"on": True, "percentage": 50}, source="entity", context=None
     )
     await entity.async_turn_on(percentage=0)
     fake_runtime.async_request.assert_awaited_with(
-        "native", target={"on": False, "percentage": 0}, source="entity"
+        "native", target={"on": False, "percentage": 0}, source="entity", context=None
     )
     await entity.async_set_percentage(100)
     fake_runtime.async_request.assert_awaited_with(
-        "native", target={"on": True, "percentage": 100}, source="entity"
+        "native", target={"on": True, "percentage": 100}, source="entity", context=None
     )
     await entity.async_turn_off()
-    fake_runtime.async_request.assert_awaited_with("native", target={"on": False}, source="entity")
+    fake_runtime.async_request.assert_awaited_with(
+        "native", target={"on": False}, source="entity", context=None
+    )
     await entity.async_set_direction("reverse")
     fake_runtime.async_request.assert_awaited_with(
-        "native", target={"direction": "reverse"}, source="entity"
+        "native", target={"direction": "reverse"}, source="entity", context=None
     )
     assert entity.is_on is False and entity.current_direction == "forward"
     del fake_runtime.observations["native"]
@@ -198,10 +207,14 @@ async def test_switch_and_policy_controls(fake_runtime):
     entity = switch.OperatorSwitch(fake_runtime, "plug")
     assert entity.is_on is False
     await entity.async_turn_on()
-    fake_runtime.async_request.assert_awaited_with("plug", target={"on": True}, source="entity")
+    fake_runtime.async_request.assert_awaited_with(
+        "plug", target={"on": True}, source="entity", context=None
+    )
     assert entity.is_on is False
     await entity.async_turn_off()
-    fake_runtime.async_request.assert_awaited_with("plug", target={"on": False}, source="entity")
+    fake_runtime.async_request.assert_awaited_with(
+        "plug", target={"on": False}, source="entity", context=None
+    )
     del fake_runtime.observations["plug"]
     assert entity.is_on is None
     policy = switch.PolicySwitch(fake_runtime, "morning")
@@ -283,7 +296,11 @@ def test_resource_sensors_keep_intent_separate(fake_runtime):
     assert cover.OperatorCover(fake_runtime, "roof").current_cover_position == 0
     assert desired.extra_state_attributes == {"target": {"position": 100}}
     assert status.native_value == "pending"
-    assert status.extra_state_attributes == {"reason": "target not reached", "source": "manual"}
+    assert status.extra_state_attributes == {
+        "reason": "target not reached",
+        "execution_reason": "target not reached",
+        "source": "manual",
+    }
     assert expiry.native_value == datetime.fromtimestamp(2000, UTC)
     assert retry.native_value == datetime.fromtimestamp(1000, UTC) and attempts.native_value == 2
     fake_runtime.fault = "storage"

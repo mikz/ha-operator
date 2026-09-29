@@ -42,15 +42,22 @@ class OperatorCover(ResourceEntity, CoverEntity):
         return position == 0 if position is not None else None
 
     async def async_open_cover(self, **kwargs: Any) -> None:
-        await self.runtime.async_request(self.identifier, target={"position": 100}, source="entity")
+        await self.runtime.async_request(
+            self.identifier, target={"position": 100}, source="entity", context=self._context
+        )
 
     async def async_close_cover(self, **kwargs: Any) -> None:
-        await self.runtime.async_request(self.identifier, target={"position": 0}, source="entity")
+        await self.runtime.async_request(
+            self.identifier, target={"position": 0}, source="entity", context=self._context
+        )
 
     async def async_set_cover_position(self, **kwargs: Any) -> None:
         await self.runtime.async_request(
-            self.identifier, target={"position": kwargs[ATTR_POSITION]}, source="entity"
+            self.identifier,
+            target={"position": kwargs[ATTR_POSITION]},
+            source="entity",
+            context=self._context,
         )
 
     async def async_stop_cover(self, **kwargs: Any) -> None:
-        await self.runtime.async_stop(self.identifier)
+        await self.runtime.async_stop(self.identifier, context=self._context)

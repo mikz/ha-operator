@@ -6,6 +6,7 @@ import asyncio
 import logging
 import math
 from collections.abc import Callable, Mapping
+from contextvars import ContextVar
 from typing import Any
 
 from homeassistant.components.cover import CoverEntityFeature
@@ -22,6 +23,10 @@ from homeassistant.util.percentage import (
 
 from .async_utils import async_settle
 from .core import Observation, Target
+
+DISPATCH_PARENT: ContextVar[Context | None] = ContextVar(
+    "ha_operator_dispatch_parent", default=None
+)
 
 _LOGGER = logging.getLogger(__name__)
 _FEATURES = "supported_features"
@@ -111,7 +116,8 @@ class Adapter:
         cancelled. Shield the complete service invocation, then settle it before
         propagating cancellation so reload never overlaps an abandoned actuator.
         """
-        context = Context()
+        parent = DISPATCH_PARENT.get()
+        context = Context(parent_id=parent.id if parent else None)
         self._audit_dispatch(domain, service, data, context, "started")
         try:
             task = self.hass.async_create_task(

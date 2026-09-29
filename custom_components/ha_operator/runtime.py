@@ -9,14 +9,16 @@ import logging
 import math
 from collections import deque
 from collections.abc import Callable
+from copy import deepcopy
 from dataclasses import asdict, replace
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
 from homeassistant.components import persistent_notification
-from homeassistant.core import HassJob, HomeAssistant, callback
+from homeassistant.core import EVENT_STATE_CHANGED, Context, HassJob, HomeAssistant, callback
 from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
+from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.event import (
     async_call_later,
@@ -25,7 +27,7 @@ from homeassistant.helpers.event import (
 )
 from homeassistant.util import dt as dt_util
 
-from .adapters import create_adapter
+from .adapters import DISPATCH_PARENT, create_adapter
 from .async_utils import async_settle
 from .configuration import validate_configuration
 from .const import DOMAIN
@@ -42,6 +44,7 @@ from .core import (
     evaluate,
     evaluate_evidence,
 )
+from .provenance import Selection, selection_for, target_label
 from .shadow import ShadowTrace
 from .storage import IntentStore, IntentStoreError
 
@@ -138,7 +141,10 @@ class OperatorRuntime:
         self.store = IntentStore(hass, Path(hass.config.path(f"ha_operator.{entry.entry_id}.json")))
         self.observations: dict[str, Any] = {}
         self.decisions: dict[str, Decision] = {}
+        self.selections: dict[str, Selection] = {}
+        self._contexts: dict[tuple, Context] = {}
         self.requirement_results: dict[str, Any] = {}
+        self._requirement_details: dict[str, Any] = {}
         self.last_commands: dict[str, dict] = {}
         self.next_attempts: dict[str, float] = {}
         self.attempts: dict[str, int] = {}
@@ -228,6 +234,10 @@ class OperatorRuntime:
             self._state = self.store.state
         await self._trace.async_start(self._state, self.shadow_locked)
         self._unsubscribers.append(self.hass.async_add_shutdown_job(HassJob(self.async_close)))
+        if self.requirements:
+            self._unsubscribers.append(
+                self.hass.bus.async_listen(EVENT_STATE_CHANGED, self._activation_input_changed)
+            )
         if self._observed_entities:
             self._unsubscribers.append(
                 async_track_state_change_event(
@@ -388,7 +398,9 @@ class OperatorRuntime:
             translation_key="storage_error",
         )
 
-    async def _commit(self, mutator: Callable[[dict], None], admission=None) -> dict:
+    async def _commit(
+        self, mutator: Callable[[dict], None], admission=None, *, context_key=None, context=None
+    ) -> dict:
         if self.fault or self.store.fault:
             raise HomeAssistantError("HA Operator storage is inhibited; inspect Repairs")
         candidate = None
@@ -413,9 +425,14 @@ class OperatorRuntime:
                     and candidate is not None
                     and candidate["revision"] <= self._state["revision"]
                 ):
-                    self._trace.event(
-                        "admission", {**admission(candidate), "revision": candidate["revision"]}
-                    )
+                    admitted = admission(candidate)
+                    if (
+                        context_key is not None
+                        and context is not None
+                        and not admitted.get("replayed")
+                    ):
+                        self._contexts.setdefault(context_key, context)
+                    self._trace.event("admission", {**admitted, "revision": candidate["revision"]})
             if not self._closed:
                 self._recompute()
                 self._wake_all()
@@ -432,6 +449,7 @@ class OperatorRuntime:
         indefinite: bool = False,
         request_id: str | None = None,
         source: str = "service",
+        context: Context | None = None,
     ) -> dict:
         config = self._admit(resource_id)
         if mode not in {"target", "hands_off"}:
@@ -542,6 +560,8 @@ class OperatorRuntime:
                 "manual": state["manuals"].get(resource_id),
                 "replayed": replayed,
             },
+            context_key=("manual", request_id),
+            context=context,
         )
         return {**receipt, "accepted": True}
 
@@ -608,9 +628,10 @@ class OperatorRuntime:
         self._recompute()
         self._wake_all()
 
-    async def async_stop(self, resource_id: str) -> None:
+    async def async_stop(self, resource_id: str, *, context: Context | None = None) -> None:
         task = self.hass.async_create_task(
-            self._async_stop(resource_id), f"ha_operator:stop_request:{resource_id}"
+            self._async_stop(resource_id, context=context),
+            f"ha_operator:stop_request:{resource_id}",
         )
         self._stop_tasks.add(task)
         try:
@@ -620,7 +641,7 @@ class OperatorRuntime:
         finally:
             self._stop_tasks.discard(task)
 
-    async def _async_stop(self, resource_id: str) -> None:
+    async def _async_stop(self, resource_id: str, *, context: Context | None = None) -> None:
         config = self._resource(resource_id)
         if self.mode(resource_id) != "live":
             raise ServiceValidationError("Resource is in observe mode; no STOP dispatched")
@@ -630,15 +651,20 @@ class OperatorRuntime:
         self._emergency_hands_off[resource_id] = ManualLease(
             resource_id, "hands_off", expires_at=expiry, request_id=stop_id, source="stop"
         )
+        if context is not None:
+            self._contexts[("manual", stop_id)] = context
         self._recompute()
         self._notify()
         actuator_lock = self._actuator_locks[resource_id]
         had_inflight_command = actuator_lock.locked()
         stop_error = None
+        context_token = DISPATCH_PARENT.set(context)
         try:
             await self.adapter(resource_id).async_stop()
         except HomeAssistantError as err:
             stop_error = err
+        finally:
+            DISPATCH_PARENT.reset(context_token)
 
         def mutate(state):
             state["manuals"][resource_id] = {
@@ -674,7 +700,11 @@ class OperatorRuntime:
                             and lease.request_id == stop_id
                             and self.mode(resource_id) == "live"
                         ):
-                            await self.adapter(resource_id).async_stop()
+                            context_token = DISPATCH_PARENT.set(context)
+                            try:
+                                await self.adapter(resource_id).async_stop()
+                            finally:
+                                DISPATCH_PARENT.reset(context_token)
                             return True
                     return False
 
@@ -739,15 +769,21 @@ class OperatorRuntime:
             raise ServiceValidationError("expires_at must be in the future")
         return config, json.dumps([policy_id, occurrence_id]), expiry
 
-    async def async_submit_occurrence(self, policy_id, occurrence_id, expires_at) -> dict:
+    async def async_submit_occurrence(
+        self, policy_id, occurrence_id, expires_at, *, context: Context | None = None
+    ) -> dict:
         config, key, expiry = self._occurrence(policy_id, occurrence_id, expires_at)
         self._admit(config["resource_id"])
         target = self._policy_target(config)
         if target is None:
             raise ServiceValidationError("Occurrence target is unavailable")
 
+        replayed = False
+
         def mutate(state):
+            nonlocal replayed
             self._admit(config["resource_id"])
+            replayed = key in state["occurrences"]
             if key not in state["occurrences"]:
                 state["occurrences"][key] = {
                     "policy_id": policy_id,
@@ -763,7 +799,10 @@ class OperatorRuntime:
                 "action": "submit_occurrence",
                 "policy_id": policy_id,
                 "occurrence": state["occurrences"][key],
+                "replayed": replayed,
             },
+            context_key=("occurrence", policy_id, occurrence_id),
+            context=context,
         )
         return dict(self._state["occurrences"][key])
 
@@ -1004,6 +1043,17 @@ class OperatorRuntime:
             requirement_memory=self._memory,
         )
         result = evaluate(**engine)
+        valid_contexts = {
+            *(("manual", lease.request_id) for lease in manuals),
+            *(
+                ("occurrence", item.policy_id, item.occurrence_id)
+                for item in occurrences
+                if not item.skipped and item.expires_at > now
+            ),
+        }
+        self._contexts = {
+            key: value for key, value in self._contexts.items() if key in valid_contexts
+        }
         trace_engine = None
         if self._trace.enabled:
             trace_engine = {
@@ -1018,11 +1068,30 @@ class OperatorRuntime:
                 },
             }
         previous = self.decisions
+        previous_selections = self.selections
+        # HA state reads and evaluation are synchronous: retain this cause snapshot,
+        # rather than scanning changed group members when a dashboard reads it later.
+        activations = {
+            key: self._active_inputs(config["activation_entities"])
+            for key, config in self.requirements.items()
+        }
+        self.selections = {
+            key: selection_for(
+                decision,
+                self.manual(key),
+                self.policies,
+                occurrences,
+                self.requirements,
+                activations,
+            )
+            for key, decision in result.decisions.items()
+        }
         self.decisions = dict(result.decisions)
         for key, decision in self.decisions.items():
             signature = (
                 decision.target,
                 decision.source,
+                self.selections[key].request_id,
                 self.mode(key),
                 decision.status
                 in {
@@ -1053,10 +1122,17 @@ class OperatorRuntime:
                 if cancel := self._timers.pop(key, None):
                     cancel()
             old = previous.get(key)
-            if old is None or (old.status, old.target, old.source) != (
-                decision.status,
-                decision.target,
-                decision.source,
+            selection = self.selections[key]
+            cause_changed = previous_selections.get(key) != selection
+            if (
+                cause_changed
+                or old is None
+                or (old.status, old.target, old.source)
+                != (
+                    decision.status,
+                    decision.target,
+                    decision.source,
+                )
             ):
                 self.history.append(
                     {
@@ -1067,21 +1143,37 @@ class OperatorRuntime:
                         "target": decision.target.to_dict() if decision.target else None,
                     }
                 )
-                if (
-                    old is not None
-                    and old.status != decision.status
-                    and decision.status not in {"applying", "waiting", "pending"}
+                if old is not None and (
+                    cause_changed
+                    or old.target != decision.target
+                    or (
+                        old.status != decision.status
+                        and decision.status not in {"applying", "waiting", "pending"}
+                    )
                 ):
                     self.hass.bus.async_fire(
                         "logbook_entry",
                         {
                             "name": self.resources[key]["name"],
-                            "message": decision.status,
+                            "message": (
+                                f"{selection.selection_reason}; "
+                                f"target {target_label(decision.target)}; "
+                                f"{decision.reason}"
+                            ),
                             "domain": DOMAIN,
+                            "entity_id": er.async_get(self.hass).async_get_entity_id(
+                                "fan"
+                                if self.resources[key]["kind"] == "relay_fan"
+                                else self.resources[key]["kind"],
+                                DOMAIN,
+                                f"{key}_managed",
+                            ),
                         },
+                        context=self._selection_context(key) if cause_changed else None,
                     )
         old_requirements = self.requirement_results
         self.requirement_results = dict(result.requirements)
+        self._requirement_details = self._explain_requirements()
         self._memory = {key: item.memory for key, item in result.requirements.items()}
         unconfirmed = {"acquiring", "unmet", "unknown"}
         for key, item in self.requirement_results.items():
@@ -1123,6 +1215,61 @@ class OperatorRuntime:
                     },
                 },
             )
+
+    def _selection_context(self, resource_id: str) -> Context | None:
+        selection = self.selections[resource_id]
+        key = (
+            ("manual", selection.request_id)
+            if selection.source_kind == "manual"
+            else ("occurrence", selection.source_id, selection.occurrence_id)
+        )
+        return self._contexts.get(key)
+
+    def _active_inputs(self, entity_ids) -> tuple[tuple[str, str], ...]:
+        """Bound group expansion; report active inputs, never invent physical proof."""
+        pending = list(entity_ids)
+        seen: set[str] = set()
+        active = []
+        while pending and len(seen) < 32:
+            entity_id = pending.pop(0)
+            if entity_id in seen:
+                continue
+            seen.add(entity_id)
+            if self._state_value(entity_id) != "on":
+                continue
+            state = self.hass.states.get(entity_id)
+            members = state.attributes.get("entity_id")
+            if isinstance(members, (list, tuple)) and members:
+                pending.extend(item for item in members[:32] if isinstance(item, str))
+            else:
+                active.append(
+                    (entity_id, str(state.attributes.get("friendly_name", entity_id))[:80])
+                )
+        return tuple(active)
+
+    @callback
+    def _activation_input_changed(self, event) -> None:
+        """Group membership can change cause while the group's aggregate stays on."""
+        entity_id = event.data["entity_id"]
+        if self._closed or entity_id in self._observed_entities:
+            return
+        pending = [
+            item for config in self.requirements.values() for item in config["activation_entities"]
+        ]
+        seen = set()
+        while pending and len(seen) < 32:
+            item = pending.pop(0)
+            if item in seen:
+                continue
+            seen.add(item)
+            if item == entity_id:
+                self._recompute()
+                self._notify()
+                return
+            state = self.hass.states.get(item)
+            members = state.attributes.get("entity_id") if state else None
+            if isinstance(members, (list, tuple)):
+                pending.extend(member for member in members[:32] if isinstance(member, str))
 
     def _schedule(self, resource_id: str, when: float) -> None:
         if cancel := self._timers.pop(resource_id, None):
@@ -1183,6 +1330,7 @@ class OperatorRuntime:
             self.next_attempts[resource_id] = now + max(
                 config["retry_interval"], config["command_interval"]
             )
+            context_token = DISPATCH_PARENT.set(self._selection_context(resource_id))
             try:
                 async with self._actuator_locks[resource_id]:
                     sent = await self.adapter(resource_id).async_apply(target, still_current)
@@ -1193,6 +1341,7 @@ class OperatorRuntime:
                 self._errors[resource_id] = "delivery_failed"
                 _LOGGER.debug("Resource %s delivery failed: %s", resource_id, err)
             finally:
+                DISPATCH_PARENT.reset(context_token)
                 self._applying.discard(resource_id)
                 # A relay transaction may spend longer than the retry interval
                 # awaiting off feedback, dead time, or a slow transport. Give
@@ -1209,10 +1358,8 @@ class OperatorRuntime:
                 if self.decisions[resource_id].status in {"pending", "waiting"}:
                     wake.set()
 
-    def explain(self, resource_id: str | None = None) -> dict:
-        if resource_id is not None:
-            self._resource(resource_id)
-        ids = [resource_id] if resource_id is not None else list(self.resources)
+    def _explain_requirements(self) -> dict:
+        """Capture bounded predicates in the same synchronous evaluation turn."""
         requirements = {}
         for key, item in self.requirement_results.items():
             config = self.requirements[key]
@@ -1255,6 +1402,12 @@ class OperatorRuntime:
                 },
                 "providers": providers,
             }
+        return requirements
+
+    def explain(self, resource_id: str | None = None) -> dict:
+        if resource_id is not None:
+            self._resource(resource_id)
+        ids = [resource_id] if resource_id is not None else list(self.resources)
         return {
             "revision": self._state["revision"],
             "fault": self.fault,
@@ -1263,6 +1416,9 @@ class OperatorRuntime:
                 key: {
                     "mode": self.mode(key),
                     "decision": asdict(self.decisions[key]) if key in self.decisions else None,
+                    "selection": self.selections[key].attributes()
+                    if key in self.selections
+                    else None,
                     "observation": asdict(self.observations[key])
                     if key in self.observations
                     else None,
@@ -1273,5 +1429,5 @@ class OperatorRuntime:
                 }
                 for key in ids
             },
-            "requirements": requirements,
+            "requirements": deepcopy(self._requirement_details),
         }

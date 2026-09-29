@@ -247,6 +247,13 @@ _FIELDS = (
     | _EXTERNAL
     | _ATTRIBUTES
     | {
+        "selection",
+        "source_kind",
+        "source_id",
+        "source_name",
+        "selection_reason",
+        "related_entities",
+        "active_inputs",
         "position",
         "on",
         "profile",
@@ -728,6 +735,16 @@ def _explanation(data: dict) -> None:
         _object(
             item,
             {
+                "mode",
+                "decision",
+                "observation",
+                "manual",
+                "last_command",
+                "next_attempt",
+                "attempts",
+                "selection",
+            },
+            required={
                 "mode",
                 "decision",
                 "observation",

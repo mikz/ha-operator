@@ -93,7 +93,10 @@ def async_register_services(hass: HomeAssistant) -> None:
             )
         if call.service in {"submit_occurrence", "skip_occurrence"}:
             result = await getattr(runtime, f"async_{call.service}")(
-                call.data["policy_id"], call.data["occurrence_id"], call.data["expires_at"]
+                call.data["policy_id"],
+                call.data["occurrence_id"],
+                call.data["expires_at"],
+                **({"context": call.context} if call.service == "submit_occurrence" else {}),
             )
             return result if call.return_response else None
         key = resource_for(call, runtime, optional=call.service in {"explain", "reconcile"})
@@ -103,7 +106,7 @@ def async_register_services(hass: HomeAssistant) -> None:
             arguments = {
                 name: value for name, value in call.data.items() if name not in _TARGET_KEYS
             }
-            result = await runtime.async_request(key, **arguments)
+            result = await runtime.async_request(key, **arguments, context=call.context)
             return result if call.return_response else None
         await getattr(runtime, f"async_{call.service}")(key)
         return None
