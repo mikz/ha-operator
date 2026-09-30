@@ -135,6 +135,92 @@ def resource_outputs(resource: Mapping[str, Any]) -> set[str]:
     return set(resource["outputs"]) if resource["kind"] == "relay_fan" else {resource["entity_id"]}
 
 
+def _positive_duration(value: Any, field: str) -> float:
+    duration = _number(value, field, 0)
+    if duration == 0:
+        _fail(f"{field} must be positive")
+    return duration
+
+
+def _policy_input(value: Any, kind: str, hass: Any = None) -> dict[str, Any]:
+    """Validate the two bounded native inputs without reading helper state."""
+    try:
+        data = _object(
+            value,
+            "input",
+            {
+                "type",
+                "entity_id",
+                "comparison",
+                "threshold",
+                "unit",
+                "qualification_seconds",
+                "request_seconds",
+            },
+        )
+        input_type = data.get("type")
+        if input_type not in ("qualified_numeric", "timer_episode"):
+            _fail("input.type must be qualified_numeric or timer_episode")
+        expected_kind = "state" if input_type == "qualified_numeric" else "occurrence"
+        if kind != expected_kind:
+            _fail(f"{input_type} input requires a {expected_kind} policy")
+        domain = "sensor" if input_type == "qualified_numeric" else "timer"
+        try:
+            data["entity_id"] = _entity(data.get("entity_id"), "input.entity_id", domain, hass)
+        except ConfigurationError as err:
+            if err.code == "invalid_configuration":
+                _fail(err.detail, "invalid_input_source")
+            raise
+        data["qualification_seconds"] = _positive_duration(
+            data.get("qualification_seconds"), "input.qualification_seconds"
+        )
+        if input_type == "timer_episode":
+            if any(key in data for key in ("comparison", "threshold", "unit")):
+                _fail("timer_episode input cannot contain numeric comparison settings")
+            data["request_seconds"] = _positive_duration(
+                data.get("request_seconds"), "input.request_seconds"
+            )
+        else:
+            if "request_seconds" in data:
+                _fail("qualified_numeric input cannot contain request_seconds")
+            if data.get("comparison") != "below":
+                _fail("input.comparison must be below")
+            data["threshold"] = _number(data.get("threshold"), "input.threshold", -math.inf)
+            data["unit"] = _text(data.get("unit"), "input.unit")
+            if hass is not None:
+                state = hass.states.get(data["entity_id"])
+                if state.attributes.get("unit_of_measurement") != data["unit"]:
+                    _fail("input.unit must match the sensor unit", "input_unit_mismatch")
+                if state.state not in ("unknown", "unavailable"):
+                    try:
+                        numeric = float(state.state)
+                    except TypeError, ValueError:
+                        _fail("input source must report a finite number", "invalid_input_value")
+                    if not math.isfinite(numeric):
+                        _fail("input source must report a finite number", "invalid_input_value")
+        return data
+    except ConfigurationError as err:
+        if err.code == "invalid_configuration":
+            _fail(err.detail, "invalid_policy_input")
+        raise
+
+
+def _return_monitor(value: Any, kind: str) -> dict[str, Any]:
+    try:
+        if kind != "cover":
+            _fail("return_monitor requires a cover resource")
+        data = _object(value, "return_monitor", {"target_at_most", "warning_after_seconds"})
+        data["target_at_most"] = _number(
+            data.get("target_at_most"), "return_monitor.target_at_most", 0, 100
+        )
+        data["warning_after_seconds"] = _positive_duration(
+            data.get("warning_after_seconds"), "return_monitor.warning_after_seconds"
+        )
+        return data
+    except ConfigurationError as err:
+        _fail(err.detail, "invalid_return_monitor")
+
+
 def validate_resource(
     value: Any,
     hass: Any = None,
@@ -157,6 +243,7 @@ def validate_resource(
             "fault_entity",
             "default_target",
             "manual_control",
+            "return_monitor",
             *RESOURCE_DEFAULTS,
         },
     )
@@ -164,6 +251,8 @@ def validate_resource(
     if data.get("kind") not in KINDS:
         _fail("kind must be cover, switch, fan, or relay_fan")
     kind = data["kind"]
+    if "return_monitor" in data:
+        data["return_monitor"] = _return_monitor(data["return_monitor"], kind)
     if "manual_control" in data and type(data["manual_control"]) is not bool:
         _fail("manual_control must be true or false")
     for field, default in RESOURCE_DEFAULTS.items():
@@ -255,6 +344,7 @@ def validate_policy(
             "target_attribute",
             "target_field",
             "intent_id",
+            "input",
         },
     )
     data["name"] = _text(data.get("name"), "name")
@@ -264,6 +354,13 @@ def validate_policy(
     resource = resources[data["resource_id"]]
     if data.get("kind") not in ("state", "occurrence"):
         _fail("policy kind must be state or occurrence")
+    if "input" in data:
+        if "eligibility_entity" in data or "eligibility_state" in data:
+            _fail(
+                "input replaces eligibility_entity and eligibility_state",
+                "input_eligibility_conflict",
+            )
+        data["input"] = _policy_input(data["input"], data["kind"], hass)
     priority = _number(data.get("priority", 0), "priority", -1000000, 1000000)
     if not priority.is_integer():
         _fail("priority must be an integer")

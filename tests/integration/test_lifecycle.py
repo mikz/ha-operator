@@ -209,9 +209,40 @@ async def test_migration_and_device_removal_contract(hass, tmp_path):
         hass, entry, SimpleNamespace(config_entries=set())
     )
     assert await async_migrate_entry(hass, entry)
-    assert not await async_migrate_entry(hass, operator_entry(version=2))
+    assert entry.version == 2
+    assert await async_migrate_entry(hass, operator_entry(version=2))
+    assert not await async_migrate_entry(hass, operator_entry(version=3))
     assert raw.commands == []
     assert await hass.config_entries.async_unload(entry.entry_id)
+
+
+async def test_native_input_config_migration_preserves_all_settings_and_ids(hass):
+    entry = operator_entry(
+        version=1,
+        data={"initialized": True, "custom": "preserved"},
+        policies={
+            "cold": {
+                "name": "Cold",
+                "resource_id": "roof",
+                "kind": "state",
+                "target": {"position": 7},
+                "eligibility_entity": "input_boolean.ready",
+            }
+        },
+    )
+    entry.add_to_hass(hass)
+    hass.config_entries.async_update_entry(entry, options={"shadow_lock": True})
+    data, options, subentries = entry.data, entry.options, entry.subentries
+    identifiers = {key: item.subentry_id for key, item in subentries.items()}
+    assert await async_migrate_entry(hass, entry)
+    assert entry.version == 2 and entry.minor_version == 1
+    assert entry.data is data and entry.options is options and entry.subentries is subentries
+    assert {key: item.subentry_id for key, item in entry.subentries.items()} == identifiers
+    assert "return_monitor" not in entry.subentries["roof"].data
+    assert "input" not in entry.subentries["cold"].data
+    assert entry.subentries["cold"].data["eligibility_entity"] == "input_boolean.ready"
+    assert await async_migrate_entry(hass, entry)
+    assert entry.subentries is subentries
 
 
 async def test_entry_update_listener_reloads_exactly_once(hass, tmp_path):

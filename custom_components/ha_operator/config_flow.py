@@ -56,7 +56,7 @@ def _options_schema(options: dict[str, Any] | None = None) -> vol.Schema:
 class OperatorConfigFlow(ConfigFlow, domain=DOMAIN):
     """Create the single integration; resources are native subentries."""
 
-    VERSION = 1
+    VERSION = 2
 
     @staticmethod
     @callback

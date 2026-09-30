@@ -96,7 +96,10 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
 
 async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
-    return entry.version == 1
+    """Admit optional native input settings without rewriting existing subentries."""
+    if entry.version == 1:
+        hass.config_entries.async_update_entry(entry, version=2, minor_version=1)
+    return entry.version == 2
 
 
 async def async_remove_config_entry_device(hass, config_entry, device_entry) -> bool:
