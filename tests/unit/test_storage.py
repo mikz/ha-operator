@@ -477,3 +477,50 @@ async def test_corrupt_typed_input_never_publishes(store, snapshot_path, record)
         await loaded.async_load()
     assert loaded.fault
     assert loaded.state["policy_inputs"] == {}
+
+
+async def test_typed_return_monitor_roundtrip_preserves_unrelated_intent(store, snapshot_path):
+    await store.async_load()
+    record = {
+        "fingerprint": "a" * 64,
+        "state": {"target_position": 7, "due_at": 1234.5, "overdue": True},
+    }
+    await store.async_update(lambda state: state["modes"].update(roof="live"))
+    await store.async_update(lambda state: state["return_monitors"].update(roof=record))
+    loaded = IntentStore(ExecutorHost(), snapshot_path)
+    await loaded.async_load(expected_existing=True)
+    assert loaded.state["return_monitors"] == {"roof": record}
+    assert loaded.state["modes"] == {"roof": "live"}
+
+
+@pytest.mark.parametrize(
+    "record",
+    [
+        {},
+        {"fingerprint": "invalid", "state": {}},
+        {"fingerprint": "a" * 64, "state": []},
+        {"fingerprint": "a" * 64, "state": {}},
+        {
+            "fingerprint": "a" * 64,
+            "state": {"target_position": None, "due_at": None, "overdue": True},
+        },
+        {
+            "fingerprint": "a" * 64,
+            "state": {"target_position": 7, "due_at": float("nan"), "overdue": False},
+        },
+    ],
+)
+async def test_invalid_return_monitor_never_publishes(store, snapshot_path, record):
+    await store.async_load()
+    with pytest.raises(InvalidSnapshot, match="return monitor"):
+        await store.async_update(lambda state: state["return_monitors"].update(roof=record))
+    assert store.state["return_monitors"] == {}
+    assert not snapshot_path.exists()
+    envelope = {"version": 3, "data": store.state}
+    envelope["data"]["return_monitors"]["roof"] = record
+    snapshot_path.parent.mkdir(exist_ok=True)
+    snapshot_path.write_text(json.dumps(envelope))
+    loaded = IntentStore(ExecutorHost(), snapshot_path)
+    with pytest.raises(IntentStoreError):
+        await loaded.async_load()
+    assert loaded.state["return_monitors"] == {}

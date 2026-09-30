@@ -20,6 +20,7 @@ from homeassistant.helpers.json import save_json
 
 from .async_utils import async_settle as _settle
 from .policy_inputs import NumericState, TimerState
+from .return_monitor import ReturnMonitorState
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -81,8 +82,22 @@ def _validate_state(state: Any) -> None:
         raise InvalidSnapshot("Policy enablement must be boolean")
     if any(type(value) is not bool for value in state["intents"].values()):
         raise InvalidSnapshot("Desired control values must be boolean")
-    if state["return_monitors"]:
-        raise InvalidSnapshot("Return monitor records are not supported yet")
+    for item in state["return_monitors"].values():
+        if not isinstance(item, dict) or set(item) != {"fingerprint", "state"}:
+            raise InvalidSnapshot("Invalid return monitor record")
+        fingerprint = item["fingerprint"]
+        if (
+            not isinstance(fingerprint, str)
+            or len(fingerprint) != 64
+            or any(c not in "0123456789abcdef" for c in fingerprint)
+        ):
+            raise InvalidSnapshot("Invalid return monitor fingerprint")
+        if not isinstance(item["state"], dict):
+            raise InvalidSnapshot("Invalid return monitor state")
+        try:
+            ReturnMonitorState.from_record(item["state"])
+        except (ValueError, TypeError) as err:
+            raise InvalidSnapshot("Invalid return monitor state") from err
     for item in state["policy_inputs"].values():
         if not isinstance(item, dict) or set(item) != {"type", "fingerprint", "state"}:
             raise InvalidSnapshot("Invalid policy input record")

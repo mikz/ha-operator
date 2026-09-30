@@ -66,6 +66,7 @@ from .policy_inputs import (
     timer_transition,
 )
 from .provenance import Selection, selection_for, target_label
+from .return_monitor import ReturnMonitorInput, ReturnMonitorState, return_transition
 from .shadow import ShadowTrace
 from .storage import IntentStore, IntentStoreError
 
@@ -210,6 +211,23 @@ class OperatorRuntime:
         self._timer_episodes: dict[str, str] = {}
         self._numeric_reports: dict[str, NumericReport] = {}
         self._timer_admissions_open = False
+        self._return_dirty: set[str] = set()
+        self._return_fingerprints = {
+            key: hashlib.sha256(
+                json.dumps(
+                    {
+                        "monitor": config["return_monitor"],
+                        "tolerance": config["tolerance"],
+                        "entity_id": config["entity_id"],
+                    },
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode()
+            ).hexdigest()
+            for key, config in self.resources.items()
+            if config.get("return_monitor")
+        }
+        self._return_notifications: dict[str, tuple[float, float] | None] = {}
         for policy_id, config in self.policies.items():
             if source := config.get("input"):
                 self._policy_sources.setdefault(source["entity_id"], []).append(policy_id)
@@ -564,6 +582,26 @@ class OperatorRuntime:
                     self.entry, data={**self.entry.data, "initialized": True}
                 )
             await self._recover_policy_inputs()
+            removed_monitors = (
+                set(self.store.state["return_monitors"]) - self._return_fingerprints.keys()
+            )
+            # Preserve deadlines only when the monitor settings and raw source agree.
+            await self.store.async_update(
+                lambda state: state.update(
+                    return_monitors={
+                        key: state["return_monitors"][key]
+                        if key in state["return_monitors"]
+                        and state["return_monitors"][key]["fingerprint"] == fingerprint
+                        else {"fingerprint": fingerprint, "state": ReturnMonitorState().to_record()}
+                        for key, fingerprint in self._return_fingerprints.items()
+                    }
+                ),
+                skip_unchanged=True,
+            )
+            for key in removed_monitors:
+                persistent_notification.async_dismiss(
+                    self.hass, f"ha_operator_{self.entry.entry_id}_{key}_return"
+                )
             now = _now()
 
             def prune(state):
@@ -1357,7 +1395,7 @@ class OperatorRuntime:
     async def async_reconcile(self, resource_id: str | None = None) -> None:
         if resource_id is not None:
             self._resource(resource_id)
-        if self._input_fingerprints:
+        if self._input_fingerprints or self._return_fingerprints:
             self._queue_reconciliation(
                 {resource_id} if resource_id else set(self.resources), durable_input=True
             )
@@ -1593,7 +1631,15 @@ class OperatorRuntime:
                     )
                 for policy_id in self._input_fingerprints:
                     await self._apply_policy_input(policy_id, None, _now(), None, True)
-                if not self._pending_resources and not self._policy_events:
+                if self._return_fingerprints:
+                    self._recompute()
+                    if self._return_dirty:
+                        await self._apply_return_monitors()
+                if (
+                    not self._pending_resources
+                    and not self._policy_events
+                    and not self._return_dirty
+                ):
                     break
             if self._closed:
                 return
@@ -1618,7 +1664,7 @@ class OperatorRuntime:
             if (
                 not self._closed
                 and not self.fault
-                and (self._pending_resources or self._policy_events)
+                and (self._pending_resources or self._policy_events or self._return_dirty)
             ):
                 self._queue_reconciliation(set())
 
@@ -1660,7 +1706,83 @@ class OperatorRuntime:
             if self.decisions[identifier].status in {"pending", "waiting"}:
                 self._wake[identifier].set()
 
-    def _recompute(self) -> None:
+    def return_monitor(self, resource_id: str) -> ReturnMonitorState:
+        """Expose committed monitor state; telemetry and desired values stay separate."""
+        record = self._state["return_monitors"].get(resource_id)
+        return ReturnMonitorState.from_record(record["state"]) if record else ReturnMonitorState()
+
+    def _return_transition(self, resource_id: str, state: ReturnMonitorState, now: float):
+        config = self.resources[resource_id]
+        settings = config["return_monitor"]
+        decision = self.decisions.get(resource_id)
+        observation = self.adapter(resource_id).read_observation(now)
+        return return_transition(
+            ReturnMonitorInput(
+                settings["target_at_most"], settings["warning_after_seconds"], config["tolerance"]
+            ),
+            state,
+            target_position=decision.target.position if decision and decision.target else None,
+            observed_position=(
+                observation.target.position
+                if observation.available and observation.target
+                else None
+            ),
+            active=bool(
+                not self.fault
+                and self.mode(resource_id) == "live"
+                and decision
+                and decision.status not in {"idle", "hands_off", "fault", "observe"}
+            ),
+            now=now,
+        )
+
+    async def _apply_return_monitors(self) -> None:
+        self._return_dirty.clear()
+
+        def mutate(state):
+            # Run under the existing writer using current inputs, not a queued desired snapshot.
+            self._recompute(mark_returns=False)
+            for key, fingerprint in self._return_fingerprints.items():
+                previous = ReturnMonitorState.from_record(state["return_monitors"][key]["state"])
+                state["return_monitors"][key] = {
+                    "fingerprint": fingerprint,
+                    "state": self._return_transition(key, previous, _now()).state.to_record(),
+                }
+
+        await self._commit(mutate, skip_unchanged=True)
+
+    def _sync_return_notifications(self, now: float) -> None:
+        if self._closed or self.fault or self._policy_events:
+            return
+        for key in self._return_fingerprints:
+            if self._input_ingress[key] != self._input_processed[key]:
+                continue
+            state = self.return_monitor(key)
+            if self._return_transition(key, state, now).state != state:
+                continue
+            episode = (state.target_position, state.due_at) if state.overdue else None
+            if key in self._return_notifications and self._return_notifications[key] == episode:
+                continue
+            notification_id = f"ha_operator_{self.entry.entry_id}_{key}_return"
+            if state.overdue:
+                observation = self.adapter(key).read_observation(now)
+                detail = (
+                    "Raw position feedback is unavailable; the return is unconfirmed."
+                    if not observation.available or observation.target is None
+                    else f"Return target {state.target_position:g}% has not been reached; "
+                    f"raw position is {observation.target.position:g}%."
+                )
+                persistent_notification.async_create(
+                    self.hass,
+                    f"{self.resources[key]['name']}: {detail}",
+                    title="HA Operator: return target not confirmed",
+                    notification_id=notification_id,
+                )
+            else:
+                persistent_notification.async_dismiss(self.hass, notification_id)
+            self._return_notifications[key] = episode
+
+    def _recompute(self, *, mark_returns: bool = True) -> None:
         if self._closed:
             return
         now = _now()
@@ -1915,6 +2037,17 @@ class OperatorRuntime:
                 elif timer_state.phase == "accepted":
                     assert timer_state.expires_at is not None
                     deadlines.append(timer_state.expires_at)
+        if mark_returns and not self.fault:
+            for key in self._return_fingerprints:
+                state = self.return_monitor(key)
+                transition = self._return_transition(key, state, now)
+                if transition.state != state:
+                    self._return_dirty.add(key)
+                if transition.next_deadline is not None and transition.next_deadline > now:
+                    deadlines.append(transition.next_deadline)
+            if self._return_dirty:
+                self._queue_reconciliation(set(self._return_dirty))
+            self._sync_return_notifications(now)
         self._next_evaluation = min(deadlines) if deadlines else None
         if self._next_evaluation is not None:
             self._deadline_timer = async_call_later(
