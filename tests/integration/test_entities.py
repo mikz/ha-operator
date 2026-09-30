@@ -26,6 +26,9 @@ from custom_components.ha_operator import (
 )
 from custom_components.ha_operator.core import ManualLease, Observation, Target
 from custom_components.ha_operator.diagnostics import async_get_config_entry_diagnostics
+from custom_components.ha_operator.policy_inputs import NumericState, TimerState
+from custom_components.ha_operator.provenance import Selection
+from custom_components.ha_operator.return_monitor import ReturnMonitorState
 
 
 @pytest.fixture
@@ -90,6 +93,8 @@ def fake_runtime():
         manual=Mock(return_value=None),
         manual_control=Mock(return_value=True),
         policy_enabled=Mock(return_value=True),
+        policy_input=Mock(return_value=None),
+        return_monitor=Mock(return_value=ReturnMonitorState()),
         adapter=lambda key: adapters[key],
         subscribe=subscribe,
         callbacks=callbacks,
@@ -109,7 +114,7 @@ def fake_runtime():
         (cover, {"roof": 1}),
         (fan, {"native": 1, "relay": 1}),
         (switch, {"plug": 1, "morning": 1}),
-        (sensor, {"roof": 7, "native": 7, "relay": 7, "plug": 7, "air": 2}),
+        (sensor, {"roof": 8, "native": 8, "relay": 8, "plug": 8, "air": 2}),
         (binary_sensor, {"roof": 1, "native": 1, "relay": 1, "plug": 1, "air": 1}),
         (button, {"roof": 2, "native": 2, "relay": 2, "plug": 2}),
         (select, {"roof": 1, "native": 1, "relay": 1, "plug": 1}),
@@ -332,6 +337,74 @@ def test_manual_and_requirement_indicators(fake_runtime):
     assert status.extra_state_attributes is None
 
 
+def test_native_input_and_return_entities_are_read_only_committed_views(fake_runtime):
+    fake_runtime.policies["morning"]["input"] = {"type": "qualified_numeric"}
+    phase = sensor.PolicyInputSensor(fake_runtime, "morning", "input_phase")
+    due = sensor.PolicyInputSensor(fake_runtime, "morning", "qualification_due")
+    qualified = binary_sensor.QualifiedSensor(fake_runtime, "morning")
+    overdue = binary_sensor.ReturnOverdueSensor(fake_runtime, "roof")
+    expiry = sensor.ResourceSensor(fake_runtime, "roof", "effective_expiry")
+    for entity in (phase, due, qualified):
+        assert entity.entity_category == "diagnostic"
+        assert not entity.entity_registry_enabled_default
+        assert entity.should_poll is False
+    assert phase.device_class == "enum" and "recovering" in phase.options
+    assert due.device_class == expiry.device_class == "timestamp"
+    assert overdue.entity_category is None and overdue.device_class == "problem"
+    assert expiry.entity_category is None
+    assert phase.native_value is None and due.native_value is None and qualified.is_on is None
+    assert not overdue.is_on and expiry.native_value is None
+    fake_runtime.policy_input.return_value = NumericState(due_at=1000)
+    assert phase.native_value == "qualifying" and due.native_value == datetime.fromtimestamp(
+        1000, UTC
+    )
+    assert qualified.is_on is False
+    fake_runtime.policy_input.return_value = NumericState(due_at=1000, qualified=True)
+    assert phase.native_value == "qualified" and qualified.is_on is True
+    fake_runtime.policy_input.return_value = NumericState(
+        due_at=1000, qualified=True, recovery_pending=True
+    )
+    assert phase.native_value == "recovering" and qualified.is_on is None
+    fake_runtime.policies["morning"]["input"] = {"type": "timer_episode"}
+    timer = sensor.PolicyInputSensor(fake_runtime, "morning", "input_phase")
+    assert timer.options == ["idle", "qualifying", "accepted", "suppressed", "expired"]
+    fake_runtime.policy_input.return_value = TimerState()
+    assert timer.native_value == "idle" and due.native_value is None
+    assert qualified.is_on is None
+    fake_runtime.return_monitor.return_value = ReturnMonitorState(7, 3000, True)
+    assert overdue.is_on is True
+    fake_runtime.selections["roof"] = Selection(source_kind="occurrence", expires_at=2000)
+    assert expiry.native_value == datetime.fromtimestamp(2000, UTC)
+    assert sensor.ResourceSensor(fake_runtime, "roof", "expiry").native_value is None
+    fake_runtime.async_request.assert_not_awaited()
+
+
+async def test_native_entities_attach_to_their_own_subentries(hass, fake_runtime):
+    fake_runtime.policies["morning"]["input"] = {"type": "qualified_numeric"}
+    fake_runtime.policies["vent"] = {"kind": "occurrence", "input": {"type": "timer_episode"}}
+    fake_runtime.resources["roof"]["return_monitor"] = {
+        "target_at_most": 7,
+        "warning_after_seconds": 300,
+    }
+    added = {}
+
+    def add(entities, *, config_subentry_id):
+        added[config_subentry_id] = list(entities)
+
+    await sensor.async_setup_entry(hass, SimpleNamespace(runtime_data=fake_runtime), add)
+    assert {item.unique_id for item in added["morning"]} == {
+        "morning_input_phase",
+        "morning_qualification_due",
+    }
+    assert {item.unique_id for item in added["vent"]} == {
+        "vent_input_phase",
+        "vent_qualification_due",
+    }
+    await binary_sensor.async_setup_entry(hass, SimpleNamespace(runtime_data=fake_runtime), add)
+    assert {item.unique_id for item in added["morning"]} == {"morning_qualified"}
+    assert {item.unique_id for item in added["roof"]} == {"roof_manual", "roof_return_overdue"}
+
+
 async def test_diagnostics_allowlist_and_bounded_history(hass, fake_runtime):
     secret = "private-address-and-token"
     fake_runtime.resources["roof"].update(token=secret, entity_id="cover.secret_room")
@@ -399,3 +472,65 @@ async def test_diagnostics_allowlist_and_bounded_history(hass, fake_runtime):
     )
     assert secret not in json.dumps(result)
     assert result["history"][0]["status"] == "unknown"
+
+
+async def test_native_input_and_return_diagnostics_preserve_bounded_state_without_names(
+    hass, fake_runtime
+):
+    numeric = {
+        "type": "qualified_numeric",
+        "entity_id": "sensor.private_temperature",
+        "comparison": "below",
+        "threshold": 16,
+        "unit": "private-unit",
+        "qualification_seconds": 60,
+    }
+    timer = {
+        "type": "timer_episode",
+        "entity_id": "timer.private_vent",
+        "qualification_seconds": 60,
+        "request_seconds": 1800,
+    }
+    fake_runtime.policies["morning"]["input"] = numeric
+    fake_runtime.policies["private-policy"] = {"name": "Private policy name", "input": timer}
+    fake_runtime.policy_input.side_effect = lambda identifier: (
+        NumericState(due_at=1000, qualified=True)
+        if identifier == "morning"
+        else TimerState("private-episode", "accepted", expires_at=3000)
+    )
+    fake_runtime.resources["roof"]["return_monitor"] = {
+        "target_at_most": 7,
+        "warning_after_seconds": 300,
+    }
+    fake_runtime.return_monitor.return_value = ReturnMonitorState(7, 2000, True)
+    result = await async_get_config_entry_diagnostics(
+        hass, SimpleNamespace(runtime_data=fake_runtime)
+    )
+    text = json.dumps(result)
+    for secret in (
+        "sensor.private_temperature",
+        "timer.private_vent",
+        "private-unit",
+        "private-policy",
+        "Private policy name",
+        "private-episode",
+    ):
+        assert secret not in text
+    sources = [item["input"] for item in result["policies"].values()]
+    assert sources[0]["state"]["phase"] == "qualified"
+    assert sources[0]["state"]["qualified"] is True
+    assert sources[1]["state"]["phase"] == "accepted"
+    assert sources[1]["state"]["expires_at"] == 3000
+    monitor = next(value for value in result["resources"].values() if "return_monitor" in value)
+    assert monitor["return_monitor"] == {
+        "phase": "overdue",
+        "target_position": 7,
+        "due_at": 2000,
+        "overdue": True,
+    }
+    fake_runtime.policy_input.side_effect = None
+    fake_runtime.policy_input.return_value = None
+    result = await async_get_config_entry_diagnostics(
+        hass, SimpleNamespace(runtime_data=fake_runtime)
+    )
+    assert all(value["input"]["state"] is None for value in result["policies"].values())

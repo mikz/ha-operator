@@ -11,12 +11,27 @@ Observed and Reason are new entities; their history starts when HA creates them.
 | Reason | Readable selection cause: a configured policy name, manual ownership, or an airflow requirement and its active inputs. |
 | Control status | Execution outcome, such as satisfied, waiting, hands-off, or observe. |
 | Manual expiry | Absolute deadline for the current manual lease. |
+| Effective expiry | Absolute deadline of the selected manual lease or policy occurrence. Ordinary state policies have no expiry. |
+| Return overdue | Problem indicator when the effective cover return target has not been confirmed within the configured warning period. |
 
 Cover Desired and Observed use `%`. Observed has the `measurement` state class;
 Desired has no state class. Both support ordinary Recorder history. Relay fans
 report profile names. Native fans and switches retain their scalar state and
 structured target attributes. Relay feedback does not prove fan rotation or
 measured airflow; requirements still need their configured confirmation evidence.
+
+Native input policies also provide **Input phase** (enum) and **Qualification
+due** (timestamp). Numeric inputs provide **Qualified** (binary sensor), which
+is unknown before recovery evidence. These read-only diagnostic entities start
+disabled. Runtime qualification and deadlines continue while they are disabled.
+Enabling a disabled entity can make Home Assistant reload the entire integration
+entry. This invokes input recovery; enable diagnostics while the ventilation
+timer and its opening request are inactive. Disabling a diagnostic removes its
+view without stopping the input runtime.
+
+Desired, Observed, Reason, Effective expiry, and Return overdue are operational
+entities. Policy-enabled switches and operating-mode selectors use `CONFIG`.
+Diagnostic availability does not establish physical feedback or command acceptance.
 
 ## Selection attributes
 
@@ -29,10 +44,11 @@ Desired and Reason carry the same bounded selection snapshot:
 - `selection_reason`: the readable cause shown by Reason.
 - `request_id`, `occurrence_id`, and `expires_at`: applicable intent identity and
   absolute UTC deadline; otherwise null.
-- `related_entities`: configured eligibility, target, or activation inputs.
+- `related_entities`: configured eligibility, native policy input, target, or activation inputs.
 - `active_inputs`: active members of requirement inputs, captured during evaluation.
-- `managed_entity`, `desired_entity`, `observed_entity`, `reason_entity`, and
-  `status_entity`: registry-resolved references that follow entity renames.
+- `managed_entity`, `desired_entity`, `observed_entity`, `reason_entity`,
+  `status_entity`, and `effective_expiry_entity`: registry-resolved references
+  that follow entity renames.
 
 Entity references are data for templates, APIs, and dashboard cards. HA does not
 automatically turn arbitrary entity-ID attributes into clickable links. Put the
@@ -66,6 +82,9 @@ Telemetry never establishes manual ownership or identifies a user.
 `ha_operator.explain` includes the selection snapshot, candidates, rejection
 reasons, observation, lease, and requirement predicates. Downloadable diagnostics
 remain allowlisted and omit private labels and entity IDs.
+Native input and return-monitor state is bounded in diagnostics and the initial
+trace snapshot. Trace input sources include sensor unit metadata. Unit strings,
+episode identities, and configuration fingerprints use opaque aliases in exports.
 
 Keep histories from earlier template helpers separate. Reusing their entity IDs
 does not reliably merge Recorder history with the new native entities.

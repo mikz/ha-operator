@@ -36,6 +36,34 @@ average position also does not establish that every member reached its target.
 
 ## Automatic requests and confirmation
 
+Native policies can own the qualification clocks. In the policy form, choose
+**Qualified numeric sensor** for a state policy or **Timer episode** for an
+occurrence policy. The next form shows only that input's settings. Remove the
+old helper eligibility fields when converting a policy; no helper values or
+history are imported. Reconfiguration keeps the policy ID and common settings.
+
+A numeric input requires a sensor, a threshold, an exact source unit, and a
+positive qualification delay. It compares strictly below the threshold. Warm
+reports reset qualification; unknown reports preserve the episode. Recovery
+requires a fresh numeric report before the saved qualification becomes eligible.
+
+A timer input requires a timer, a positive qualification delay, and a positive
+request duration. A fresh start begins a new episode. Pause or cancel withdraws
+it; resume does not open another window. Natural completion keeps an accepted
+request until its expiry. The request expires one qualification delay plus one
+request duration after the fresh start.
+
+Cover resources can also configure **Return confirmation**: the highest target
+to monitor and the warning delay in seconds. Confirmation uses raw position and
+the resource's position tolerance. An overdue return creates one notification
+and turns on the **Return overdue** problem sensor. Physical confirmation clears
+both. Retrying a command or reporting an unchanged position keeps the deadline.
+
+These settings are optional. Existing helper recipes remain supported as
+described below. Keep one controller for each function during a transfer.
+
+### Existing helper recipes
+
 The timer recipe gives each fresh start, including a restart while active, an
 identity and absolute expiry. Pause, cancel, and replacement suppress the prior
 occurrence. A paused marker distinguishes resume from active restart. It is saved

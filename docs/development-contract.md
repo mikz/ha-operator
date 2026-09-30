@@ -21,6 +21,9 @@ controls and rejects manual requests, release, and STOP. Existing controls are
 integration-disabled without erasing registry identity or user-disabled settings;
 old leases are pruned before the source follower becomes active.
 
+Cover resource data can include `return_monitor`: `target_at_most` (0–100) and
+positive `warning_after_seconds`. It uses the existing resource tolerance.
+
 Intent data: `name`, required boolean `initial_value`, optional `on_targets` list
 of other intent IDs. Values are held until explicit command. An OFF-to-ON command
 updates attached controls in one durable transaction. Repeated ON and source OFF
@@ -33,6 +36,13 @@ Switch state policies can instead use `intent_id`, an internal stable reference
 to the committed desired boolean; it is exclusive with other target fields.
 Native attributes are subscribed as well as state changes. Runtime enabled state is
 persisted; disabling tombstones all pending occurrences, not future occurrences.
+
+Optional policy `input` replaces helper eligibility fields. `qualified_numeric`
+requires a state policy, sensor `entity_id`, `comparison: below`, finite
+`threshold`, exact native `unit`, and positive `qualification_seconds`.
+`timer_episode` requires an occurrence policy, timer `entity_id`, positive
+`qualification_seconds`, and positive `request_seconds`. Legacy policy data
+remains supported. Config entry version 2 preserves existing data and subentry IDs.
 
 Requirement data: `name`, `activation_entities` (all on; unknown stays unknown),
 `providers` list of {id, resource_id?: str, target?: Target, evidence: list of
@@ -67,6 +77,9 @@ async_submit_occurrence(policy_id, occurrence_id, expires_at);
 async_skip_occurrence(policy_id, occurrence_id, expires_at);
 async_reconcile(resource_id: str|None=None); explain(resource_id: str|None=None)->dict.
 `mode(id)` -> observe/live; `manual(id)` -> ManualLease|None; `policy_enabled(id)` bool.
+`policy_input(id)` returns committed `NumericState`/`TimerState` or None;
+`return_monitor(id)` returns committed `ReturnMonitorState`. Read-only entity
+views never schedule or own these transitions.
 `adapter(id)` returns adapter object, exposes supported_features, read_observation(now),
 normalize(Target)->Target, async_apply(Target, still_current: Callable[[],bool]),
 async_stop(), supports_stop bool. notify callbacks are HA event-loop callbacks.

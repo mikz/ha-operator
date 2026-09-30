@@ -80,6 +80,17 @@ _SAFE_VALUES = {
     "profile",
     "homekit",
     "bridge_request",
+    "qualified_numeric",
+    "timer_episode",
+    "below",
+    "numeric",
+    "qualifying",
+    "qualified",
+    "recovering",
+    "accepted",
+    "suppressed",
+    "expired",
+    "overdue",
 }
 _BASE_ATTRS = {"supported_features", "assumed_state", "restored", "optimistic"}
 _DOMAIN_ATTRS = {
@@ -147,6 +158,11 @@ class Sanitizer:
         for policy in config["policies"].values():
             self.add_entity(policy.get("eligibility_entity"))
             self.add_entity(policy.get("target_entity"), policy.get("target_attribute"))
+            source = policy.get("input", {})
+            self.add_entity(
+                source.get("entity_id"),
+                "unit_of_measurement" if source.get("type") == "qualified_numeric" else None,
+            )
         for requirement in config["requirements"].values():
             for entity in requirement["activation_entities"]:
                 self.add_entity(entity)
@@ -169,7 +185,8 @@ class Sanitizer:
             self.attrs[entity].add(attribute)
             self.attribute_aliases[attribute] = (
                 attribute
-                if attribute in _BASE_ATTRS | set().union(*_DOMAIN_ATTRS.values())
+                if attribute
+                in _BASE_ATTRS | set().union(*_DOMAIN_ATTRS.values()) | {"unit_of_measurement"}
                 else alias(attribute, "attribute_")
             )
 
@@ -251,10 +268,11 @@ class Sanitizer:
             return [self.ids.get(item) for item in data]
         if key == "source_id" and isinstance(data, str):
             return self.ids.get(data, self.value(data))
-        if key in {"request_id", "occurrence_id", "context_id"}:
-            if key == "occurrence_id" and data in self.occurrence_aliases:
+        if key in {"request_id", "occurrence_id", "context_id", "episode_id", "fingerprint"}:
+            if key in {"occurrence_id", "episode_id"} and data in self.occurrence_aliases:
                 return self.occurrence_aliases[data]
-            return alias(str(data), key + "_") if data is not None else None
+            prefix = "occurrence_id" if key == "episode_id" else key
+            return alias(str(data), prefix + "_") if data is not None else None
         if key == "profile":
             return (
                 self.profiles.get(data, alias(str(data), "profile_")) if data is not None else None
@@ -368,7 +386,14 @@ class Sanitizer:
 
     def intent(self, state: dict) -> dict:
         result = {}
-        for key in ("manuals", "modes", "policy_enabled", "intents"):
+        for key in (
+            "manuals",
+            "modes",
+            "policy_enabled",
+            "intents",
+            "policy_inputs",
+            "return_monitors",
+        ):
             result[key] = {
                 self.ids[k]: self.fields(v) for k, v in state.get(key, {}).items() if k in self.ids
             }

@@ -57,6 +57,45 @@ def _status(value: Any) -> str:
     return value if isinstance(value, str) and value in _STATUSES else "unknown"
 
 
+def _policy_input(runtime: Any, identifier: str, config: dict) -> dict | None:
+    """Export the bounded input contract and committed state with opaque identifiers."""
+    source = config.get("input")
+    if source is None:
+        return None
+    state = runtime.policy_input(identifier)
+    result = {
+        "type": source["type"],
+        "entity": _identifier(source["entity_id"]),
+        "qualification_seconds": _number(source["qualification_seconds"]),
+        "state": None,
+    }
+    if source["type"] == "qualified_numeric":
+        result.update(
+            threshold=_number(source["threshold"]),
+            comparison="below",
+            unit=_identifier(source["unit"]),
+        )
+        if state is not None:
+            result["state"] = {
+                "phase": state.phase,
+                "due_at": _number(state.due_at),
+                "qualified": state.qualified,
+                "source_quality": state.source_quality,
+                "recovery_pending": state.recovery_pending,
+            }
+    else:
+        result["request_seconds"] = _number(source["request_seconds"])
+        if state is not None:
+            result["state"] = {
+                "phase": state.phase,
+                "due_at": _number(state.due_at),
+                "expires_at": _number(state.expires_at),
+                "finish_at": _number(state.finish_at),
+                "episode_id": _identifier(state.episode_id),
+            }
+    return result
+
+
 def _trace_health(value: dict[str, Any]) -> dict[str, Any]:
     """Export health counters only; raw records and paths belong outside diagnostics."""
     return {
@@ -116,6 +155,14 @@ async def async_get_config_entry_diagnostics(hass: Any, entry: Any) -> dict[str,
             "attempts": _number(runtime.attempts.get(identifier, 0)),
             "next_attempt": _number(runtime.next_attempts.get(identifier)),
         }
+        if "return_monitor" in config:
+            monitor = runtime.return_monitor(identifier)
+            resources[_identifier(identifier)]["return_monitor"] = {
+                "phase": monitor.phase,
+                "target_position": _number(monitor.target_position),
+                "due_at": _number(monitor.due_at),
+                "overdue": monitor.overdue,
+            }
     requirements: dict[str, Any] = {}
     for identifier in runtime.requirements:
         result = runtime.requirement_results.get(identifier)
@@ -145,8 +192,11 @@ async def async_get_config_entry_diagnostics(hass: Any, entry: Any) -> dict[str,
             _identifier(key): {"desired": runtime.desired_value(key)} for key in runtime.intents
         },
         "policies": {
-            _identifier(key): {"enabled": bool(runtime.policy_enabled(key))}
-            for key in runtime.policies
+            _identifier(key): {
+                "enabled": bool(runtime.policy_enabled(key)),
+                "input": _policy_input(runtime, key, config),
+            }
+            for key, config in runtime.policies.items()
         },
         "requirements": requirements,
         "history": history,

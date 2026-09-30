@@ -82,9 +82,13 @@ def selection_for(
                 expires_at=occurrence.expires_at if occurrence else None,
                 related_entities=tuple(
                     dict.fromkeys(
-                        config[field]
-                        for field in ("eligibility_entity", "target_entity")
-                        if config.get(field)
+                        entity_id
+                        for entity_id in (
+                            config.get("eligibility_entity"),
+                            config.get("target_entity"),
+                            config.get("input", {}).get("entity_id"),
+                        )
+                        if entity_id
                     )
                 ),
             )

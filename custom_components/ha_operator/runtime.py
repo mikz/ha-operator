@@ -1706,6 +1706,14 @@ class OperatorRuntime:
             if self.decisions[identifier].status in {"pending", "waiting"}:
                 self._wake[identifier].set()
 
+    def policy_input(self, policy_id: str) -> NumericState | TimerState | None:
+        """Expose committed input state without scheduling or mutating qualification."""
+        record = self._state["policy_inputs"].get(policy_id)
+        if record is None:
+            return None
+        model = NumericState if record["type"] == "qualified_numeric" else TimerState
+        return model.from_record(record["state"])
+
     def return_monitor(self, resource_id: str) -> ReturnMonitorState:
         """Expose committed monitor state; telemetry and desired values stay separate."""
         record = self._state["return_monitors"].get(resource_id)

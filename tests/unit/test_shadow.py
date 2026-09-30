@@ -1031,3 +1031,101 @@ async def test_startup_cancellation_settles_disk_work_before_returning(
     finally:
         release.set()
         await asyncio.gather(starting, return_exceptions=True)
+
+
+def test_native_input_sources_state_and_monitor_sanitization(configuration):
+    config = deepcopy(configuration)
+    source = {
+        "type": "qualified_numeric",
+        "entity_id": "sensor.private_cold_source",
+        "comparison": "below",
+        "threshold": 16,
+        "unit": "private-unit",
+        "qualification_seconds": 1800,
+    }
+    config["policies"]["native-private"] = {
+        "name": "Private native label",
+        "resource_id": "roof-private",
+        "kind": "state",
+        "priority": 50,
+        "target": {"position": 7},
+        "input": source,
+    }
+    config["resources"]["roof-private"]["return_monitor"] = {
+        "target_at_most": 7,
+        "warning_after_seconds": 300,
+    }
+    sanitizer = Sanitizer(config, [])
+    assert "sensor.private_cold_source" in sanitizer.attrs
+    assert "unit_of_measurement" in sanitizer.attrs["sensor.private_cold_source"]
+    native = sanitizer.config["policies"][alias("native-private", "p_")]["input"]
+    assert native["type"] == "qualified_numeric" and native["comparison"] == "below"
+    assert native["entity_id"] == entity_alias("sensor.private_cold_source")
+    report = sanitizer.input(
+        "sensor.private_cold_source",
+        SimpleNamespace(
+            state="15",
+            attributes={
+                "unit_of_measurement": "private-unit",
+                "friendly_name": "Private native label",
+                "token": "private-token",
+            },
+            last_changed=datetime.now(UTC),
+            last_updated=datetime.now(UTC),
+            last_reported=datetime.now(UTC),
+        ),
+        "state_reported",
+    )
+    assert report["attributes"]["unit_of_measurement"] == native["unit"]
+    intent = sanitizer.intent(
+        {
+            "occurrences": {
+                "x": {"policy_id": "native-private", "occurrence_id": "private-episode"}
+            },
+            "policy_inputs": {
+                "native-private": {
+                    "type": "timer_episode",
+                    "fingerprint": "private-fingerprint",
+                    "state": {
+                        "episode_id": "private-episode",
+                        "phase": "accepted",
+                        "expires_at": 3000,
+                    },
+                }
+            },
+            "return_monitors": {
+                "roof-private": {
+                    "fingerprint": "private-return-fingerprint",
+                    "state": {"target_position": 7, "due_at": 1000, "overdue": True},
+                }
+            },
+        }
+    )
+    state = intent["policy_inputs"][alias("native-private", "p_")]
+    assert state["type"] == "timer_episode" and state["state"]["phase"] == "accepted"
+    assert state["state"]["episode_id"] == intent["occurrences"][0]["occurrence_id"]
+    assert intent["return_monitors"][alias("roof-private", "r_")]["state"]["overdue"]
+    encoded = json.dumps([sanitizer.config, report, intent])
+    for private in (
+        "private_cold_source",
+        "private-unit",
+        "Private native label",
+        "private-token",
+        "private-episode",
+        "private-fingerprint",
+        "private-return-fingerprint",
+        "native-private",
+    ):
+        assert private not in encoded
+    for field, value in (
+        ("entity_id", "sensor.other_private"),
+        ("threshold", 17),
+        ("unit", "another-private-unit"),
+        ("qualification_seconds", 900),
+    ):
+        changed = deepcopy(config)
+        changed["policies"]["native-private"]["input"][field] = value
+        assert Sanitizer(changed, []).config_hash != sanitizer.config_hash
+    changed = deepcopy(config)
+    changed["resources"]["roof-private"]["return_monitor"]["warning_after_seconds"] = 600
+    assert Sanitizer(changed, []).config_hash != sanitizer.config_hash

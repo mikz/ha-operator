@@ -46,10 +46,12 @@
             "movement_timeout": "Movement timeout (seconds)",
             "tolerance": "Position tolerance (percentage points)",
             "manual_duration": "Default manual duration (seconds)",
-            "manual_control": "Allow manual control"
+            "manual_control": "Allow manual control",
+            "return_monitor": "Return confirmation"
           },
           "data_description": {
-            "manual_control": "Turn off for a follower controlled by a source. Removes managed command entities, manual status, expiry, and resume controls; manual request actions are rejected."
+            "manual_control": "Turn off for a follower controlled by a source. Removes managed command entities, manual status, expiry, and resume controls; manual request actions are rejected.",
+            "return_monitor": "For covers, warn when raw position has not reached the effective return target. Uses the configured position tolerance."
           }
         },
         "reconfigure": {
@@ -70,10 +72,12 @@
             "movement_timeout": "Movement timeout (seconds)",
             "tolerance": "Position tolerance (percentage points)",
             "manual_duration": "Default manual duration (seconds)",
-            "manual_control": "Allow manual control"
+            "manual_control": "Allow manual control",
+            "return_monitor": "Return confirmation"
           },
           "data_description": {
-            "manual_control": "Turn off for a follower controlled by a source. Removes managed command entities, manual status, expiry, and resume controls; manual request actions are rejected."
+            "manual_control": "Turn off for a follower controlled by a source. Removes managed command entities, manual status, expiry, and resume controls; manual request actions are rejected.",
+            "return_monitor": "For covers, warn when raw position has not reached the effective return target. Uses the configured position tolerance."
           }
         }
       },
@@ -84,7 +88,8 @@
         "unsupported_capability": "The source cannot provide the required control or feedback. {detail}",
         "duplicate_output": "Another resource already owns this output. {detail}",
         "resource_not_found": "Select an existing resource. {detail}",
-        "overlapping_requirement": "Each controlled resource can belong to only one airflow requirement. {detail}"
+        "overlapping_requirement": "Each controlled resource can belong to only one airflow requirement. {detail}",
+        "invalid_return_monitor": "Invalid return confirmation settings: {detail}"
       },
       "abort": {
         "no_resources": "Add a resource before creating a policy.",
@@ -111,7 +116,11 @@
             "target_entity": "Target source entity",
             "target_attribute": "Target attribute",
             "target_field": "Target field",
-            "intent_id": "Operator desired control"
+            "intent_id": "Operator desired control",
+            "input_type": "Policy input"
+          },
+          "data_description": {
+            "input_type": "Keep the existing input, or configure a qualified sensor or timer. Remove helper eligibility fields when switching to a native input."
           }
         },
         "reconfigure": {
@@ -128,7 +137,30 @@
             "target_entity": "Target source entity",
             "target_attribute": "Target attribute",
             "target_field": "Target field",
-            "intent_id": "Operator desired control"
+            "intent_id": "Operator desired control",
+            "input_type": "Policy input"
+          },
+          "data_description": {
+            "input_type": "Keep the existing input, or configure a qualified sensor or timer. Remove helper eligibility fields when switching to a native input."
+          }
+        },
+        "qualified_numeric": {
+          "title": "Qualify a numeric source",
+          "description": "Activate this state policy after the sensor stays below the threshold for the qualification delay. The unit must exactly match the source. Unknown readings preserve the episode. After restart, a fresh numeric report is required.",
+          "data": {
+            "entity_id": "Sensor source",
+            "threshold": "Below threshold",
+            "unit": "Source unit",
+            "qualification_seconds": "Qualification delay (seconds)"
+          }
+        },
+        "timer_episode": {
+          "title": "Accept a timer episode",
+          "description": "A fresh timer start qualifies one expiring request. Pause or cancel withdraws it. Resume does not create a new opening. Natural timer completion keeps an accepted request until its own expiry.",
+          "data": {
+            "entity_id": "Timer source",
+            "qualification_seconds": "Qualification delay (seconds)",
+            "request_seconds": "Request duration after qualification (seconds)"
           }
         }
       },
@@ -139,7 +171,12 @@
         "unsupported_capability": "The source cannot provide the required control or feedback. {detail}",
         "duplicate_output": "Another resource already owns this output. {detail}",
         "resource_not_found": "Select an existing resource. {detail}",
-        "overlapping_requirement": "Each controlled resource can belong to only one airflow requirement. {detail}"
+        "overlapping_requirement": "Each controlled resource can belong to only one airflow requirement. {detail}",
+        "invalid_policy_input": "Invalid native policy input: {detail}",
+        "invalid_input_source": "Choose the required sensor or timer source: {detail}",
+        "input_unit_mismatch": "The configured unit must match the sensor unit: {detail}",
+        "invalid_input_value": "The available sensor must report a finite number: {detail}",
+        "input_eligibility_conflict": "Remove helper eligibility fields before using a native policy input: {detail}"
       },
       "abort": {
         "no_resources": "Add a resource before creating a policy.",
@@ -433,6 +470,25 @@
     "error": {
       "unlock_unavailable": "The shadow lock is still enabled. Reload HA Operator and wait for it to finish loading before trying to unlock again. Resources must be saved in observe mode before unlocking.",
       "unlock_persistence_failed": "The shadow lock is still enabled because observe mode could not be saved. Check the HA Operator storage Repair and resolve the storage problem, reload the integration, then try again."
+    }
+  },
+  "selector": {
+    "policy_input_type": {
+      "options": {
+        "legacy": "Existing state or submitted occurrence",
+        "qualified_numeric": "Qualified numeric sensor",
+        "timer_episode": "Timer episode"
+      }
+    },
+    "return_monitor": {
+      "fields": {
+        "target_at_most": {
+          "name": "Monitor targets at or below (%)"
+        },
+        "warning_after_seconds": {
+          "name": "Warn after (seconds)"
+        }
+      }
     }
   }
 }

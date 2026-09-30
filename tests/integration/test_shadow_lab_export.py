@@ -192,3 +192,110 @@ async def test_native_policy_target_field_survives_sanitized_export(
         assert set(literals) <= states
     finally:
         await runtime.async_close()
+
+
+async def test_native_trace_export_is_ingestible_and_rejects_private_fields(hass, tmp_path):
+    """The offline consumer accepts bounded native records, without replay claims."""
+    from copy import deepcopy
+
+    from custom_components.ha_operator.shadow import alias
+    from tests.lab.shadow_trace import TraceValidationError, validate_trace
+
+    hass.config.config_dir = str(tmp_path)
+    hass.states.async_set(
+        "cover.physical_roof", "open", {"current_position": 100, "supported_features": 15}
+    )
+    hass.states.async_set("sensor.private_native", "15", {"unit_of_measurement": "private-unit"})
+    hass.states.async_set("timer.private_native", "idle")
+    policies = {
+        "numeric-private": {
+            "name": "Private numeric label",
+            "kind": "state",
+            "resource_id": "roof",
+            "target": {"position": 7},
+            "input": {
+                "type": "qualified_numeric",
+                "entity_id": "sensor.private_native",
+                "comparison": "below",
+                "threshold": 16,
+                "unit": "private-unit",
+                "qualification_seconds": 60,
+            },
+        },
+        "timer-private": {
+            "name": "Private timer label",
+            "kind": "occurrence",
+            "resource_id": "roof",
+            "target": {"position": 100},
+            "input": {
+                "type": "timer_episode",
+                "entity_id": "timer.private_native",
+                "qualification_seconds": 60,
+                "request_seconds": 1800,
+            },
+        },
+    }
+    entry = operator_entry(
+        policies=policies,
+        resources={
+            "roof": {
+                "name": "Roof",
+                "kind": "cover",
+                "entity_id": "cover.physical_roof",
+                "return_monitor": {"target_at_most": 7, "warning_after_seconds": 300},
+            }
+        },
+    )
+    entry.add_to_hass(hass)
+    hass.config_entries.async_update_entry(
+        entry, options={"trace_enabled": True, "shadow_lock": True}
+    )
+    runtime = OperatorRuntime(hass, entry)
+    entry.runtime_data = runtime
+    try:
+        await runtime.async_start()
+        hass.states.async_set(
+            "sensor.private_native", "14", {"unit_of_measurement": "private-unit"}
+        )
+        await hass.async_block_till_done()
+        exported = await runtime.async_export_trace(limit=1000)
+        trace = validate_trace(exported)
+        assert trace.records
+        start = next(row for row in exported["records"] if row["kind"] == "session_start")
+        intent = start["data"]["intent"]
+        assert (
+            intent["policy_inputs"][alias("numeric-private", "p_")]["type"] == "qualified_numeric"
+        )
+        assert intent["policy_inputs"][alias("timer-private", "p_")]["type"] == "timer_episode"
+        assert intent["return_monitors"][alias("roof", "r_")]["state"]["overdue"] is False
+        assert any(
+            row["kind"] == "admission" and row["data"]["action"] == "policy_input"
+            for row in exported["records"]
+        )
+        encoded = json.dumps(exported)
+        for secret in (
+            "numeric-private",
+            "timer-private",
+            "private_native",
+            "private-unit",
+            "Private numeric label",
+            "Private timer label",
+        ):
+            assert secret not in encoded
+        for field in ("token", "private_field"):
+            unsafe = deepcopy(exported)
+            first = next(row for row in unsafe["records"] if row["kind"] == "session_start")
+            first["data"]["intent"]["policy_inputs"][alias("numeric-private", "p_")]["state"][
+                field
+            ] = "private-secret"
+            with pytest.raises(TraceValidationError):
+                validate_trace(unsafe)
+        unsafe = deepcopy(exported)
+        first = next(row for row in unsafe["records"] if row["kind"] == "session_start")
+        first["data"]["intent"]["return_monitors"][alias("roof", "r_")]["fingerprint"] = (
+            "private-fingerprint"
+        )
+        with pytest.raises(TraceValidationError):
+            validate_trace(unsafe)
+    finally:
+        await runtime.async_close()

@@ -90,7 +90,7 @@ class OperatorEntity(Entity):
         managed_domain = "fan" if kind == "relay_fan" else kind
         return {
             f"{key}_entity": entity_id
-            for key in ("managed", "desired", "observed", "reason", "status")
+            for key in ("managed", "desired", "observed", "reason", "status", "effective_expiry")
             if (
                 entity_id := registry.async_get_entity_id(
                     managed_domain if key == "managed" else "sensor",

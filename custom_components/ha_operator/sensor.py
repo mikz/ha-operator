@@ -17,6 +17,7 @@ RESOURCE_SENSORS = {
     "reason": "Reason",
     "status": "Control status",
     "expiry": "Manual expiry",
+    "effective_expiry": "Effective expiry",
     "next_attempt": "Next attempt",
     "attempts": "Command attempts",
 }
@@ -39,6 +40,15 @@ async def async_setup_entry(hass: Any, entry: Any, async_add_entities: Any) -> N
             [RequirementSensor(runtime, identifier, key) for key in REQUIREMENT_SENSORS],
             config_subentry_id=identifier,
         )
+    for identifier, policy in runtime.policies.items():
+        if "input" in policy:
+            async_add_entities(
+                [
+                    PolicyInputSensor(runtime, identifier, key)
+                    for key in ("input_phase", "qualification_due")
+                ],
+                config_subentry_id=identifier,
+            )
 
 
 def target_value(target: Any) -> float | str | None:
@@ -69,7 +79,7 @@ class ResourceSensor(OperatorEntity, SensorEntity):
             self._attr_suggested_display_precision = 0
             if key == "observed":
                 self._attr_state_class = SensorStateClass.MEASUREMENT
-        if key in {"expiry", "next_attempt"}:
+        if key in {"expiry", "effective_expiry", "next_attempt"}:
             self._attr_device_class = SensorDeviceClass.TIMESTAMP
         if key in {"next_attempt", "attempts"}:
             self._attr_entity_category = EntityCategory.DIAGNOSTIC
@@ -88,6 +98,10 @@ class ResourceSensor(OperatorEntity, SensorEntity):
         if self.key == "expiry":
             lease = self.runtime.manual(self.identifier)
             stamp = lease.expires_at if lease else None
+            return datetime.fromtimestamp(stamp, UTC) if stamp is not None else None
+        if self.key == "effective_expiry":
+            selection = self.runtime.selections.get(self.identifier)
+            stamp = selection.expires_at if selection else None
             return datetime.fromtimestamp(stamp, UTC) if stamp is not None else None
         if self.key == "next_attempt":
             stamp = self.runtime.next_attempts.get(self.identifier)
@@ -127,6 +141,36 @@ class ResourceSensor(OperatorEntity, SensorEntity):
                 else None
             )
         return None
+
+
+class PolicyInputSensor(OperatorEntity, SensorEntity):
+    """Read committed input phase and deadline; execution never depends on this entity."""
+
+    def __init__(self, runtime: Any, identifier: str, key: str) -> None:
+        super().__init__(
+            runtime, identifier, key, "Input phase" if key == "input_phase" else "Qualification due"
+        )
+        self.key = key
+        self._attr_entity_category = EntityCategory.DIAGNOSTIC
+        self._attr_entity_registry_enabled_default = False
+        if key == "input_phase":
+            self._attr_device_class = SensorDeviceClass.ENUM
+            self._attr_options = (
+                ["idle", "qualifying", "qualified", "recovering"]
+                if runtime.policies[identifier]["input"]["type"] == "qualified_numeric"
+                else ["idle", "qualifying", "accepted", "suppressed", "expired"]
+            )
+        else:
+            self._attr_device_class = SensorDeviceClass.TIMESTAMP
+
+    @property
+    def native_value(self) -> str | datetime | None:
+        state = self.runtime.policy_input(self.identifier)
+        if state is None:
+            return None
+        if self.key == "input_phase":
+            return state.phase
+        return datetime.fromtimestamp(state.due_at, UTC) if state.due_at is not None else None
 
 
 class RequirementSensor(OperatorEntity, SensorEntity):

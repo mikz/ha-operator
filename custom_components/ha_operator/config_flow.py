@@ -130,6 +130,24 @@ class OperatorSubentryFlow(ConfigSubentryFlow):
     async def async_step_reconfigure(self, user_input: dict[str, Any] | None = None):
         return await self._async_step("reconfigure", user_input)
 
+    def _validated_data(self, user_input: dict[str, Any], current: Any) -> dict[str, Any]:
+        entry = self._get_entry()
+        candidate_id = current.subentry_id if current else "__new__"
+        candidate = SimpleNamespace(
+            subentry_type=self.kind, subentry_id=candidate_id, data=user_input
+        )
+        subentries = [
+            item for item in entry.subentries.values() if item.subentry_id != candidate_id
+        ]
+        all_data = validate_configuration([*subentries, candidate], self.hass)
+        bucket = {
+            "resource": "resources",
+            "policy": "policies",
+            "requirement": "requirements",
+            "intent": "intents",
+        }[self.kind]
+        return all_data[bucket][candidate_id]
+
     async def _async_step(self, step: str, user_input: dict[str, Any] | None):
         entry = self._get_entry()
         current = self._get_reconfigure_subentry() if step == "reconfigure" else None
@@ -138,22 +156,8 @@ class OperatorSubentryFlow(ConfigSubentryFlow):
         errors: dict[str, str] = {}
         placeholders: dict[str, str] = {}
         if user_input is not None:
-            candidate_id = current.subentry_id if current else "__new__"
-            candidate = SimpleNamespace(
-                subentry_type=self.kind, subentry_id=candidate_id, data=user_input
-            )
-            subentries = [
-                item for item in entry.subentries.values() if item.subentry_id != candidate_id
-            ]
             try:
-                all_data = validate_configuration([*subentries, candidate], self.hass)
-                bucket = {
-                    "resource": "resources",
-                    "policy": "policies",
-                    "requirement": "requirements",
-                    "intent": "intents",
-                }[self.kind]
-                data = all_data[bucket][candidate_id]
+                data = self._validated_data(user_input, current)
             except ConfigurationError as err:
                 errors["base"] = err.code
                 placeholders["detail"] = err.detail
@@ -191,6 +195,23 @@ class ResourceFlow(OperatorSubentryFlow):
             vol.Optional("restriction_entity"): _entity(),
             vol.Optional("fault_entity"): _entity(),
             vol.Optional("manual_control", default=True): selector.BooleanSelector(),
+            vol.Optional("return_monitor"): selector.ObjectSelector(
+                {
+                    "fields": {
+                        "target_at_most": {
+                            "selector": {
+                                "number": {"min": 0, "max": 100, "step": "any", "mode": "box"}
+                            },
+                            "required": True,
+                        },
+                        "warning_after_seconds": {
+                            "selector": {"number": {"min": 0.001, "step": "any", "mode": "box"}},
+                            "required": True,
+                        },
+                    },
+                    "translation_key": "return_monitor",
+                }
+            ),
         }
         for key, default in RESOURCE_DEFAULTS.items():
             fields[vol.Optional(key, default=default)] = (
@@ -203,6 +224,90 @@ class PolicyFlow(OperatorSubentryFlow):
     """Configure ordinary state-backed or explicitly submitted occurrence policies."""
 
     kind = "policy"
+
+    async def _async_step(self, step: str, user_input: dict[str, Any] | None):
+        if not self._get_entry().get_subentries_of_type("resource"):
+            return self.async_abort(reason="no_resources")
+        if user_input is None:
+            result = await super()._async_step(step, None)
+            if step == "reconfigure":
+                current = self._get_reconfigure_subentry().data
+                result["data_schema"] = self.add_suggested_values_to_schema(
+                    result["data_schema"],
+                    {"input_type": current.get("input", {}).get("type", "legacy")},
+                )
+            return result
+        data = dict(user_input)
+        input_type = data.pop("input_type", "legacy")
+        if input_type == "legacy":
+            return await super()._async_step(step, data)
+        data["kind"] = "state" if input_type == "qualified_numeric" else "occurrence"
+        current = self._get_reconfigure_subentry() if step == "reconfigure" else None
+        try:
+            if "eligibility_entity" in data or "eligibility_state" in data:
+                raise ConfigurationError(
+                    "input_eligibility_conflict",
+                    "Remove helper eligibility fields for a native input",
+                )
+            self._validated_data(data, current)
+        except ConfigurationError as err:
+            return self.async_show_form(
+                step_id=step,
+                data_schema=self.add_suggested_values_to_schema(self._schema(), user_input),
+                errors={"base": err.code},
+                description_placeholders={"detail": err.detail},
+            )
+        self._policy_data = data
+        self._policy_step = step
+        self._input_type = input_type
+        return await self._async_input_step(None)
+
+    async def async_step_qualified_numeric(self, user_input: dict[str, Any] | None = None):
+        return await self._async_input_step(user_input)
+
+    async def async_step_timer_episode(self, user_input: dict[str, Any] | None = None):
+        return await self._async_input_step(user_input)
+
+    async def _async_input_step(self, user_input: dict[str, Any] | None):
+        numeric = self._input_type == "qualified_numeric"
+        fields = {
+            vol.Required("entity_id"): _entity(domains=["sensor" if numeric else "timer"]),
+            vol.Required("qualification_seconds"): _number(),
+        }
+        if numeric:
+            fields.update(
+                {
+                    vol.Required("threshold"): selector.NumberSelector(
+                        {"step": "any", "mode": "box"}
+                    ),
+                    vol.Required("unit"): selector.TextSelector(),
+                }
+            )
+        else:
+            fields[vol.Required("request_seconds")] = _number()
+        errors, placeholders = {}, {}
+        if user_input is not None:
+            source = {**user_input, "type": self._input_type}
+            if numeric:
+                source["comparison"] = "below"
+            result = await super()._async_step(
+                self._policy_step, {**self._policy_data, "input": source}
+            )
+            if result["type"] != "form":
+                return result
+            errors, placeholders = result["errors"], result["description_placeholders"]
+        current = (
+            self._get_reconfigure_subentry().data.get("input", {})
+            if self._policy_step == "reconfigure"
+            else {}
+        )
+        values = current if user_input is None else user_input
+        return self.async_show_form(
+            step_id=self._input_type,
+            data_schema=self.add_suggested_values_to_schema(vol.Schema(fields), values),
+            errors=errors,
+            description_placeholders=placeholders,
+        )
 
     def _schema(self) -> vol.Schema:
         resources = self._get_entry().get_subentries_of_type("resource")
@@ -219,6 +324,13 @@ class PolicyFlow(OperatorSubentryFlow):
                 ),
                 vol.Required("kind"): selector.SelectSelector({"options": ["state", "occurrence"]}),
                 vol.Optional("priority", default=0): _number(-1000000, 1000000),
+                vol.Optional("input_type", default="legacy"): selector.SelectSelector(
+                    {
+                        "options": ["legacy", "qualified_numeric", "timer_episode"],
+                        "translation_key": "policy_input_type",
+                        "mode": "dropdown",
+                    }
+                ),
                 vol.Optional("target"): selector.ObjectSelector(),
                 vol.Optional("eligibility_entity"): _entity(),
                 vol.Optional("eligibility_state"): selector.TextSelector(),

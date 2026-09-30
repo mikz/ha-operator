@@ -25,7 +25,7 @@ _HEX = r"[0-9a-f]{20}"
 _ENTITY = re.compile(rf"[a-z_]+\.shadow_{_HEX}\Z")
 _ALIAS = re.compile(
     rf"(?:r_|p_|q_|i_|v_|profile_|attribute_|value_|request_id_|occurrence_id_|"
-    rf"context_id_|context_|source_){_HEX}\Z"
+    rf"context_id_|context_|source_|fingerprint_){_HEX}\Z"
 )
 _HASH = re.compile(r"[0-9a-f]{64}\Z")
 _VERSION = re.compile(r"\d+\.\d+(?:\.\d+)?(?:[a-zA-Z0-9.+-]*)\Z")
@@ -51,6 +51,7 @@ _ATTRIBUTES = {
     "has_date",
     "has_time",
     "next_update",
+    "unit_of_measurement",
 }
 _METADATA_ATTRIBUTES = {"supported_features", "assumed_state", "restored", "optimistic"}
 # Dynamic policy fields admitted by configuration.validate_policy.
@@ -105,6 +106,17 @@ _SAFE_VALUES = {
     "profile",
     "homekit",
     "bridge_request",
+    "qualified_numeric",
+    "timer_episode",
+    "below",
+    "numeric",
+    "qualifying",
+    "qualified",
+    "recovering",
+    "accepted",
+    "suppressed",
+    "expired",
+    "overdue",
 }
 _HEALTH = {
     "enabled",
@@ -177,6 +189,7 @@ _RESOURCE_CONFIG = {
     "movement_timeout",
     "tolerance",
     "manual_duration",
+    "return_monitor",
 }
 _POLICY_CONFIG = {
     "intent_id",
@@ -190,7 +203,14 @@ _POLICY_CONFIG = {
     "target_entity",
     "target_attribute",
     "target_field",
+    "input",
 }
+_NUMERIC_CONFIG = {"type", "entity_id", "comparison", "threshold", "unit", "qualification_seconds"}
+_TIMER_CONFIG = {"type", "entity_id", "qualification_seconds", "request_seconds"}
+_RETURN_CONFIG = {"target_at_most", "warning_after_seconds"}
+_NUMERIC_STATE = {"due_at", "qualified", "source_quality", "recovery_pending"}
+_TIMER_STATE = {"episode_id", "phase", "due_at", "expires_at", "finish_at"}
+_RETURN_STATE = {"target_position", "due_at", "overdue"}
 _REQUIREMENT_CONFIG = {"name", "activation_entities", "providers", "acquisition_timeout"}
 _ENGINE = {
     "now",
@@ -225,6 +245,8 @@ _ADMISSION = {
     "enabled",
     "revision",
     "replayed",
+    "input",
+    "occurrences",
 }
 _DISPATCH = {
     "resource_id",
@@ -251,6 +273,12 @@ _FIELDS = (
     | _DISPATCH
     | _EXTERNAL
     | _ATTRIBUTES
+    | _NUMERIC_CONFIG
+    | _TIMER_CONFIG
+    | _RETURN_CONFIG
+    | _NUMERIC_STATE
+    | _TIMER_STATE
+    | _RETURN_STATE
     | {
         "selection",
         "initial_value",
@@ -313,6 +341,10 @@ _FIELDS = (
         "entity_count",
         "entities",
         "at",
+        "policy_inputs",
+        "return_monitors",
+        "fingerprint",
+        "type",
     }
 )
 _SYMBOL_FIELDS = {
@@ -561,9 +593,25 @@ def _configuration(value: Any) -> dict:
                     and item["kind"] in {"cover", "fan", "switch", "relay_fan"},
                     "Invalid resource kind",
                 )
+                if "return_monitor" in item:
+                    _require(item["kind"] == "cover", "Return monitor requires cover")
+                    monitor = _object(item["return_monitor"], _RETURN_CONFIG)
+                    _position(monitor["target_at_most"])
+                    _positive(monitor["warning_after_seconds"])
             if group == "policies":
                 _alias(item.get("resource_id"), "r_")
                 _require(item["resource_id"] in config["resources"], "Unknown policy resource")
+                if "input" in item:
+                    source = _native_input_config(item["input"])
+                    _require(
+                        item["kind"]
+                        == ("state" if source["type"] == "qualified_numeric" else "occurrence"),
+                        "Input policy kind mismatch",
+                    )
+                    _require(
+                        not ({"eligibility_entity", "eligibility_state"} & item.keys()),
+                        "Input conflicts with helper eligibility",
+                    )
                 if "intent_id" in item:
                     _alias(item["intent_id"], "i_")
                     _require(
@@ -734,10 +782,112 @@ def _engine_result(value: Any) -> None:
             _model(item, kind, engine=True)
 
 
+def _positive(value: Any) -> None:
+    _time(value)
+    _require(value > 0, "Expected positive duration")
+
+
+def _position(value: Any) -> None:
+    _time(value)
+    _require(0 <= value <= 100, "Invalid position")
+
+
+def _native_input_config(value: Any) -> dict:
+    source = _object(value, _NUMERIC_CONFIG | _TIMER_CONFIG, required={"type"})
+    _require(
+        type(source["type"]) is str and source["type"] in {"qualified_numeric", "timer_episode"},
+        "Invalid native input type",
+    )
+    numeric = source["type"] == "qualified_numeric"
+    _object(source, _NUMERIC_CONFIG if numeric else _TIMER_CONFIG)
+    _entity(source["entity_id"])
+    _require(
+        source["entity_id"].startswith("sensor." if numeric else "timer."),
+        "Invalid native input domain",
+    )
+    _positive(source["qualification_seconds"])
+    if numeric:
+        _require(source["comparison"] == "below", "Invalid numeric comparison")
+        _time(source["threshold"])
+        _require(type(source["unit"]) is str and bool(source["unit"]), "Invalid unit")
+    else:
+        _positive(source["request_seconds"])
+    return source
+
+
+def _native_input_record(value: Any) -> None:
+    _object(value, {"type", "fingerprint", "state"})
+    _alias(value["fingerprint"], "fingerprint_")
+    _require(
+        type(value["type"]) is str and value["type"] in {"qualified_numeric", "timer_episode"},
+        "Invalid native input type",
+    )
+    numeric = value["type"] == "qualified_numeric"
+    state = _object(value["state"], _NUMERIC_STATE if numeric else _TIMER_STATE)
+    _time(state["due_at"], nullable=True)
+    if numeric:
+        for field in ("qualified", "recovery_pending"):
+            _require(type(state[field]) is bool, "Invalid qualification flag")
+        _require(
+            type(state["source_quality"]) is str
+            and state["source_quality"] in {"numeric", "unknown"},
+            "Invalid source quality",
+        )
+        _require(
+            not state["qualified"] or state["due_at"] is not None, "Missing qualification deadline"
+        )
+    else:
+        _require(
+            type(state["phase"]) is str
+            and state["phase"] in {"idle", "qualifying", "accepted", "suppressed", "expired"},
+            "Invalid timer phase",
+        )
+        if state["episode_id"] is not None:
+            _alias(state["episode_id"], "occurrence_id_")
+        _time(state["expires_at"], nullable=True)
+        _time(state["finish_at"], nullable=True)
+        _require(
+            (state["phase"] == "qualifying") == (state["due_at"] is not None),
+            "Invalid timer qualification deadline",
+        )
+        _require(
+            (state["phase"] == "idle")
+            == (state["episode_id"] is None and state["expires_at"] is None),
+            "Invalid timer episode",
+        )
+        if state["phase"] != "idle":
+            _require(
+                state["episode_id"] is not None and state["expires_at"] is not None,
+                "Incomplete timer episode",
+            )
+
+
+def _return_record(value: Any) -> None:
+    _object(value, {"fingerprint", "state"})
+    _alias(value["fingerprint"], "fingerprint_")
+    state = _object(value["state"], _RETURN_STATE)
+    if state["target_position"] is not None:
+        _position(state["target_position"])
+    _time(state["due_at"], nullable=True)
+    _require(type(state["overdue"]) is bool, "Invalid overdue flag")
+    _require(
+        (state["target_position"] is None) == (state["due_at"] is None), "Invalid return deadline"
+    )
+    _require(not state["overdue"] or state["due_at"] is not None, "Missing overdue deadline")
+
+
 def _intent(value: Any) -> None:
     _object(
         value,
-        {"manuals", "occurrences", "modes", "policy_enabled", "intents"},
+        {
+            "manuals",
+            "occurrences",
+            "modes",
+            "policy_enabled",
+            "intents",
+            "policy_inputs",
+            "return_monitors",
+        },
         required={"manuals", "occurrences", "modes", "policy_enabled"},
     )
     for identifier, on in value.get("intents", {}).items():
@@ -756,6 +906,15 @@ def _intent(value: Any) -> None:
     _require(type(value["occurrences"]) is list, "Expected intent occurrence list")
     for item in value["occurrences"]:
         _model(item, "occurrence")
+    for field, prefix, validate in (
+        ("policy_inputs", "p_", _native_input_record),
+        ("return_monitors", "r_", _return_record),
+    ):
+        records = value.get(field, {})
+        _require(type(records) is dict, "Expected native state map")
+        for identifier, record in records.items():
+            _alias(identifier, prefix)
+            validate(record)
 
 
 def _explanation(data: dict) -> None:
@@ -933,9 +1092,16 @@ def _record_data(kind: str, data: Any) -> None:
                 "skip_occurrence",
                 "set_desired",
                 "seed_intents",
+                "policy_input",
             },
             "Unknown admission action",
         )
+        if data["action"] == "policy_input":
+            _alias(data.get("policy_id"), "p_")
+            _native_input_record(data.get("input"))
+            _require(type(data.get("occurrences")) is list, "Expected native occurrences")
+            for item in data["occurrences"]:
+                _model(item, "occurrence")
         if data.get("manual") is not None:
             _model(data["manual"], "manual")
         if "occurrence" in data:

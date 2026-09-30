@@ -353,3 +353,65 @@ async def test_unchanged_recompute_deduplicates_decision_frames(hass, trace_fact
     runtime._recompute()
     runtime._recompute()
     assert len(await rows(runtime, "decision")) == len(before)
+
+
+async def test_native_input_reports_initial_state_and_unit_metadata_are_sanitized(
+    hass, trace_factory
+):
+    source = "sensor.private_native_temperature"
+    hass.states.async_set(source, "15", {"unit_of_measurement": "private-native-unit"})
+    create, commands = trace_factory
+    runtime = await create(
+        policies={
+            "native-private": {
+                "name": "Private native name",
+                "resource_id": "roof",
+                "kind": "state",
+                "target": {"position": 7},
+                "input": {
+                    "type": "qualified_numeric",
+                    "entity_id": source,
+                    "comparison": "below",
+                    "threshold": 16,
+                    "unit": "private-native-unit",
+                    "qualification_seconds": 60,
+                },
+            }
+        }
+    )
+    initial = next(row for row in await rows(runtime) if row["kind"] == "session_start")
+    key = alias("native-private", "p_")
+    assert initial["data"]["intent"]["policy_inputs"][key]["type"] == "qualified_numeric"
+    cursor = runtime.trace_health()["last_sequence"]
+    hass.states.async_set(
+        source,
+        "14",
+        {
+            "unit_of_measurement": "private-native-unit",
+            "friendly_name": "Private native name",
+            "token": "native-private-token",
+        },
+    )
+    await hass.async_block_till_done()
+    captured = await rows(runtime, after=cursor)
+    report = next(
+        row
+        for row in captured
+        if row["kind"] == "input" and row["data"]["entity_id"] == entity_alias(source)
+    )
+    assert (
+        report["data"]["attributes"]["unit_of_measurement"]
+        == initial["data"]["config"]["policies"][key]["input"]["unit"]
+    )
+    import json
+
+    encoded = json.dumps([initial, captured])
+    for private in (
+        source,
+        "private-native-unit",
+        "Private native name",
+        "native-private",
+        "native-private-token",
+    ):
+        assert private not in encoded
+    assert commands == []
