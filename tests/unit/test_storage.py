@@ -272,6 +272,7 @@ async def test_cancellation_serializes_writes_and_publishes_committed_revision(
     first = asyncio.create_task(
         store.async_update(lambda state: state["modes"].update(window="live"))
     )
+    tasks = [first]
     try:
         await wait_thread(entered)
         assert store.state["revision"] == 0
@@ -281,11 +282,13 @@ async def test_cancellation_serializes_writes_and_publishes_committed_revision(
         second = asyncio.create_task(
             store.async_update(lambda state: state["requests"].update(second={"accepted": True}))
         )
+        tasks.append(second)
         await asyncio.sleep(0)
         assert not first.done() and not second.done()
         assert revisions == [1]
     finally:
         release.set()
+        await asyncio.gather(*tasks, return_exceptions=True)
     with pytest.raises(asyncio.CancelledError):
         await first
     result = await second

@@ -240,3 +240,71 @@ Legacy queued temperature actions read the final current source state and can
 miss an intermediate warm transition. The input sequence is identical, but
 the old and native qualification semantics are not equivalent for those bursts.
 Report these differences with the measurements.
+
+## Measured native policy candidate: 0.1.5
+
+Measured on Python 3.14.7, HA 2026.9.3, and fixture 0.13.366. The baseline is
+the 0.1.4 ZIP above. The candidate, from source commit `68a7139`, has SHA-256
+`9e3558ca811a124751f81bc9b36385acfb30523ae37888eaf6b03771ad0dcee7`.
+All 100 subprocesses completed with the method described above. Unrelated work
+continued on the shared host; no project tests, builds, or labs ran during timing.
+These results do not establish production latency or the cause of an OOM.
+
+The table reports median unprofiled process CPU and elapsed time across three
+repetitions, in seconds for the complete workload. Report workloads use 100
+batches; timer and reload use 20.
+
+| Workload | Tracing | Baseline CPU | Native CPU | Baseline elapsed | Native elapsed |
+| --- | --- | ---: | ---: | ---: | ---: |
+| Idle | Off | 0.2044 | 0.0012 | 0.2056 | 0.0023 |
+| Idle | On | 0.4351 | 0.0080 | 0.4519 | 0.0073 |
+| Unchanged | Off | 0.0046 | 0.0051 | 0.0058 | 0.0061 |
+| Unchanged | On | 0.0523 | 0.0474 | 0.0974 | 0.0712 |
+| Changing | Off | 1.2840 | 0.7418 | 1.3223 | 2.9066 |
+| Changing | On | 1.6393 | 1.7412 | 1.6795 | 3.7804 |
+| Timer | Off | 3.2598 | 1.1559 | 4.4710 | 2.5155 |
+| Timer | On | 4.1191 | 3.6991 | 5.2050 | 5.0091 |
+| Reload | Off | 0.1864 | 0.1637 | 0.1913 | 0.4377 |
+| Reload | On | 0.2676 | 0.2660 | 0.2707 | 0.5364 |
+
+Idle removes 500 automation runs and 200 helper service calls. The 500 unchanged
+source reports cause zero engine recomputations, snapshot writes, or Operator
+entity updates in both variants. An earlier native candidate recomputed 200
+times; an existing-path guard removed that work. Recovery evidence, deadlines,
+pending saves, and changed reports still use the ordered input path.
+
+Unchanged CPU ranges overlap: 0.0040 to 0.0065 versus 0.0047 to 0.0053 seconds without
+tracing, and 0.0255 to 0.0591 versus 0.0284 to 0.0671 seconds with tracing. Traced
+changing, timer, and reload CPU ranges also overlap. These comparisons are
+inconclusive. Untraced changing and timer CPU favor native in all repetitions.
+
+Changing and reload elapsed time increase in every repetition. Native changing
+performs 300 strict snapshot writes, compared with zero Operator writes in the
+baseline; reload performs 40, compared with zero. Native captures each warm/cold
+edge and saves return and recovery clocks. The baseline can miss an intermediate
+edge and uses debounced helper persistence outside the Operator write counter.
+These costs reflect different input and persistence contracts. The event-loop
+profile cannot separate executor disk waits from shared-host pressure.
+
+Timer commands remain 40 in each variant, with 140 baseline and 180 native
+snapshot writes. Changing commands remain 51. Native exposes 41 enabled Operator
+entities, compared with 33 in the baseline. Engine recomputations increase from
+403 to 1,353 for changing inputs, 388 to 980 for timer events, and 20 to 80 for
+reloads. These figures include the additional input, durable-state, and monitor
+transitions; zero-work unchanged reports remain separately verified.
+
+Separate tracemalloc runs show lower retained allocations for changing inputs
+(6.98 MB baseline versus 0.23 MB native with tracing) and timer events
+(3.63 MB versus 0.31 MB). Unchanged traced allocations are similar: 0.070 MB
+versus 0.074 MB retained, with peaks of 0.542 MB and 0.536 MB. These are Python
+allocations after drain and collection, not RSS or a long-term leak test.
+All 100 runs retain three workers and stable task counts: four without tracing
+and five with tracing.
+
+Rapid timer workloads drop 223 baseline and 233 native trace records in every
+traced repetition. Other workloads drop none; all runs report zero write errors.
+The earlier candidate's cProfile attributed 233 rejected records to the existing
+64 KiB pre-enqueue bound. Expanded historical-occurrence snapshots are the
+inferred payload type; rejected payloads were not retained. The bound is unchanged,
+and these timer traces remain incomplete. Packaged safety scenarios and the
+production-duration retry soak are independent acceptance evidence.

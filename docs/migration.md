@@ -12,6 +12,45 @@ For boolean mode synchronization, use the [desired-control migration](desired-co
 It preserves independent mode values and public controls while retiring the old
 mirrors and coupling automation. Existing scheduling automations continue to run.
 
+## Replace window policy helpers
+
+Use this procedure for windows already controlled by Operator. It changes policy
+inputs and return confirmation, while keeping resource IDs, policy IDs, manual
+leases, and public controls. It imports no helper values or history.
+
+1. Wait until the public ventilation timer and its accepted opening request are
+   inactive. Save the policy, resource, helper, automation, dashboard, and bridge
+   definitions. Search their consumers before removing anything.
+2. Disable the retiring timer, temperature, and return-confirmation writers.
+   Wait for their running actions to finish.
+3. Install the exact package accepted in the isolated lab. Reconfigure the
+   existing cold policy with **Qualified numeric sensor** and the existing timed
+   policy with **Timer episode**. Copy their targets, priorities, source entities,
+   units, qualification delays, and request duration. Clear the old helper
+   eligibility fields. Qualification starts from fresh source observations.
+4. Configure **Return confirmation** on each cover. Copy the monitored target
+   limit, warning delay, and existing position tolerance. Confirm raw feedback;
+   a virtual target does not establish a physical return.
+5. Replace helper dashboard cards with native reason, effective-expiry, and
+   return-overdue entities. Resolve their stable unique IDs through the entity
+   registry. Clear the retired writers' notifications.
+6. Verify the saved configuration, effective targets, raw feedback, and the next
+   natural timer cycle. Preserve the fan, cover, and desired-switch identities
+   in HomeKit. Keep diagnostic entities disabled unless needed.
+7. Search consumers again. Take a full HA backup before deleting helper entries,
+   then remove the retired helpers and writers. Remove their obsolete HomeKit
+   filter references through the native options flow. Keep the public timer.
+
+For configuration rollback, disable the new inputs, restore the saved definitions,
+and initialize the old helpers with fresh state before enabling their writers.
+The new package still supports those definitions. Keep one controller for each
+function; no binary downgrade or stored-state conversion is required.
+
+Reloading the integration interrupts timer-originated requests. Perform the
+transfer while they are inactive. A full HA restart preserves already accepted
+requests with their original expiry. See [native timed window control](window-control.md)
+for these lifecycle contracts and the simulated acceptance cases.
+
 ## Inventory the existing control paths
 
 1. Record the deployed Home Assistant version and verify its integration
