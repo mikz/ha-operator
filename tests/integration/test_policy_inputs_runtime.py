@@ -5,9 +5,12 @@
 import asyncio
 import json
 import threading
+from datetime import timedelta
+from unittest.mock import patch
 
 import pytest
 from homeassistant.setup import async_setup_component
+from homeassistant.util import dt as dt_util
 
 from custom_components.ha_operator import storage
 from tests.integration.test_runtime_reconciliation import (
@@ -275,7 +278,10 @@ async def test_failed_numeric_save_inhibits_commands(hass, runtime_factory, monk
     assert commands == []
 
 
-async def test_numeric_recovery_requires_fresh_finite_report(hass, runtime_factory, freezer):
+@pytest.mark.parametrize("unknown_first", [False, True])
+async def test_numeric_recovery_requires_fresh_finite_report(
+    hass, runtime_factory, freezer, unknown_first
+):
     factory, commands = runtime_factory
     reported(hass)
     runtime = await factory(policies=numeric_policy())
@@ -297,15 +303,165 @@ async def test_numeric_recovery_requires_fresh_finite_report(hass, runtime_facto
     try:
         assert input_state(fresh, "cold")["recovery_pending"]
         before = len(commands)
-        temperature(hass, "unknown")
-        await hass.async_block_till_done()
-        assert len(commands) == before
+        if unknown_first:
+            temperature(hass, "unknown")
+            await hass.async_block_till_done()
+            assert len(commands) == before
+        # Without unknown first, this is STATE_REPORTED against the startup snapshot.
         temperature(hass, 15)
         await hass.async_block_till_done()
         assert input_state(fresh, "cold")["qualified"]
         assert not input_state(fresh, "cold")["recovery_pending"]
     finally:
         await fresh.async_close()
+
+
+async def test_unchanged_numeric_report_at_deadline_qualifies(hass, runtime_factory, freezer):
+    factory, commands = runtime_factory
+    reported(hass)
+    policies = numeric_policy()
+    warm = numeric_policy()["cold"]
+    warm["input"]["threshold"] = 14
+    # The first mapped policy remains unchanged; every mapped policy must be checked.
+    runtime = await factory(policies={"warm": warm, **policies})
+    await runtime.async_set_mode("roof", "live")
+    temperature(hass, 15)
+    await hass.async_block_till_done()
+    due = input_state(runtime, "cold")["due_at"]
+    # Do not fire a time event: the unchanged report must itself recognize the boundary.
+    freezer.move_to(dt_util.utcnow() + timedelta(seconds=60))
+    temperature(hass, 15)
+    await hass.async_block_till_done()
+    assert input_state(runtime, "cold")["qualified"]
+    assert input_state(runtime, "cold")["due_at"] == due
+    assert commands[-1][1]["position"] == 7
+
+
+async def test_unchanged_numeric_report_still_processes_manual_expiry(
+    hass, runtime_factory, freezer
+):
+    factory, commands = runtime_factory
+    reported(hass)
+    runtime = await factory(policies=numeric_policy())
+    await runtime.async_set_mode("roof", "live")
+    temperature(hass, 17)
+    await hass.async_block_till_done()
+    await runtime.async_request("roof", target={"position": 100}, duration=8)
+    await hass.async_block_till_done()
+    ingress = dict(runtime._input_ingress)
+    freezer.move_to(dt_util.utcnow() + timedelta(seconds=8))
+    temperature(hass, 17)
+    await hass.async_block_till_done()
+    assert runtime.manual("roof") is None
+    assert runtime.decisions["roof"].status == "idle"
+    assert runtime._input_ingress == ingress
+    assert len(commands) == 1
+
+
+async def test_unchanged_numeric_report_preserves_shared_target_requirement_and_applying_role(
+    hass, runtime_factory
+):
+    factory, commands = runtime_factory
+    reported(hass)
+    hass.states.async_set("switch.extractor", "on")
+    policies = numeric_policy()
+    policies["target"] = {
+        "name": "Target",
+        "kind": "state",
+        "resource_id": "roof",
+        "target_entity": "sensor.temperature",
+    }
+    runtime = await factory(
+        policies=policies,
+        requirements={
+            "air": {
+                "name": "Fresh air",
+                "activation_entities": ["switch.extractor"],
+                "providers": [
+                    {
+                        "id": "passive",
+                        "evidence": [
+                            {
+                                "entity_id": "sensor.temperature",
+                                "kind": "airflow",
+                                "operator": "gte",
+                                "value": 18,
+                            }
+                        ],
+                    }
+                ],
+            }
+        },
+    )
+    temperature(hass, 17)
+    await hass.async_block_till_done()
+    await runtime.async_set_mode("roof", "live")
+    await hass.async_block_till_done()
+    assert commands[-1][1]["position"] == 17
+    assert runtime.requirement_results["air"].status == "unmet"
+    ingress = dict(runtime._input_ingress)
+    with patch.object(runtime, "_recompute", wraps=runtime._recompute) as recompute:
+        runtime._applying.add("roof")
+        try:
+            temperature(hass, 17)
+            await hass.async_block_till_done()
+            assert recompute.call_count > 0
+            assert runtime._input_ingress == ingress
+        finally:
+            runtime._applying.discard("roof")
+    temperature(hass, 18)
+    await hass.async_block_till_done()
+    assert runtime.decisions["roof"].target.position == 18
+    assert runtime.requirement_results["air"].status == "satisfied"
+
+
+async def test_numeric_report_during_save_retains_order_and_dispatch_fence(
+    hass, runtime_factory, monkeypatch
+):
+    factory, commands = runtime_factory
+    reported(hass)
+    runtime = await factory(policies=numeric_policy())
+    await runtime.async_set_mode("roof", "live")
+    temperature(hass, 17)
+    await hass.async_block_till_done()
+    entered, release = threading.Event(), threading.Event()
+    real_write = storage._write_snapshot
+    captured = []
+    real_apply = runtime._apply_policy_input
+
+    async def capture(policy_id, event, at, context, admissible):
+        if event is not None:
+            captured.append(event.value)
+        await real_apply(policy_id, event, at, context, admissible)
+
+    def gate(path, state):
+        if state["policy_inputs"]["cold"]["state"]["due_at"] is not None:
+            entered.set()
+            assert release.wait(5)
+        real_write(path, state)
+
+    monkeypatch.setattr(runtime, "_apply_policy_input", capture)
+    monkeypatch.setattr(storage, "_write_snapshot", gate)
+    temperature(hass, 15)
+    try:
+        assert await asyncio.to_thread(entered.wait, 2)
+        flush = runtime._input_flush
+        temperature(hass, 15)
+        temperature(hass, 17)
+        # This report matches the last committed warm record, but the drain owns a cold save.
+        temperature(hass, 17)
+        temperature(hass, 15)
+        await asyncio.sleep(0)
+        assert runtime._input_flush is flush
+        assert runtime._input_ingress != runtime._input_processed
+        assert commands == []
+    finally:
+        release.set()
+    await hass.async_block_till_done()
+    assert captured == [15, 15, 17, 17, 15]
+    assert runtime._input_ingress == runtime._input_processed
+    assert input_state(runtime, "cold")["due_at"] is not None
+    assert commands == []
 
 
 @pytest.mark.parametrize("command", ["observe", "disable"])

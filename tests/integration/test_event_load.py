@@ -9,7 +9,10 @@ from homeassistant.helpers.event import async_track_state_report_event
 from homeassistant.util import dt as dt_util
 from pytest_homeassistant_custom_component.common import async_fire_time_changed_exact
 
+from custom_components.ha_operator import storage
+
 from .helpers import managed_id, operator_entry
+from .test_policy_inputs_runtime import numeric_policy, temperature
 
 
 def report(hass, key="roof0", position=0, **attributes):
@@ -76,6 +79,41 @@ async def test_identical_reports_refresh_observation_without_evaluation_or_publi
         assert runtime.observations["roof0"].reported_at > before
         assert evaluate.call_count == 0
     assert events == []
+    remove()
+    await hass.config_entries.async_unload(entry.entry_id)
+
+
+@pytest.mark.parametrize("trace", [False, True])
+@pytest.mark.parametrize("value", [15, 17])
+async def test_identical_numeric_reports_skip_evaluation_writes_and_publication(
+    hass, tmp_path, freezer, trace, value
+):
+    policies = numeric_policy()
+    policies["cold"]["resource_id"] = "roof0"
+    temperature(hass, value)
+    entry = await setup(hass, tmp_path, count=1, trace=trace, policies=policies)
+    runtime = entry.runtime_data
+    # Startup seeds the source snapshot but requires an actual finite report.
+    temperature(hass, value)
+    await hass.async_block_till_done()
+    events, remove = capture_publications(hass)
+    ingress = dict(runtime._input_ingress)
+    state = runtime.store.state
+    with (
+        patch.object(runtime, "_recompute", wraps=runtime._recompute) as evaluate,
+        patch.object(storage, "_write_snapshot", wraps=storage._write_snapshot) as write,
+        patch.object(runtime._trace, "input", wraps=runtime._trace.input) as traced,
+    ):
+        for _ in range(10):
+            freezer.move_to(dt_util.utcnow() + timedelta(seconds=1))
+            temperature(hass, value)
+            await hass.async_block_till_done()
+        assert evaluate.call_count == 0
+        assert write.call_count == 0
+        assert traced.call_count == (10 if trace else 0)
+    assert runtime.store.state == state
+    assert runtime._input_ingress == ingress
+    assert [event for event in events if event.data["entity_id"] != "sensor.temperature"] == []
     remove()
     await hass.config_entries.async_unload(entry.entry_id)
 

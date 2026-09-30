@@ -1630,17 +1630,47 @@ class OperatorRuntime:
                                     )
                                 )
             else:
-                for policy_id in self._policy_sources[entity_id]:
-                    if event.event_type == EVENT_STATE_CHANGED:
-                        self._numeric_reports[policy_id] = self._numeric_report(
-                            self.policies[policy_id]["input"], native
+                unchanged = (
+                    event.event_type == EVENT_STATE_REPORTED
+                    and not self.fault
+                    and self._input_flush is None
+                    and not self._pending_resources
+                    and not self._policy_events
+                )
+                if unchanged:
+                    for policy_id in self._policy_sources[entity_id]:
+                        record = self._state["policy_inputs"].get(policy_id)
+                        if (
+                            record is None
+                            or record["type"] != "qualified_numeric"
+                            or record["fingerprint"] != self._input_fingerprints[policy_id]
+                        ):
+                            unchanged = False
+                            break
+                        previous = NumericState.from_record(record["state"])
+                        source = self.policies[policy_id]["input"]
+                        config = NumericInput(source["threshold"], source["qualification_seconds"])
+                        report = self._numeric_reports.get(policy_id, NumericReport(None))
+                        reported = numeric_transition(
+                            config, previous, report, now=event.time_fired.timestamp()
                         )
-                    report = self._numeric_reports.get(policy_id, NumericReport(None))
-                    self._policy_events.append(
-                        (policy_id, report, event.time_fired.timestamp(), event.context, True)
-                    )
-                self._queue_reconciliation(affected, durable_input=True)
-                return
+                        current = numeric_transition(config, reported.state, None, now=_now())
+                        if previous.recovery_pending or current.state != previous:
+                            unchanged = False
+                            break
+                if not unchanged:
+                    for policy_id in self._policy_sources[entity_id]:
+                        if event.event_type == EVENT_STATE_CHANGED:
+                            self._numeric_reports[policy_id] = self._numeric_report(
+                                self.policies[policy_id]["input"], native
+                            )
+                        report = self._numeric_reports.get(policy_id, NumericReport(None))
+                        self._policy_events.append(
+                            (policy_id, report, event.time_fired.timestamp(), event.context, True)
+                        )
+                    self._queue_reconciliation(affected, durable_input=True)
+                    return
+                # Native input is unchanged; shared roles still need the ordinary report checks.
         if event.event_type == EVENT_STATE_REPORTED:
             # HA reports unchanged values separately from state/attribute changes.
             # Keep fresh observations (including relay report timestamps) without
