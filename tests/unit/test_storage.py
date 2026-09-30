@@ -51,6 +51,8 @@ async def test_first_load_and_full_state_round_trip(store, snapshot_path):
         "policy_enabled": {},
         "requests": {},
         "intents": {},
+        "policy_inputs": {},
+        "return_monitors": {},
     }
     assert not snapshot_path.exists()
 
@@ -103,7 +105,7 @@ async def test_v1_snapshot_upgrades_without_losing_existing_intent(store, snapsh
     assert loaded.state == {**envelope["data"], "intents": {}}
     await loaded.async_update(lambda state: state["intents"].update(central=True, room=False))
     current = json.loads(snapshot_path.read_text())
-    assert current["version"] == 2
+    assert current["version"] == 3
     assert current["data"]["modes"] == {"roof": "live"}
     assert current["data"]["intents"] == {"central": True, "room": False}
     with pytest.raises(InvalidSnapshot, match="boolean"):
@@ -432,3 +434,46 @@ async def test_real_atomic_writer_failure_boundaries(
     assert store.state == old
     assert read_data(snapshot_path)["modes"]["window"] == expected_mode
     assert list(snapshot_path.parent.iterdir()) == [snapshot_path]
+
+
+@pytest.mark.parametrize("version", [1, 2])
+async def test_old_snapshot_adds_empty_input_maps_preserving_intent(store, snapshot_path, version):
+    await store.async_load()
+    await store.async_update(lambda state: state["modes"].update(roof="live"))
+    envelope = json.loads(snapshot_path.read_text())
+    envelope["version"] = version
+    envelope["data"].pop("policy_inputs")
+    envelope["data"].pop("return_monitors")
+    if version == 1:
+        envelope["data"].pop("intents")
+    snapshot_path.write_text(json.dumps(envelope))
+    loaded = IntentStore(ExecutorHost(), snapshot_path)
+    await loaded.async_load(expected_existing=True)
+    assert loaded.state["modes"] == {"roof": "live"}
+    assert loaded.state["policy_inputs"] == loaded.state["return_monitors"] == {}
+
+
+@pytest.mark.parametrize(
+    "record",
+    [
+        {"type": "other", "fingerprint": "a" * 64, "state": {}},
+        {"type": "qualified_numeric", "fingerprint": "invalid", "state": {}},
+        {"type": "qualified_numeric", "fingerprint": "a" * 64, "state": {"qualified": True}},
+        {"type": "timer_episode", "fingerprint": "a" * 64, "state": {"phase": "accepted"}},
+    ],
+)
+async def test_corrupt_typed_input_never_publishes(store, snapshot_path, record):
+    await store.async_load()
+    with pytest.raises(InvalidSnapshot, match="policy input"):
+        await store.async_update(lambda state: state["policy_inputs"].update(cold=record))
+    assert store.state["policy_inputs"] == {}
+    assert not snapshot_path.exists()
+    envelope = {"version": 3, "data": store.state}
+    envelope["data"]["policy_inputs"]["cold"] = record
+    snapshot_path.parent.mkdir(exist_ok=True)
+    snapshot_path.write_text(json.dumps(envelope))
+    loaded = IntentStore(ExecutorHost(), snapshot_path)
+    with pytest.raises(IntentStoreError):
+        await loaded.async_load()
+    assert loaded.fault
+    assert loaded.state["policy_inputs"] == {}

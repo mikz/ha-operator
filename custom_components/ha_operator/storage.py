@@ -19,14 +19,24 @@ from typing import TYPE_CHECKING, Any
 from homeassistant.helpers.json import save_json
 
 from .async_utils import async_settle as _settle
+from .policy_inputs import NumericState, TimerState
 
 if TYPE_CHECKING:
     from collections.abc import Callable
 
     from homeassistant.core import HomeAssistant
 
-_VERSION = 2
-_MAP_KEYS = ("manuals", "occurrences", "modes", "policy_enabled", "requests", "intents")
+_VERSION = 3
+_MAP_KEYS = (
+    "manuals",
+    "occurrences",
+    "modes",
+    "policy_enabled",
+    "requests",
+    "intents",
+    "policy_inputs",
+    "return_monitors",
+)
 
 
 class IntentStoreError(RuntimeError):
@@ -71,6 +81,27 @@ def _validate_state(state: Any) -> None:
         raise InvalidSnapshot("Policy enablement must be boolean")
     if any(type(value) is not bool for value in state["intents"].values()):
         raise InvalidSnapshot("Desired control values must be boolean")
+    if state["return_monitors"]:
+        raise InvalidSnapshot("Return monitor records are not supported yet")
+    for item in state["policy_inputs"].values():
+        if not isinstance(item, dict) or set(item) != {"type", "fingerprint", "state"}:
+            raise InvalidSnapshot("Invalid policy input record")
+        fingerprint = item["fingerprint"]
+        if (
+            not isinstance(fingerprint, str)
+            or len(fingerprint) != 64
+            or any(c not in "0123456789abcdef" for c in fingerprint)
+        ):
+            raise InvalidSnapshot("Invalid policy input fingerprint")
+        if not isinstance(item["type"], str):
+            raise InvalidSnapshot("Invalid policy input type")
+        model = {"qualified_numeric": NumericState, "timer_episode": TimerState}.get(item["type"])
+        if model is None or not isinstance(item["state"], dict):
+            raise InvalidSnapshot("Invalid policy input type or state")
+        try:
+            model.from_record(item["state"])
+        except (ValueError, TypeError) as err:
+            raise InvalidSnapshot("Invalid policy input state") from err
     try:
         _validate_json(state)
     except RecursionError as err:
@@ -102,11 +133,13 @@ def _read_snapshot(path: Path, expected_existing: bool) -> dict[str, Any]:
     )
     if not isinstance(envelope, dict):
         raise InvalidSnapshot("Snapshot envelope must be an object")
-    if type(envelope.get("version")) is not int or envelope["version"] not in (1, _VERSION):
+    if type(envelope.get("version")) is not int or envelope["version"] not in (1, 2, _VERSION):
         raise InvalidSnapshot("Unsupported intent snapshot version")
     state = envelope.get("data")
     if envelope["version"] == 1 and isinstance(state, dict):
         state = {**state, "intents": {}}
+    if envelope["version"] in (1, 2) and isinstance(state, dict):
+        state = {**state, "policy_inputs": {}, "return_monitors": {}}
     _validate_state(state)
     return state
 
