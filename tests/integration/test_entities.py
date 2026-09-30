@@ -68,6 +68,7 @@ def fake_runtime():
         resources=resources,
         policies={"morning": {"name": "Morning", "kind": "state"}},
         requirements={"air": {"name": "Air"}},
+        intents={},
         observations={
             "roof": Observation(Target(position=0), True),
             "native": Observation(Target(on=False, percentage=0, direction="forward"), True),
@@ -76,6 +77,7 @@ def fake_runtime():
         },
         decisions={},
         selections={},
+        selection_attributes=lambda key: runtime.selections[key].attributes(),
         requirement_results={"air": result},
         next_attempts={},
         attempts={},
@@ -86,6 +88,7 @@ def fake_runtime():
         history=deque(maxlen=100),
         mode=Mock(return_value="observe"),
         manual=Mock(return_value=None),
+        manual_control=Mock(return_value=True),
         policy_enabled=Mock(return_value=True),
         adapter=lambda key: adapters[key],
         subscribe=subscribe,

@@ -47,6 +47,7 @@ _SAFE_VALUES = {
     "hands_off",
     "state",
     "occurrence",
+    "intent",
     "cover",
     "fan",
     "relay_fan",
@@ -128,8 +129,13 @@ class Sanitizer:
         self.attrs: dict[str, set[str]] = {}
         self.attribute_aliases: dict[str, str] = {}
         self.occurrence_aliases: dict[str, str] = {}
-        for collection, prefix in (("resources", "r_"), ("policies", "p_"), ("requirements", "q_")):
-            for key in config[collection]:
+        for collection, prefix in (
+            ("resources", "r_"),
+            ("policies", "p_"),
+            ("requirements", "q_"),
+            ("intents", "i_"),
+        ):
+            for key in config.get(collection, {}):
                 self.ids[key] = alias(key, prefix)
         for resource in config["resources"].values():
             for profile in resource.get("profiles", {}):
@@ -205,7 +211,7 @@ class Sanitizer:
         }
 
     def configuration(self, config: dict, extras: list[str]) -> dict:
-        result = {"resources": {}, "policies": {}, "requirements": {}}
+        result = {group: {} for group in config}
         for group, records in config.items():
             for key, data in records.items():
                 item = self.fields(data)
@@ -232,8 +238,19 @@ class Sanitizer:
             return entity_alias(data) if isinstance(data, str) and data in self.attrs else None
         if key in {"attribute", "target_attribute"}:
             return self.attribute_aliases.get(data, data)
-        if key in {"resource_id", "policy_id", "id", "selected_provider", "acquiring_provider"}:
+        if key in {
+            "resource_id",
+            "policy_id",
+            "intent_id",
+            "id",
+            "selected_provider",
+            "acquiring_provider",
+        }:
             return self.ids.get(data) if data is not None else None
+        if key == "on_targets":
+            return [self.ids.get(item) for item in data]
+        if key == "source_id" and isinstance(data, str):
+            return self.ids.get(data, self.value(data))
         if key in {"request_id", "occurrence_id", "context_id"}:
             if key == "occurrence_id" and data in self.occurrence_aliases:
                 return self.occurrence_aliases[data]
@@ -351,9 +368,9 @@ class Sanitizer:
 
     def intent(self, state: dict) -> dict:
         result = {}
-        for key in ("manuals", "modes", "policy_enabled"):
+        for key in ("manuals", "modes", "policy_enabled", "intents"):
             result[key] = {
-                self.ids[k]: self.fields(v) for k, v in state[key].items() if k in self.ids
+                self.ids[k]: self.fields(v) for k, v in state.get(key, {}).items() if k in self.ids
             }
         result["occurrences"] = [self.fields(value) for value in state["occurrences"].values()]
         return result
@@ -474,8 +491,10 @@ class TraceDisk:
                             and (after is None or maximum > after)
                             and (through is None or maximum <= through)
                         ):
-                            if more or len(records) >= limit or (
-                                records and size + len(line) > EXPORT_BYTES
+                            if (
+                                more
+                                or len(records) >= limit
+                                or (records and size + len(line) > EXPORT_BYTES)
                             ):
                                 more = True
                                 continue
@@ -531,6 +550,22 @@ class TraceDisk:
         with self.lock:
             rotations, evictions, oversized, durable = 0, 0, 0, 0
             directory_changed = False
+            path = self._file(0)
+            size = path.stat().st_size if path.exists() else 0
+            pending = bytearray()
+
+            def flush() -> None:
+                nonlocal directory_changed
+                if not pending:
+                    return
+                directory_changed |= not path.exists()
+                fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+                with os.fdopen(fd, "ab") as stream:
+                    stream.write(pending)
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                pending.clear()
+
             for record in records:
                 encoded = (
                     json.dumps(record, allow_nan=False, separators=(",", ":")) + "\n"
@@ -538,17 +573,17 @@ class TraceDisk:
                 if len(encoded) > min(RECORD_LIMIT, self.segment_bytes):
                     oversized += 1
                     continue
-                path = self._file(0)
-                if path.exists() and path.stat().st_size + len(encoded) > self.segment_bytes:
+                if size + len(encoded) > self.segment_bytes:
+                    # Flush and close before renaming a segment. A batch is
+                    # acknowledged only after every chunk and directory flush.
+                    flush()
                     evictions += self._rotate()
                     rotations += 1
-                directory_changed |= not path.exists()
-                fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
-                with os.fdopen(fd, "ab") as stream:
-                    stream.write(encoded)
-                    stream.flush()
-                    os.fsync(stream.fileno())
+                    size = 0
+                pending.extend(encoded)
+                size += len(encoded)
                 durable = record["sequence"]
+            flush()
             if rotations or directory_changed:
                 fd = os.open(self.path, os.O_RDONLY)
                 try:

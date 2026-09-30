@@ -24,7 +24,7 @@ SETTLE_SECONDS = 1.0
 _HEX = r"[0-9a-f]{20}"
 _ENTITY = re.compile(rf"[a-z_]+\.shadow_{_HEX}\Z")
 _ALIAS = re.compile(
-    rf"(?:r_|p_|q_|v_|profile_|attribute_|value_|request_id_|occurrence_id_|"
+    rf"(?:r_|p_|q_|i_|v_|profile_|attribute_|value_|request_id_|occurrence_id_|"
     rf"context_id_|context_|source_){_HEX}\Z"
 )
 _HASH = re.compile(r"[0-9a-f]{64}\Z")
@@ -72,6 +72,7 @@ _SAFE_VALUES = {
     "hands_off",
     "state",
     "occurrence",
+    "intent",
     "cover",
     "fan",
     "relay_fan",
@@ -161,6 +162,7 @@ _INPUT = {
     "old_last_reported",
 }
 _RESOURCE_CONFIG = {
+    "manual_control",
     "name",
     "kind",
     "entity_id",
@@ -177,6 +179,7 @@ _RESOURCE_CONFIG = {
     "manual_duration",
 }
 _POLICY_CONFIG = {
+    "intent_id",
     "name",
     "resource_id",
     "kind",
@@ -211,6 +214,8 @@ _DECISION = {
     "trace",
 }
 _ADMISSION = {
+    "intent_id",
+    "intents",
     "action",
     "resource_id",
     "policy_id",
@@ -248,6 +253,8 @@ _FIELDS = (
     | _ATTRIBUTES
     | {
         "selection",
+        "initial_value",
+        "on_targets",
         "source_kind",
         "source_id",
         "source_name",
@@ -515,7 +522,20 @@ def _health(value: Any) -> None:
 
 
 def _configuration(value: Any) -> dict:
-    config = _object(value, {"resources", "policies", "requirements", "trace_entities"})
+    config = _object(
+        value,
+        {"resources", "policies", "requirements", "trace_entities", "intents"},
+        required={"resources", "policies", "requirements", "trace_entities"},
+    )
+    for identifier, item in config.get("intents", {}).items():
+        _alias(identifier, "i_")
+        _object(item, {"name", "initial_value", "on_targets"})
+        _require(item["name"] == identifier, "Configuration name is not its alias")
+        _require(type(item["initial_value"]) is bool, "Initial desired value must be boolean")
+        _require(type(item["on_targets"]) is list, "Expected on target list")
+        for target in item["on_targets"]:
+            _alias(target, "i_")
+            _require(target in config["intents"], "Unknown desired control")
     for group, prefix, fields in (
         ("resources", "r_", _RESOURCE_CONFIG),
         ("policies", "p_", _POLICY_CONFIG),
@@ -544,6 +564,11 @@ def _configuration(value: Any) -> dict:
             if group == "policies":
                 _alias(item.get("resource_id"), "r_")
                 _require(item["resource_id"] in config["resources"], "Unknown policy resource")
+                if "intent_id" in item:
+                    _alias(item["intent_id"], "i_")
+                    _require(
+                        item["intent_id"] in config.get("intents", {}), "Unknown desired control"
+                    )
                 if "target_field" in item:
                     _require(
                         type(item["target_field"]) is str
@@ -710,7 +735,14 @@ def _engine_result(value: Any) -> None:
 
 
 def _intent(value: Any) -> None:
-    _object(value, {"manuals", "occurrences", "modes", "policy_enabled"})
+    _object(
+        value,
+        {"manuals", "occurrences", "modes", "policy_enabled", "intents"},
+        required={"manuals", "occurrences", "modes", "policy_enabled"},
+    )
+    for identifier, on in value.get("intents", {}).items():
+        _alias(identifier, "i_")
+        _require(type(on) is bool, "Desired control value must be boolean")
     for key, prefix in (("manuals", "r_"), ("modes", "r_"), ("policy_enabled", "p_")):
         _require(type(value[key]) is dict, "Expected intent map")
         for identifier, item in value[key].items():
@@ -899,6 +931,8 @@ def _record_data(kind: str, data: Any) -> None:
                 "set_policy_enabled",
                 "submit_occurrence",
                 "skip_occurrence",
+                "set_desired",
+                "seed_intents",
             },
             "Unknown admission action",
         )
@@ -906,6 +940,13 @@ def _record_data(kind: str, data: Any) -> None:
             _model(data["manual"], "manual")
         if "occurrence" in data:
             _model(data["occurrence"], "occurrence")
+        if "intent_id" in data:
+            _alias(data["intent_id"], "i_")
+        if "intents" in data:
+            _require(type(data["intents"]) is dict, "Expected desired control values")
+            for identifier, value in data["intents"].items():
+                _alias(identifier, "i_")
+                _require(type(value) is bool, "Desired control value must be boolean")
     elif kind == "dispatch":
         _object(data, _DISPATCH, required=_DISPATCH - {"error_type", "cancellation_scope"})
         _alias(data["resource_id"], "r_")

@@ -56,7 +56,9 @@ async def async_add_physical_cover(hass):
     return raw
 
 
-def operator_entry(*, resources=None, policies=None, requirements=None, data=None, version=1):
+def operator_entry(
+    *, resources=None, policies=None, requirements=None, intents=None, data=None, version=1
+):
     """Build genuine HA subentries with stable identifiers."""
     subentries = []
     if resources is None:
@@ -71,6 +73,7 @@ def operator_entry(*, resources=None, policies=None, requirements=None, data=Non
         ("resource", resources),
         ("policy", policies or {}),
         ("requirement", requirements or {}),
+        ("intent", intents or {}),
     ):
         for key, config in configs.items():
             subentries.append(

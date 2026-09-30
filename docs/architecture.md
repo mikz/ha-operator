@@ -1,7 +1,7 @@
 # Architecture
 
 HA Operator coordinates durable intent inside Home Assistant. Native config
-subentries define resources, policies, and requirements. Managed entities accept
+subentries define resources, policies, requirements, and desired controls. Managed entities accept
 commands, while adapters observe and control the underlying entities. The
 simulator belongs only to the test lab and is excluded from the release archive.
 
@@ -37,7 +37,7 @@ flowchart LR
 
 ## Configuration and resolution
 
-A singleton config entry contains native `resource`, `policy`, and `requirement`
+A singleton config entry contains native `resource`, `policy`, `requirement`, and `intent`
 subentries. HA-generated subentry IDs are the references between them. Entities
 belong to their subentry and have stable unique IDs. Resource mode is an
 `observe` or `live` select; a custom global service interceptor is not used.
@@ -123,6 +123,22 @@ Each asynchronous command sequence must recheck its request generation before
 each effect. Supersession, STOP, hands-off, observe mode, expiry, unload, and
 storage failure invalidate pending work. A queued or delayed attempt cannot act
 on a target that was valid only when the sequence began.
+
+Routine input changes join one HA-tracked batch per event-loop turn. A dependency
+map wakes affected actuator workers, including every resource participating in a
+provider handover. Identical state reports refresh feedback timestamps without
+recomputing unless observation semantics, pending confirmation, or a due deadline
+require it. Independent retry and expiry timers remain active.
+
+Entity subscribers compare their public state, attributes, availability, and
+capabilities with a detached last-publication snapshot. Only changes call HA's
+state writer. This avoids redundant `state_reported` traffic; `force_update=False`
+alone does not suppress that traffic. Unload cancels and drains the pending batch.
+Explicit commands, STOP, and current pre-dispatch checks retain their direct paths.
+
+See [desired controls](desired-controls.md) for held boolean intent, source-only
+followers, atomic ON attachment, and migration. This logical control layer never
+promotes output feedback into a new request.
 
 ## Adapter contracts
 

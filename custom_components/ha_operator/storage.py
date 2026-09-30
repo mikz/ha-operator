@@ -25,8 +25,8 @@ if TYPE_CHECKING:
 
     from homeassistant.core import HomeAssistant
 
-_VERSION = 1
-_MAP_KEYS = ("manuals", "occurrences", "modes", "policy_enabled", "requests")
+_VERSION = 2
+_MAP_KEYS = ("manuals", "occurrences", "modes", "policy_enabled", "requests", "intents")
 
 
 class IntentStoreError(RuntimeError):
@@ -69,6 +69,8 @@ def _validate_state(state: Any) -> None:
         raise InvalidSnapshot("Resource mode must be observe or live")
     if any(type(value) is not bool for value in state["policy_enabled"].values()):
         raise InvalidSnapshot("Policy enablement must be boolean")
+    if any(type(value) is not bool for value in state["intents"].values()):
+        raise InvalidSnapshot("Desired control values must be boolean")
     try:
         _validate_json(state)
     except RecursionError as err:
@@ -100,9 +102,11 @@ def _read_snapshot(path: Path, expected_existing: bool) -> dict[str, Any]:
     )
     if not isinstance(envelope, dict):
         raise InvalidSnapshot("Snapshot envelope must be an object")
-    if type(envelope.get("version")) is not int or envelope["version"] != _VERSION:
+    if type(envelope.get("version")) is not int or envelope["version"] not in (1, _VERSION):
         raise InvalidSnapshot("Unsupported intent snapshot version")
     state = envelope.get("data")
+    if envelope["version"] == 1 and isinstance(state, dict):
+        state = {**state, "intents": {}}
     _validate_state(state)
     return state
 
@@ -155,7 +159,9 @@ class IntentStore:
             if cancelled:
                 raise asyncio.CancelledError
 
-    async def async_update(self, mutator: Callable[[dict[str, Any]], None]) -> dict[str, Any]:
+    async def async_update(
+        self, mutator: Callable[[dict[str, Any]], None], *, skip_unchanged: bool = False
+    ) -> dict[str, Any]:
         """Save a mutation of the current revision before publishing it.
 
         Caller cancellation cannot undo a committed update. After commit this
@@ -169,6 +175,8 @@ class IntentStore:
                 raise IntentStoreError("Intent snapshot has not been loaded")
             candidate = deepcopy(self._state)
             mutator(candidate)
+            if skip_unchanged and candidate == self._state:
+                return self.state
             candidate["revision"] = self._state["revision"] + 1
             _validate_state(candidate)
             # A mutator may retain its argument. Detach it before executor access.

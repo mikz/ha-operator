@@ -1,3 +1,17 @@
+seed_intents:
+  name: Import desired states
+  description: Import boolean desired states atomically without triggering ON attachments. Every affected follower must be in observe mode. Use only for migration; normal controls use the desired switches.
+  fields:
+    values:
+      name: Desired control values
+      required: true
+      description: An object mapping desired control subentry IDs to true or false.
+      selector:
+        object: null
+    config_entry_id:
+      name: Integration entry ID
+      selector:
+        text: null
 request:
   name: Request control
   description: Durably accept a manual target or hands-off lease for one live resource.

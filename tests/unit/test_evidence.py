@@ -16,6 +16,8 @@ from scripts.evidence import (
     OBSERVABILITY_SCENARIOS,
     SHADOW_FILES,
     SHADOW_SCENARIOS,
+    SLEEP_FILES,
+    SLEEP_SCENARIOS,
     TEST_FILES,
     build_evidence,
     validate_lab,
@@ -88,9 +90,11 @@ def complete_evidence(tmp_path):
             if scenario == "all"
             else OBSERVABILITY_SCENARIOS
             if scenario == "observability"
+            else SLEEP_SCENARIOS
+            if scenario == "sleep"
             else INITIAL_SCENARIOS | {"LAB-REALISTIC-SOAK"}
         )
-        for name in OBSERVABILITY_FILES:
+        for name in OBSERVABILITY_FILES | SLEEP_FILES:
             (run / name).write_text("{}")
         write_json(
             run / "scenarios.json",

@@ -141,6 +141,9 @@ async def async_get_config_entry_diagnostics(hass: Any, entry: Any) -> dict[str,
         "shadow_locked": bool(runtime.shadow_locked),
         "trace": _trace_health(runtime.trace_health()),
         "resources": resources,
+        "intents": {
+            _identifier(key): {"desired": runtime.desired_value(key)} for key in runtime.intents
+        },
         "policies": {
             _identifier(key): {"enabled": bool(runtime.policy_enabled(key))}
             for key in runtime.policies

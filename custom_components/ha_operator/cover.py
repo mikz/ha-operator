@@ -12,7 +12,7 @@ from .entity import ResourceEntity
 async def async_setup_entry(hass: Any, entry: Any, async_add_entities: Any) -> None:
     runtime = entry.runtime_data
     for identifier, data in runtime.resources.items():
-        if data["kind"] == "cover":
+        if data["kind"] == "cover" and runtime.manual_control(identifier):
             async_add_entities([OperatorCover(runtime, identifier)], config_subentry_id=identifier)
 
 

@@ -52,6 +52,7 @@ async def call(hass, action, data=None, response=False):
 async def test_registration_and_missing_configuration(hass):
     assert await async_setup_component(hass, DOMAIN, {})
     assert set(hass.services.async_services()[DOMAIN]) == {
+        "seed_intents",
         "request",
         "release",
         "submit_occurrence",

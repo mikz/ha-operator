@@ -54,6 +54,14 @@ The [native timed window recipe](docs/window-control.md) combines expiring
 openings with a return policy, explicit position presets, and raw confirmation.
 Its isolated lab scenarios exercise native HA scripts and encrypted HomeKit commands.
 
+[Desired controls and source followers](docs/desired-controls.md) replace mode
+synchronization loops with durable native switches. A control can attach another
+control on an ON transition while leaving its OFF behavior independent. Followers
+can omit manual controls and derive their target directly from committed intent.
+The guide includes state import, public-group migration, HomeKit checks, and rollback.
+The [event-load measurements](docs/performance.md) document CPU, publication and
+allocation behavior with tracing on and off.
+
 ## Record a passive shadow trace
 
 Version 0.1.1 adds three integration options:

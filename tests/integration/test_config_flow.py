@@ -110,6 +110,72 @@ async def test_policy_needs_resource_then_creates(hass, native_sources):
     assert result["data"]["priority"] == 0
 
 
+async def test_desired_controls_create_reconfigure_and_follow(hass):
+    entry = MockConfigEntry(domain=DOMAIN)
+    entry.add_to_hass(hass)
+    flow = await _start(hass, entry, "intent")
+    child = await hass.config_entries.subentries.async_configure(
+        flow["flow_id"], {"name": "Room mode", "initial_value": False}
+    )
+    assert child["type"] is FlowResultType.CREATE_ENTRY
+    child_id = next(iter(entry.subentries))
+    parent = await _start(hass, entry, "intent")
+    parent = await hass.config_entries.subentries.async_configure(
+        parent["flow_id"],
+        {
+            "name": "Central mode",
+            "initial_value": True,
+            "on_targets": [child_id],
+        },
+    )
+    assert parent["type"] is FlowResultType.CREATE_ENTRY
+    parent_id = next(key for key in entry.subentries if key != child_id)
+    edit = await entry.start_subentry_reconfigure_flow(hass, child_id)
+    error = await hass.config_entries.subentries.async_configure(
+        edit["flow_id"],
+        {
+            "name": "Room mode",
+            "initial_value": False,
+            "on_targets": [parent_id],
+        },
+    )
+    assert error["errors"] == {"base": "invalid_configuration"}
+    result = await hass.config_entries.subentries.async_configure(
+        edit["flow_id"],
+        {
+            "name": "Room mode renamed",
+            "initial_value": False,
+            "on_targets": [],
+        },
+    )
+    assert result["reason"] == "reconfigure_successful"
+    hass.states.async_set("switch.raw", "off")
+    resource = await _start(hass, entry, "resource")
+    resource = await hass.config_entries.subentries.async_configure(
+        resource["flow_id"],
+        {
+            "name": "Follower",
+            "kind": "switch",
+            "entity_id": "switch.raw",
+            "manual_control": False,
+        },
+    )
+    assert resource["type"] is FlowResultType.CREATE_ENTRY
+    resource_id = entry.get_subentries_of_type("resource")[0].subentry_id
+    policy = await _start(hass, entry, "policy")
+    policy = await hass.config_entries.subentries.async_configure(
+        policy["flow_id"],
+        {
+            "name": "Follow room",
+            "resource_id": resource_id,
+            "kind": "state",
+            "intent_id": child_id,
+        },
+    )
+    assert policy["type"] is FlowResultType.CREATE_ENTRY
+    assert policy["data"]["intent_id"] == child_id
+
+
 async def test_requirement_passive_and_overlap(hass, native_sources):
     entry = MockConfigEntry(domain=DOMAIN)
     entry.add_to_hass(hass)

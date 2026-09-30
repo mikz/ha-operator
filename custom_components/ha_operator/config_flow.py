@@ -68,7 +68,12 @@ class OperatorConfigFlow(ConfigFlow, domain=DOMAIN):
     def async_get_supported_subentry_types(
         cls, config_entry: ConfigEntry
     ) -> dict[str, type[ConfigSubentryFlow]]:
-        return {"resource": ResourceFlow, "policy": PolicyFlow, "requirement": RequirementFlow}
+        return {
+            "resource": ResourceFlow,
+            "policy": PolicyFlow,
+            "requirement": RequirementFlow,
+            "intent": IntentFlow,
+        }
 
     async def async_step_user(self, user_input: dict[str, Any] | None = None):
         if self._async_current_entries():
@@ -146,6 +151,7 @@ class OperatorSubentryFlow(ConfigSubentryFlow):
                     "resource": "resources",
                     "policy": "policies",
                     "requirement": "requirements",
+                    "intent": "intents",
                 }[self.kind]
                 data = all_data[bucket][candidate_id]
             except ConfigurationError as err:
@@ -184,6 +190,7 @@ class ResourceFlow(OperatorSubentryFlow):
             vol.Optional("reversal_dead_time"): _number(),
             vol.Optional("restriction_entity"): _entity(),
             vol.Optional("fault_entity"): _entity(),
+            vol.Optional("manual_control", default=True): selector.BooleanSelector(),
         }
         for key, default in RESOURCE_DEFAULTS.items():
             fields[vol.Optional(key, default=default)] = (
@@ -216,9 +223,42 @@ class PolicyFlow(OperatorSubentryFlow):
                 vol.Optional("eligibility_entity"): _entity(),
                 vol.Optional("eligibility_state"): selector.TextSelector(),
                 vol.Optional("target_entity"): _entity(),
+                vol.Optional("intent_id"): selector.SelectSelector(
+                    {
+                        "options": [
+                            {"value": item.subentry_id, "label": item.title}
+                            for item in self._get_entry().get_subentries_of_type("intent")
+                        ],
+                        "mode": "dropdown",
+                    }
+                ),
                 vol.Optional("target_attribute"): selector.TextSelector(),
                 vol.Optional("target_field"): selector.SelectSelector(
                     {"options": ["position", "on", "percentage", "direction"]}
+                ),
+            }
+        )
+
+
+class IntentFlow(OperatorSubentryFlow):
+    """Configure one authoritative desired switch and optional ON-only attachment."""
+
+    kind = "intent"
+
+    def _schema(self) -> vol.Schema:
+        return vol.Schema(
+            {
+                vol.Required("name"): selector.TextSelector(),
+                vol.Required("initial_value", default=False): selector.BooleanSelector(),
+                vol.Optional("on_targets", default=[]): selector.SelectSelector(
+                    {
+                        "options": [
+                            {"value": item.subentry_id, "label": item.title}
+                            for item in self._get_entry().get_subentries_of_type("intent")
+                        ],
+                        "multiple": True,
+                        "mode": "dropdown",
+                    }
                 ),
             }
         )

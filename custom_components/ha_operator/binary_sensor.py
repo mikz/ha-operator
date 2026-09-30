@@ -12,7 +12,8 @@ from .entity import OperatorEntity
 async def async_setup_entry(hass: Any, entry: Any, async_add_entities: Any) -> None:
     runtime = entry.runtime_data
     for identifier in runtime.resources:
-        async_add_entities([ManualSensor(runtime, identifier)], config_subentry_id=identifier)
+        if runtime.manual_control(identifier):
+            async_add_entities([ManualSensor(runtime, identifier)], config_subentry_id=identifier)
     for identifier in runtime.requirements:
         async_add_entities([UnmetSensor(runtime, identifier)], config_subentry_id=identifier)
 

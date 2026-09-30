@@ -115,6 +115,10 @@ def default_devices() -> list[dict[str, Any]]:
         {"id": "extraction", "kind": "binary_sensor", "airflow_role": "extractor"},
         {"id": "demand", "kind": "binary_sensor"},
         {"id": "airflow", "kind": "sensor", "derived": "airflow"},
+        {"id": "central_flag", "kind": "switch"},
+        {"id": "central_lighting", "kind": "switch"},
+        {"id": "room_flag", "kind": "switch"},
+        {"id": "room_lighting", "kind": "switch"},
     ]
 
 

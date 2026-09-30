@@ -13,6 +13,7 @@ from copy import deepcopy
 from typing import Any
 
 from .const import DOMAIN
+from .intents import validate_graph
 
 RESOURCE_DEFAULTS = {
     "retry_interval": 300.0,
@@ -155,6 +156,7 @@ def validate_resource(
             "restriction_entity",
             "fault_entity",
             "default_target",
+            "manual_control",
             *RESOURCE_DEFAULTS,
         },
     )
@@ -162,6 +164,8 @@ def validate_resource(
     if data.get("kind") not in KINDS:
         _fail("kind must be cover, switch, fan, or relay_fan")
     kind = data["kind"]
+    if "manual_control" in data and type(data["manual_control"]) is not bool:
+        _fail("manual_control must be true or false")
     for field, default in RESOURCE_DEFAULTS.items():
         data[field] = _number(
             data.get(field, default),
@@ -229,7 +233,11 @@ def validate_resource(
 
 
 def validate_policy(
-    value: Any, resources: Mapping[str, Mapping[str, Any]], hass: Any = None
+    value: Any,
+    resources: Mapping[str, Mapping[str, Any]],
+    hass: Any = None,
+    *,
+    intents: Mapping[str, Mapping[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Validate a policy and its native state or occurrence target."""
     data = _object(
@@ -246,6 +254,7 @@ def validate_policy(
             "target_entity",
             "target_attribute",
             "target_field",
+            "intent_id",
         },
     )
     data["name"] = _text(data.get("name"), "name")
@@ -268,7 +277,20 @@ def validate_policy(
         data["eligibility_state"] = _text(data.get("eligibility_state", "on"), "eligibility_state")
     elif "eligibility_state" in data:
         _fail("eligibility_state requires eligibility_entity")
-    if "target_entity" in data:
+    if "intent_id" in data:
+        if (
+            data["kind"] != "state"
+            or resource["kind"] != "switch"
+            or any(
+                key in data
+                for key in ("target", "target_entity", "target_attribute", "target_field")
+            )
+        ):
+            _fail("A desired control supplies the complete target of a state-backed switch policy")
+        data["intent_id"] = _text(data["intent_id"], "intent_id")
+        if data["intent_id"] not in (intents or {}):
+            _fail("intent_id must reference a configured desired control")
+    elif "target_entity" in data:
         data["target_entity"] = _entity(data["target_entity"], "target_entity", hass=hass)
         field = data["target_field"] = _text(data.get("target_field", "position"), "target_field")
         probe = {"on": True, "position": 0, "percentage": 0, "direction": "forward"}
@@ -279,6 +301,21 @@ def validate_policy(
             data["target_attribute"] = _text(data["target_attribute"], "target_attribute")
     elif "target" not in data or "target_attribute" in data or "target_field" in data:
         _fail("provide target or target_entity; target attributes require target_entity")
+    return data
+
+
+def validate_intent(value: Any) -> dict[str, Any]:
+    """A logical desired switch with explicit initial state and optional ON edges."""
+    data = _object(value, "desired control", {"name", "initial_value", "on_targets"})
+    data["name"] = _text(data.get("name"), "name")
+    if type(data.get("initial_value")) is not bool:
+        _fail("initial_value must explicitly be true or false")
+    targets = data.get("on_targets", [])
+    if not isinstance(targets, list):
+        _fail("on_targets must be a list of desired control IDs")
+    data["on_targets"] = [_text(key, "on target") for key in targets]
+    if len(set(data["on_targets"])) != len(data["on_targets"]):
+        _fail("on_targets must not contain duplicates")
     return data
 
 
@@ -366,19 +403,26 @@ def validate_configuration(
         "resources": {},
         "policies": {},
         "requirements": {},
+        "intents": {},
     }
     for entry in entries:
-        if entry.subentry_type not in ("resource", "policy", "requirement"):
+        if entry.subentry_type not in ("resource", "policy", "requirement", "intent"):
             _fail("unsupported subentry type")
         if entry.subentry_type == "resource":
             result["resources"][entry.subentry_id] = validate_resource(
                 entry.data, hass, resource_id=entry.subentry_id, resources=result["resources"]
             )
+        elif entry.subentry_type == "intent":
+            result["intents"][entry.subentry_id] = validate_intent(entry.data)
+    try:
+        validate_graph(result["intents"])
+    except ValueError as err:
+        _fail(str(err))
     claimed: set[str] = set()
     for entry in entries:
         if entry.subentry_type == "policy":
             result["policies"][entry.subentry_id] = validate_policy(
-                entry.data, result["resources"], hass
+                entry.data, result["resources"], hass, intents=result["intents"]
             )
         elif entry.subentry_type == "requirement":
             requirement = validate_requirement(entry.data, result["resources"], hass)

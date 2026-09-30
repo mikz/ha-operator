@@ -6,6 +6,7 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryError
 from homeassistant.helpers import config_validation as cv
+from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers import issue_registry as ir
 
 from .configuration import ConfigurationError
@@ -44,6 +45,35 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         ) from err
     ir.async_delete_issue(hass, DOMAIN, f"configuration_{entry.entry_id}")
     entry.runtime_data = runtime
+    # Preserve IDs/customizations for resources converted to source followers,
+    # but remove their formerly writable controls from the active HA surface.
+    registry = er.async_get(hass)
+    for identifier, resource in runtime.resources.items():
+        domain = "fan" if resource["kind"] == "relay_fan" else resource["kind"]
+        for platform, suffix in (
+            (domain, "managed"),
+            ("binary_sensor", "manual"),
+            ("sensor", "expiry"),
+            ("button", "release"),
+        ):
+            entity_id = registry.async_get_entity_id(platform, DOMAIN, f"{identifier}_{suffix}")
+            if entity_id is None:
+                continue
+            registered = registry.async_get(entity_id)
+            if not runtime.manual_control(identifier) and registered.disabled_by is None:
+                registry.async_update_entity(
+                    entity_id, disabled_by=er.RegistryEntryDisabler.INTEGRATION
+                )
+            elif (
+                runtime.manual_control(identifier)
+                and registered.disabled_by is er.RegistryEntryDisabler.INTEGRATION
+            ):
+                registry.async_update_entity(entity_id, disabled_by=None)
+            if not runtime.manual_control(identifier):
+                # HA retains an unavailable placeholder when unloading an entity;
+                # disabling a registry entry does not clear that restored state.
+                if (state := hass.states.get(entity_id)) and state.attributes.get("restored"):
+                    hass.states.async_remove(entity_id)
     try:
         await runtime.async_start()
         if runtime.fault is None:

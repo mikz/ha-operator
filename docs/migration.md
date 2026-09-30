@@ -8,6 +8,10 @@ until a deployment is explicitly authorized.
 The [shadow deployment guide](shadow-deployment.md) describes a private inventory,
 passive observation, isolated replay, and later live canary. Installing an observer does not transfer actuator ownership.
 
+For boolean mode synchronization, use the [desired-control migration](desired-controls.md#migrate-existing-controls).
+It preserves independent mode values and public controls while retiring the old
+mirrors and coupling automation. Existing scheduling automations continue to run.
+
 ## Inventory the existing control paths
 
 1. Record the deployed Home Assistant version and verify its integration

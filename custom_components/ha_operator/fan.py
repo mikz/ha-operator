@@ -13,7 +13,7 @@ from .entity import ResourceEntity
 async def async_setup_entry(hass: Any, entry: Any, async_add_entities: Any) -> None:
     runtime = entry.runtime_data
     for identifier, data in runtime.resources.items():
-        if data["kind"] in {"fan", "relay_fan"}:
+        if data["kind"] in {"fan", "relay_fan"} and runtime.manual_control(identifier):
             async_add_entities([OperatorFan(runtime, identifier)], config_subentry_id=identifier)
 
 

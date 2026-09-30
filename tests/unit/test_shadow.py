@@ -402,6 +402,59 @@ def test_trace_disk_export_through_is_a_stable_page_boundary(tmp_path):
     assert next_page["more"] is False
 
 
+def test_trace_batch_flushes_durable_chunks_and_preserves_order(tmp_path, monkeypatch):
+    import os
+    import stat
+
+    disk = TraceDisk(tmp_path / "trace", segment_bytes=1800, segments=32)
+    disk.load()
+    original = os.fsync
+    flushed = []
+
+    def fsync(fd):
+        flushed.append("directory" if stat.S_ISDIR(os.fstat(fd).st_mode) else "file")
+        return original(fd)
+
+    monkeypatch.setattr(shadow.os, "fsync", fsync)
+    records = [row(n, data={"state": "on", "padding": "x" * 90}) for n in range(1, 65)]
+    result = disk.append(records)
+    assert result["durable"] == 64 and result["oversized"] == 0
+    assert flushed[-1] == "directory"
+    assert flushed.count("file") == result["rotations"] + 1
+    assert flushed.count("file") < len(records)
+    assert disk.export(None, 100)["records"] == records
+
+
+@pytest.mark.parametrize("fail_directory", [False, True])
+async def test_failed_batch_flush_never_advances_durable_ack(
+    trace_factory, intent, monkeypatch, fail_directory
+):
+    import os
+    import stat
+
+    trace = trace_factory()
+    await trace.async_start(intent, True)
+    await trace.async_export()
+    before = trace.durable_sequence
+    if fail_directory:
+        # Force this batch to create a new segment and require a directory flush.
+        trace.disk.segment_bytes = trace.disk._file(0).stat().st_size + 1
+    original = os.fsync
+
+    def fsync(fd):
+        if stat.S_ISDIR(os.fstat(fd).st_mode) == fail_directory:
+            raise OSError("injected batch flush failure")
+        return original(fd)
+
+    monkeypatch.setattr(shadow.os, "fsync", fsync)
+    trace.record("input", {"state": "on"})
+    trace.record("input", {"state": "off"})
+    await trace.queue.join()
+    assert trace.durable_sequence == before
+    assert trace.write_errors and trace.dropped >= 2
+    assert not trace.health()["complete"]
+
+
 async def test_disabled_trace_has_no_tasks_or_disk_io(trace_factory, intent, monkeypatch):
     trace = trace_factory(enabled=False)
     monkeypatch.setattr(trace.disk, "load", Mock(side_effect=AssertionError("disabled disk load")))
@@ -878,8 +931,7 @@ def test_export_byte_budget_keeps_large_then_small_records_in_contiguous_pages(
     # The first page can fit 1+3, but not 1+2. Skipping 2 would make its
     # sequence unreachable once the caller resumes after the returned cursor.
     budget = sum(
-        len((json.dumps(record, separators=(",", ":")) + "\n").encode())
-        for record in records[1:]
+        len((json.dumps(record, separators=(",", ":")) + "\n").encode()) for record in records[1:]
     )
     monkeypatch.setattr(shadow, "EXPORT_BYTES", budget)
     disk = TraceDisk(tmp_path / "trace")

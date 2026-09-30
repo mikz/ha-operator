@@ -15,6 +15,7 @@ async def async_setup_entry(hass: Any, entry: Any, async_add_entities: Any) -> N
             [
                 OperatorButton(entry.runtime_data, identifier, action)
                 for action in ("release", "reconcile")
+                if action == "reconcile" or entry.runtime_data.manual_control(identifier)
             ],
             config_subentry_id=identifier,
         )

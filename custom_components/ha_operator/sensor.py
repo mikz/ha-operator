@@ -27,7 +27,11 @@ async def async_setup_entry(hass: Any, entry: Any, async_add_entities: Any) -> N
     runtime = entry.runtime_data
     for identifier in runtime.resources:
         async_add_entities(
-            [ResourceSensor(runtime, identifier, key) for key in RESOURCE_SENSORS],
+            [
+                ResourceSensor(runtime, identifier, key)
+                for key in RESOURCE_SENSORS
+                if key != "expiry" or runtime.manual_control(identifier)
+            ],
             config_subentry_id=identifier,
         )
     for identifier in runtime.requirements:
@@ -104,7 +108,7 @@ class ResourceSensor(OperatorEntity, SensorEntity):
             selection = self.runtime.selections.get(self.identifier)
             return {
                 "target": decision.target.to_dict() if decision and decision.target else None,
-                **(selection.attributes() if selection else {}),
+                **(self.runtime.selection_attributes(self.identifier) if selection else {}),
                 **self.linked_entities,
             }
         if self.key == "observed":

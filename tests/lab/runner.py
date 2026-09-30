@@ -277,7 +277,7 @@ class Lab:
             await self.page.goto(self.ha.base + "/", wait_until="domcontentloaded")
             await self.page.get_by_role("button", name="Create my smart home").click()
             password = secrets.token_urlsafe(24)
-            if os.environ["LAB_SCENARIO"] == "observability":
+            if os.environ["LAB_SCENARIO"] in {"observability", "sleep"}:
                 # Host-owned 0700 control directory; never part of published evidence.
                 (CONTROL / "preview-login.json").write_text(
                     json.dumps(
@@ -572,6 +572,7 @@ class Lab:
                 "version",
                 "faulted",
                 "resources",
+                "intents",
                 "policies",
                 "requirements",
                 "history",
@@ -595,8 +596,13 @@ class Lab:
                 "session",
             }
             assert len(data["history"]) <= 100
-            for collection in ("resources", "policies", "requirements"):
+            for collection in ("resources", "policies", "requirements", "intents"):
                 assert all(re.fullmatch(r"[0-9a-f]{12}", key) for key in data[collection])
+            assert all(
+                set(value) == {"desired"}
+                and (type(value["desired"]) is bool or value["desired"] is None)
+                for value in data["intents"].values()
+            )
             resource_fields = {
                 "kind",
                 "mode",
@@ -734,6 +740,12 @@ async def main():
             lab = Lab(session, page)
             try:
                 await lab.bootstrap()
+                if os.environ["LAB_SCENARIO"] == "sleep":
+                    from .scenarios_sleep import run_sleep
+
+                    await run_sleep(lab)
+                    await lab.diagnostics()
+                    return
                 if os.environ["LAB_SCENARIO"] == "observability":
                     from .scenarios_observability import run_observability
 

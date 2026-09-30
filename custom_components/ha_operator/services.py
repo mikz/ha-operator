@@ -87,6 +87,9 @@ def async_register_services(hass: HomeAssistant) -> None:
 
     async def handle(call: ServiceCall):
         runtime = runtime_for(call)
+        if call.service == "seed_intents":
+            await runtime.async_seed_intents(call.data["values"])
+            return None
         if call.service == "export_trace":
             return await runtime.async_export_trace(
                 after=call.data.get("after"), limit=call.data["limit"]
@@ -111,6 +114,18 @@ def async_register_services(hass: HomeAssistant) -> None:
         await getattr(runtime, f"async_{call.service}")(key)
         return None
 
+    service.async_register_admin_service(
+        hass,
+        DOMAIN,
+        "seed_intents",
+        handle,
+        schema=vol.Schema(
+            {
+                vol.Optional("config_entry_id"): cv.string,
+                vol.Required("values"): dict,
+            }
+        ),
+    )
     service.async_register_admin_service(
         hass,
         DOMAIN,

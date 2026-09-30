@@ -45,7 +45,11 @@
             "command_interval": "Minimum command interval (seconds)",
             "movement_timeout": "Movement timeout (seconds)",
             "tolerance": "Position tolerance (percentage points)",
-            "manual_duration": "Default manual duration (seconds)"
+            "manual_duration": "Default manual duration (seconds)",
+            "manual_control": "Allow manual control"
+          },
+          "data_description": {
+            "manual_control": "Turn off for a follower controlled by a source. Removes managed command entities, manual status, expiry, and resume controls; manual request actions are rejected."
           }
         },
         "reconfigure": {
@@ -65,7 +69,11 @@
             "command_interval": "Minimum command interval (seconds)",
             "movement_timeout": "Movement timeout (seconds)",
             "tolerance": "Position tolerance (percentage points)",
-            "manual_duration": "Default manual duration (seconds)"
+            "manual_duration": "Default manual duration (seconds)",
+            "manual_control": "Allow manual control"
+          },
+          "data_description": {
+            "manual_control": "Turn off for a follower controlled by a source. Removes managed command entities, manual status, expiry, and resume controls; manual request actions are rejected."
           }
         }
       },
@@ -102,7 +110,8 @@
             "eligibility_state": "Eligible state",
             "target_entity": "Target source entity",
             "target_attribute": "Target attribute",
-            "target_field": "Target field"
+            "target_field": "Target field",
+            "intent_id": "Operator desired control"
           }
         },
         "reconfigure": {
@@ -118,7 +127,8 @@
             "eligibility_state": "Eligible state",
             "target_entity": "Target source entity",
             "target_attribute": "Target attribute",
-            "target_field": "Target field"
+            "target_field": "Target field",
+            "intent_id": "Operator desired control"
           }
         }
       },
@@ -174,6 +184,44 @@
       },
       "abort": {
         "no_resources": "Add a resource before creating a policy.",
+        "reconfigure_successful": "Configuration updated."
+      }
+    },
+    "intent": {
+      "entry_type": "Desired control",
+      "initiate_flow": {
+        "user": "Add desired control"
+      },
+      "step": {
+        "user": {
+          "title": "Add desired control",
+          "description": "A durable on/off source with no manual lease. Turning it on from off also turns on its configured dependents. Turning it off leaves them unchanged. Initial value applies only when first created; reload does not replay an on edge.",
+          "data": {
+            "name": "Name",
+            "initial_value": "Initial desired value",
+            "on_targets": "Also turn on these desired controls"
+          }
+        },
+        "reconfigure": {
+          "title": "Edit desired control",
+          "description": "A durable on/off source with no manual lease. Turning it on from off also turns on its configured dependents. Turning it off leaves them unchanged. Initial value applies only when first created; reload does not replay an on edge.",
+          "data": {
+            "name": "Name",
+            "initial_value": "Initial desired value",
+            "on_targets": "Also turn on these desired controls"
+          }
+        }
+      },
+      "error": {
+        "invalid_configuration": "Invalid configuration: {detail}",
+        "managed_entity": "Choose a physical source entity instead of an HA Operator entity. {detail}",
+        "entity_not_found": "The source entity does not exist. {detail}",
+        "unsupported_capability": "The source cannot provide the required control or feedback. {detail}",
+        "duplicate_output": "Another resource already owns this output. {detail}",
+        "resource_not_found": "Select an existing resource. {detail}",
+        "overlapping_requirement": "Each controlled resource can belong to only one airflow requirement. {detail}"
+      },
+      "abort": {
         "reconfigure_successful": "Configuration updated."
       }
     }
@@ -348,6 +396,19 @@
         "config_entry_id": {
           "name": "Configuration entry",
           "description": "Optional entry selector. Defaults to the single HA Operator integration."
+        }
+      }
+    },
+    "seed_intents": {
+      "name": "Import desired states",
+      "description": "Import a migration snapshot without triggering on attachments. Every affected follower must be in observe mode.",
+      "fields": {
+        "values": {
+          "name": "Desired control values",
+          "description": "An object mapping desired control subentry IDs to boolean values."
+        },
+        "config_entry_id": {
+          "name": "Integration entry ID"
         }
       }
     }

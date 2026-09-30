@@ -184,6 +184,8 @@ jobs:
         run: .venv/bin/python scripts/lab.py test --ha-version "${{ matrix.ha }}" --scenario windows --timeout 900
       - name: Verify native history and selection explanations
         run: .venv/bin/python scripts/lab.py test --ha-version "${{ matrix.ha }}" --scenario observability --timeout 600
+      - name: Verify desired controls and source-only migration
+        run: .venv/bin/python scripts/lab.py test --ha-version "${{ matrix.ha }}" --scenario sleep --timeout 900
       - name: Observe retries at production timing
         if: matrix.ha == '2026.9.3'
         run: .venv/bin/python scripts/lab.py test --ha-version "${{ matrix.ha }}" --scenario soak --timeout 1500

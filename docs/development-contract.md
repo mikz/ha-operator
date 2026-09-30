@@ -6,7 +6,7 @@ __init__.py, services.py and the common project/test configuration.
 
 ## Configuration
 
-One singleton config entry, native subentries of type `resource`, `policy`, `requirement`.
+One singleton config entry, native subentries of type `resource`, `policy`, `requirement`, `intent`.
 IDs are the HA subentry_id. Resource data: `name`, `kind` (cover/switch/fan/relay_fan),
 `entity_id` (native adapters), `retry_interval` (300), `command_interval` (30),
 `movement_timeout` (120), `tolerance` (2), `manual_duration` (1800), optional
@@ -16,9 +16,21 @@ name to {outputs: {entity_id: bool}, percentage?: number, direction?: str},
 `reversal_dead_time` required, `default_target` containing an on profile target. Every profile
 specifies every output, including off; an all-off profile is required.
 
+Resource `manual_control` defaults to true. False removes manual command and lease
+controls and rejects manual requests, release, and STOP. Existing controls are
+integration-disabled without erasing registry identity or user-disabled settings;
+old leases are pruned before the source follower becomes active.
+
+Intent data: `name`, required boolean `initial_value`, optional `on_targets` list
+of other intent IDs. Values are held until explicit command. An OFF-to-ON command
+updates attached controls in one durable transaction. Repeated ON and source OFF
+do not change dependents. Graph references must exist and remain acyclic.
+
 Policy data: `name`, `resource_id`, `kind` (state/occurrence), `priority` (0),
 `target` (Target dictionary), optional `eligibility_entity` and `eligibility_state`
 (on), optional `target_entity`/`target_attribute`/`target_field` (position default).
+Switch state policies can instead use `intent_id`, an internal stable reference
+to the committed desired boolean; it is exclusive with other target fields.
 Native attributes are subscribed as well as state changes. Runtime enabled state is
 persisted; disabling tombstones all pending occurrences, not future occurrences.
 
@@ -66,7 +78,9 @@ async_load(expected_existing: bool=False); async_update(mutator: Callable[[dict]
 ->dict (serialize updates from current committed state, deep copy before mutator);
 async_close() waits outstanding writer; explicit recovery only through reload.
 Empty payload keys: revision=0, manuals={}, occurrences={}, modes={}, policy_enabled={},
-requests={} (idempotency receipts). Envelope includes version. Mutator exceptions must
+requests={} (idempotency receipts), intents={} (held booleans). The version 2
+envelope reads version 1 through an explicit migration adding an empty intents map.
+Mutator exceptions must
 not fault storage. Writer failure inhibits; success persists before publication.
 
 ## Entities

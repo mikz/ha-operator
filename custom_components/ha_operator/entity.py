@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
 from typing import Any
 
 from homeassistant.core import callback
@@ -23,10 +24,12 @@ class OperatorEntity(Entity):
         self.identifier = identifier
         self._attr_unique_id = f"{identifier}_{key}"
         self._attr_name = name
+        self._last_publication: tuple | None = None
         data = (
             runtime.resources.get(identifier)
             or runtime.policies.get(identifier)
             or runtime.requirements.get(identifier)
+            or runtime.intents.get(identifier)
             or {}
         )
         self._attr_device_info = DeviceInfo(
@@ -39,7 +42,9 @@ class OperatorEntity(Entity):
 
     async def async_added_to_hass(self) -> None:
         await super().async_added_to_hass()
-        self.async_on_remove(self.runtime.subscribe(self.async_write_ha_state))
+        # HA publishes the initial state when adding the entity to its platform.
+        self._last_publication = deepcopy(self._publication_state())
+        self.async_on_remove(self.runtime.subscribe(self._runtime_updated))
         self.async_on_remove(
             self.hass.bus.async_listen(er.EVENT_ENTITY_REGISTRY_UPDATED, self._registry_updated)
         )
@@ -47,7 +52,34 @@ class OperatorEntity(Entity):
     @callback
     def _registry_updated(self, event) -> None:
         """Resolve links again after a rename without waking actuator workers."""
-        self.async_schedule_update_ha_state()
+        self._runtime_updated()
+
+    def _publication_state(self) -> tuple:
+        """Compare public entity values; HA still owns their rendering/validation."""
+        available = self.available
+        return (
+            available,
+            self.state if available else None,
+            self.state_attributes if available else None,
+            self.extra_state_attributes if available else None,
+            self.capability_attributes,
+            self.supported_features,
+            self.assumed_state,
+            self.unit_of_measurement,
+            self.device_class,
+            self.icon,
+            self.entity_picture,
+            self.name,
+        )
+
+    @callback
+    def _runtime_updated(self) -> None:
+        publication = self._publication_state()
+        if publication != self._last_publication:
+            self.async_write_ha_state()
+            # Retain a detached snapshot only after a change. Copying every
+            # unchanged entity on every update dominated the sampled burst path.
+            self._last_publication = deepcopy(publication)
 
     @property
     def linked_entities(self) -> dict[str, str]:

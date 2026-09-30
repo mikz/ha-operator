@@ -38,4 +38,5 @@ homekit:
     advertise_ip: [LAB_HA_ADDRESS]
     filter:
       include_domains: [cover, fan]
+      include_entities: [switch.lab_central_sleep_public, switch.lab_room_sleep_public]
       exclude_entity_globs: ["cover.sim_*", "fan.sim_*"]

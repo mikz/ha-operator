@@ -422,6 +422,7 @@ def main():
             "shadow",
             "replay",
             "observability",
+            "sleep",
         ),
         default="all",
     )

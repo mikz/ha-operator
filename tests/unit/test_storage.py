@@ -50,6 +50,7 @@ async def test_first_load_and_full_state_round_trip(store, snapshot_path):
         "modes": {},
         "policy_enabled": {},
         "requests": {},
+        "intents": {},
     }
     assert not snapshot_path.exists()
 
@@ -88,6 +89,25 @@ async def test_missing_initialized_snapshot_inhibits(store, snapshot_path):
     with pytest.raises(IntentStoreError, match="load failed"):
         await store.async_load()
     assert not snapshot_path.exists()
+
+
+async def test_v1_snapshot_upgrades_without_losing_existing_intent(store, snapshot_path):
+    await store.async_load()
+    await store.async_update(lambda state: state["modes"].update(roof="live"))
+    envelope = json.loads(snapshot_path.read_text())
+    envelope["version"] = 1
+    envelope["data"].pop("intents")
+    snapshot_path.write_text(json.dumps(envelope))
+    loaded = IntentStore(ExecutorHost(), snapshot_path)
+    await loaded.async_load(expected_existing=True)
+    assert loaded.state == {**envelope["data"], "intents": {}}
+    await loaded.async_update(lambda state: state["intents"].update(central=True, room=False))
+    current = json.loads(snapshot_path.read_text())
+    assert current["version"] == 2
+    assert current["data"]["modes"] == {"roof": "live"}
+    assert current["data"]["intents"] == {"central": True, "room": False}
+    with pytest.raises(InvalidSnapshot, match="boolean"):
+        await loaded.async_update(lambda state: state["intents"].update(room="off"))
 
 
 @pytest.mark.parametrize(

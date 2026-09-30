@@ -28,8 +28,22 @@ LAB_CASES = {
     ("2026.9.3", "soak"),
     ("2026.9.3", "observability"),
     ("2026.9.4", "observability"),
+    ("2026.9.3", "sleep"),
+    ("2026.9.4", "sleep"),
 }
 INITIAL_SCENARIOS = {"LAB-ONBOARDING", "LAB-NATIVE-CONFIG-FLOW", "LAB-RESOURCE-CONFIGURATION"}
+SLEEP_SCENARIOS = INITIAL_SCENARIOS | {
+    "SLEEP-EXISTING-GROUPS-HAP",
+    "SLEEP-NATIVE-SETUP-OBSERVE",
+    "SLEEP-MIGRATION-SEED-LIVE",
+    "SLEEP-SOURCE-ONLY-GROUP-ATTACHMENT",
+    "SLEEP-RESTART-DETACHED-PAIR",
+    "SLEEP-HAP-PUBLIC-IDENTITY",
+    "SLEEP-HAP-DIRECT-REPLACEMENT",
+    "SLEEP-NATIVE-DASHBOARD",
+    "LAB-DIAGNOSTICS",
+}
+SLEEP_FILES = {"sleep-evidence.json", "sleep-controls.png", "hap-transcript.jsonl"}
 OBSERVABILITY_SCENARIOS = INITIAL_SCENARIOS | {
     "OBS-NATIVE-ENTITIES",
     "OBS-REASON-CHANGE-NO-DISPATCH",
@@ -95,6 +109,7 @@ ALL_SCENARIOS = (
 LAB_FILES = (
     SHADOW_FILES
     | OBSERVABILITY_FILES
+    | SLEEP_FILES
     | {
         "summary.json",
         "sanitized.json",
@@ -389,6 +404,10 @@ def validate_lab(directory: Path, manifest: dict) -> tuple[str, str]:
     elif case[1] == "observability":
         required = OBSERVABILITY_SCENARIOS
         for name in OBSERVABILITY_FILES:
+            require((directory / name).is_file(), f"Missing {name}")
+    elif case[1] == "sleep":
+        required = SLEEP_SCENARIOS
+        for name in SLEEP_FILES:
             require((directory / name).is_file(), f"Missing {name}")
     else:
         required.add("LAB-REALISTIC-SOAK")
