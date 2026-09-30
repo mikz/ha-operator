@@ -212,6 +212,53 @@ async def test_observe_episode_cannot_activate_after_live(hass, runtime_factory,
     assert commands == []
 
 
+async def test_pending_cancel_is_checked_inside_inflight_adapter(
+    hass, runtime_factory, freezer, monkeypatch
+):
+    """A captured cancellation fences dispatch before its strict save finishes."""
+    factory, commands = runtime_factory
+    runtime = await setup_timer(hass, factory)
+    applying, apply_finished, release_apply = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    entered, release_save = threading.Event(), threading.Event()
+    adapter = runtime.adapter("roof")
+    real_apply = adapter.async_apply
+    real_write = storage._write_snapshot
+
+    async def paused_apply(target, current):
+        applying.set()
+        await release_apply.wait()
+        try:
+            return await real_apply(target, current)
+        finally:
+            apply_finished.set()
+
+    def pending_save(path, state):
+        if state["policy_inputs"]["vent"]["state"]["phase"] == "suppressed":
+            entered.set()
+            assert release_save.wait(5)
+        real_write(path, state)
+
+    monkeypatch.setattr(adapter, "async_apply", paused_apply)
+    monkeypatch.setattr(storage, "_write_snapshot", pending_save)
+    try:
+        await timer_service(hass, "start")
+        await hass.async_block_till_done()
+        await advance(hass, freezer, 60)
+        await asyncio.wait_for(applying.wait(), 2)
+        assert input_state(runtime)["phase"] == "accepted"
+        await timer_service(hass, "cancel")
+        assert await asyncio.to_thread(entered.wait, 2)
+        release_apply.set()
+        await asyncio.wait_for(apply_finished.wait(), 2)
+        assert commands == []
+    finally:
+        release_apply.set()
+        release_save.set()
+    await hass.async_block_till_done()
+    assert input_state(runtime)["phase"] == "suppressed"
+    assert commands == []
+
+
 async def test_failed_numeric_save_inhibits_commands(hass, runtime_factory, monkeypatch):
     factory, commands = runtime_factory
     reported(hass)

@@ -163,3 +163,80 @@ All 7,040 rows, including warm-up, were read back in order without gaps in each
 run. CPU fell 89.9% and elapsed time fell 91.3% in this writer-only comparison.
 This does not increase the queue or retention limit, guarantee gap-free capture
 at arbitrary rates, or measure flash storage on a production HA host.
+
+## Native policy comparison
+
+Use `--suite native-policies` to compare the five writers from
+`tests/lab/window_recipe.py` with two native policy inputs and three return
+monitors. The baseline runs the unchanged timer, temperature, and three return
+automation factories with eight real HA helpers. Both archives use the same
+three live cover resources, baseline policies, synthetic temperature sensor,
+public timer, targets, priorities, and raw feedback. Cover service calls do
+not change raw feedback or establish physical confirmation.
+
+The runner copies the probe and recipe into each disposable subprocess and
+records both hashes with the ZIP hashes. Use the frozen release archive for
+acceptance measurements. A development archive only verifies probe mechanics.
+Keep the host free of other tests, builds, and lab workloads during timing.
+
+For example, run the three report workloads with 100 batches each:
+
+```sh
+.venv/bin/python scripts/profile_event_load.py \
+  --suite native-policies \
+  --baseline baseline/ha_operator.zip \
+  --candidate dist/ha_operator.zip \
+  --output artifacts/native-report-profiles \
+  --workloads idle unchanged changing --batches 100 --repeats 3
+```
+
+Run `timer` and `reload` separately with `--batches 20`, each with a distinct
+output directory. All workloads include ten warm-up batches and run with
+integration tracing disabled and enabled. The default measurements use three
+alternating unprofiled timing repetitions, one cProfile run, and one tracemalloc
+run per archive and trace setting. `--measurements` and `--warmup-batches` allow
+bounded mechanics checks; those checks do not establish performance results.
+
+The workloads exercise these boundaries:
+
+| Workload | One batch |
+| --- | --- |
+| `idle` | Advance five seconds with a warm sensor, inactive timer, and confirmed 7% positions. The baseline's five writers wake; no qualification or warning deadline is pending. |
+| `unchanged` | Report the unchanged temperature, three raw positions, and timer state through native HA state plumbing. |
+| `changing` | Report 15, 14, 17, then 15 °C in one loop turn, alternate all three raw positions between 7% and 100%, and advance five seconds. |
+| `timer` | Start, restart, pause, resume, cancel, qualify two fresh episodes, complete the timer naturally, and cancel a final fresh start. |
+| `reload` | Reload the actual config entry with an inactive timer and no active timer request. Check that old workers stop before the three replacement workers run. |
+
+The fixed simulation starts at `2026-09-30T08:00:00.500000+00:00`. Five-second
+ticks include HA's time-pattern scheduling spread within the first half-second.
+Only simulation time advances. Wall timing uses freezegun's preserved real
+`perf_counter`, and CPU timing uses `process_time`. Each receipt includes its
+virtual start and end. This avoids counting virtual time as elapsed host time.
+Both variants use WARNING-level HA logging. Batch p95 uses the nearest-rank
+percentile.
+
+The source timer lasts 65 seconds so a 60-second qualification can precede a
+genuine natural completion. Both variants retain a 1,800-second request,
+1,800-second temperature qualification, and 300-second return warning. This is
+a synthetic event workload, not a production-duration soak. Idle has no pending
+deadline; changing reports reset or clear return clocks before a warning and
+reset native cold qualification. Timer batches exercise qualification deadlines,
+but cancel requests before their 1,800-second expiry. The package lab validates
+expiry, overdue warnings, restart recovery, and independent physical effects.
+
+Receipts report process CPU, real wall time, median and p95 batch latency,
+traced allocations, state changes and reports by entity group, automation runs,
+helper service calls, actuator commands, recomputations, actual Operator snapshot
+writes, task counts, and worker counts. Final trace drain CPU and wall time remain
+separate from workload timing. Reload timing includes native unload cleanup and
+its trace drain. Inspect trace health before, after, and after final drain before
+making a complete-trace claim.
+
+The native snapshot writer commits transitions durably. The baseline stores
+helper state through HA's debounced helper persistence, whose storage writes
+are outside the Operator write counter. Higher Operator write counts can reflect
+this stronger contract; they do not by themselves establish a regression.
+Legacy queued temperature actions read the final current source state and can
+miss an intermediate warm transition. The input sequence is identical, but
+the old and native qualification semantics are not equivalent for those bursts.
+Report these differences with the measurements.

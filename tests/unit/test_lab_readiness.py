@@ -126,3 +126,62 @@ async def test_native_flow_helpers_do_not_return_before_reload_and_loaded_state(
     reload_index = ha.calls.index("/api/config/config_entries/entry/test/reload")
     assert ha.calls[reload_index + 1] == "config_entries/get"
     assert ha.loaded_checks == 1
+
+
+@pytest.mark.parametrize("source_type", ["qualified_numeric", "timer_episode"])
+@pytest.mark.parametrize("reconfigure", [False, True])
+async def test_native_policy_helper_submits_two_forms_and_keeps_id(source_type, reconfigure):
+    class PolicyHA(HA):
+        def __init__(self):
+            self.requests = []
+            self.loaded = False
+
+        async def request(self, method, path, data=None, **kwargs):
+            self.requests.append((path, data))
+            if path.endswith("/reload"):
+                self.loaded = True
+                return {}
+            if path == "/api/config/config_entries/subentries/flow":
+                return {"flow_id": "flow"}
+            if data.get("input_type"):
+                assert "input" not in data
+                return {"type": "form", "step_id": source_type, "errors": {}}
+            assert "type" not in data and "comparison" not in data
+            expected = "sensor.raw" if source_type == "qualified_numeric" else "timer.public"
+            assert data["entity_id"] == expected
+            return (
+                {"type": "abort", "reason": "reconfigure_successful"}
+                if reconfigure
+                else {"type": "create_entry"}
+            )
+
+        async def ws(self, command, **kwargs):
+            assert self.loaded
+            if command == "config_entries/get":
+                return [{"entry_id": "entry", "state": "loaded"}]
+            return [{"subentry_id": "stable-policy", "title": "Policy"}]
+
+    ha = PolicyHA()
+    data = {
+        "name": "Policy",
+        "input": {
+            "type": source_type,
+            "entity_id": "sensor.raw" if source_type == "qualified_numeric" else "timer.public",
+            "qualification_seconds": 2,
+            **(
+                {"comparison": "below", "threshold": 16, "unit": "°C"}
+                if source_type == "qualified_numeric"
+                else {"request_seconds": 12}
+            ),
+        },
+    }
+    if reconfigure:
+        assert (
+            await ha.reconfigure_subentry("entry", "stable-policy", "policy", data)
+            == "stable-policy"
+        )
+        assert ha.requests[0][1]["subentry_id"] == "stable-policy"
+    else:
+        assert await ha.add_subentry("entry", "policy", data) == "stable-policy"
+    assert len([path for path, _ in ha.requests if path.endswith("/flow/flow")]) == 2
+    assert data["input"]["type"] == source_type

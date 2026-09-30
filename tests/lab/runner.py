@@ -116,9 +116,7 @@ class HA:
                 "show_advanced_options": True,
             },
         )
-        flow = await self.request(
-            "POST", "/api/config/config_entries/subentries/flow/" + flow["flow_id"], data
-        )
+        flow = await self._submit_subentry(flow, kind, data)
         assert flow["type"] == "create_entry", flow
         await self.reload_entry(entry)
         subentries = await self.ws("config_entries/subentries/list", entry_id=entry)
@@ -139,6 +137,40 @@ class HA:
         ]
         assert found, {"flow": flow, "subentries": subentries}
         return found[0]["config_subentry_id"]
+
+    async def _submit_subentry(self, flow, kind, data):
+        common = dict(data)
+        source = common.pop("input", None) if kind == "policy" else None
+        if source is not None:
+            common["input_type"] = source["type"]
+        path = "/api/config/config_entries/subentries/flow/" + flow["flow_id"]
+        result = await self.request("POST", path, common)
+        if source is not None:
+            assert result["type"] == "form" and result["step_id"] == source["type"], result
+            assert not result.get("errors"), result
+            result = await self.request(
+                "POST",
+                path,
+                {key: value for key, value in source.items() if key not in {"type", "comparison"}},
+            )
+        return result
+
+    async def reconfigure_subentry(self, entry, identifier, kind, data):
+        """Use the native reconfigure flow and retain its original subentry ID."""
+        flow = await self.request(
+            "POST",
+            "/api/config/config_entries/subentries/flow",
+            {"handler": [entry, kind], "subentry_id": identifier},
+        )
+        result = await self._submit_subentry(flow, kind, data)
+        assert result["type"] == "abort" and result["reason"] == "reconfigure_successful", result
+        await self.reload_entry(entry)
+        subentries = await self.ws("config_entries/subentries/list", entry_id=entry)
+        assert any(
+            item["subentry_id"] == identifier and item["title"] == data["name"]
+            for item in subentries
+        ), subentries
+        return identifier
 
     async def managed(self, subentry, domain):
         async def registered():

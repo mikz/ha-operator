@@ -30,6 +30,8 @@ LAB_CASES = {
     ("2026.9.4", "observability"),
     ("2026.9.3", "sleep"),
     ("2026.9.4", "sleep"),
+    ("2026.9.3", "windows"),
+    ("2026.9.4", "windows"),
 }
 INITIAL_SCENARIOS = {"LAB-ONBOARDING", "LAB-NATIVE-CONFIG-FLOW", "LAB-RESOURCE-CONFIGURATION"}
 SLEEP_SCENARIOS = INITIAL_SCENARIOS | {
@@ -44,6 +46,55 @@ SLEEP_SCENARIOS = INITIAL_SCENARIOS | {
     "LAB-DIAGNOSTICS",
 }
 SLEEP_FILES = {"sleep-evidence.json", "sleep-controls.png", "hap-transcript.jsonl"}
+WINDOW_SCENARIOS = INITIAL_SCENARIOS | {
+    "WINDOW-CONFIGURATION",
+    "WINDOW-OBSERVE-PREFLIGHT-ZERO",
+    "WINDOW-NATIVE-SCENE-NOOP-AND-EXPLICIT-INTENT",
+    "WINDOW-RAIN-CLEAR-BEFORE-EXPIRY",
+    "WINDOW-RAIN-CLEAR-AFTER-EXPIRY",
+    "WINDOW-INDEPENDENT-EXPIRY-IDEMPOTENCY-SUPERSESSION",
+    "WINDOW-MULTI-PREFLIGHT-AND-GROUP-AVERAGE",
+    "WINDOW-RAW-HELPER-UNKNOWN",
+    "WINDOW-NO-PHYSICAL-STOP",
+    "WINDOW-TIMER-OCCURRENCE-CANCEL-RESTART",
+    "WINDOW-COLD-POLICY-MANUAL-PRECEDENCE",
+    "WINDOW-EXPIRED-OPENING-RESTART",
+    "WINDOW-EXPIRED-OPENING-KILL",
+    "WINDOW-PAUSED-TIMER-RESTORATION",
+    "WINDOW-TIMER-PAUSE-WITHDRAWAL-FAILURE",
+    "WINDOW-SAME-VALUE-HAP-REPLACES-INTENT",
+    "WINDOW-BOUNDED-AUTOMATIC-OCCURRENCE",
+    "WINDOW-OVERDUE-RETURN-AND-RECOVERY",
+    "WINDOW-REGISTRY-OWNER-TRANSFER",
+    "WINDOW-RELOAD-PRESERVES-RELAY-FAN",
+    "WINDOW-NATIVE-CONFIGURATION",
+    "WINDOW-NATIVE-NUMERIC-QUALIFICATION",
+    "WINDOW-NATIVE-NUMERIC-UNKNOWN-RECOVERY",
+    "WINDOW-NATIVE-TIMER-LIFECYCLE",
+    "WINDOW-NATIVE-TIMER-PRECEDENCE",
+    "WINDOW-NATIVE-TIMER-RESTART",
+    "WINDOW-NATIVE-TIMER-KILL",
+    "WINDOW-NATIVE-PENDING-RELOAD",
+    "WINDOW-NATIVE-OBSERVE-ZERO",
+    "WINDOW-NATIVE-DASHBOARD",
+    "WINDOW-NATIVE-RETURN-DEMO",
+    "WINDOW-NATIVE-RETURN-UNKNOWN-VIRTUAL",
+    "LAB-HAP-PAIR",
+    "LAB-HAP-RESTART-DURABLE",
+    "LAB-DIAGNOSTICS",
+}
+WINDOW_FILES = {
+    "window-native-evidence.json",
+    "window-native-dashboard.json",
+    "window-native-opening.png",
+    "window-native-refusal.png",
+    "window-native-baseline.png",
+    "window-native-overdue.png",
+    "window-native-recovered.png",
+    "crash-events.jsonl",
+    "hap-transcript.jsonl",
+    "window-hap-durable-receipt.json",
+}
 OBSERVABILITY_SCENARIOS = INITIAL_SCENARIOS | {
     "OBS-NATIVE-ENTITIES",
     "OBS-REASON-CHANGE-NO-DISPATCH",
@@ -110,6 +161,7 @@ LAB_FILES = (
     SHADOW_FILES
     | OBSERVABILITY_FILES
     | SLEEP_FILES
+    | WINDOW_FILES
     | {
         "summary.json",
         "sanitized.json",
@@ -409,6 +461,62 @@ def validate_lab(directory: Path, manifest: dict) -> tuple[str, str]:
         required = SLEEP_SCENARIOS
         for name in SLEEP_FILES:
             require((directory / name).is_file(), f"Missing {name}")
+    elif case[1] == "windows":
+        required = WINDOW_SCENARIOS
+        for name in WINDOW_FILES:
+            require((directory / name).is_file(), f"Missing {name}")
+        native = read_json(directory / "window-native-evidence.json")
+        require(
+            native.get("schema") == 1
+            and native.get("status") == "passed"
+            and native.get("clock") == "real wall clock, accelerated configured durations",
+            "Native window evidence must identify the accelerated clock and completed run",
+        )
+        labels = {item.get("label") for item in native.get("snapshots", [])}
+        require(
+            {"opening", "refusal", "baseline", "overdue", "recovered"} <= labels,
+            "Native window evidence must retain all five demonstration states",
+        )
+        demo = {
+            item["label"]: item
+            for item in native["snapshots"]
+            if item["label"] in {"opening", "refusal", "baseline", "overdue", "recovered"}
+        }
+        ordered = [
+            demo[label] for label in ("opening", "refusal", "baseline", "overdue", "recovered")
+        ]
+        require(
+            all(isinstance(item.get("at"), (int, float)) for item in ordered)
+            and [item["at"] for item in ordered] == sorted(item["at"] for item in ordered),
+            "Native window evidence must preserve demonstration chronology",
+        )
+        require(
+            [
+                item.get("explain", {}).get("decision", {}).get("target", {}).get("position")
+                for item in ordered
+            ]
+            == [100, 100, 7, 7, 7],
+            "Native window evidence must show opening and effective baseline targets",
+        )
+        require(
+            [
+                item.get("explain", {}).get("observation", {}).get("target", {}).get("position")
+                for item in ordered[1:]
+            ]
+            == [7, 100, 100, 7],
+            "Native window evidence must separate refused targets from raw return feedback",
+        )
+        require(
+            demo["opening"].get("timer", {}).get("expires_at") is not None
+            and demo["opening"]["timer"]["expires_at"]
+            == demo["refusal"].get("timer", {}).get("expires_at")
+            and demo["baseline"].get("return", {}).get("due_at") is not None
+            and demo["baseline"]["return"]["due_at"]
+            == demo["overdue"].get("return", {}).get("due_at")
+            and demo["overdue"].get("return", {}).get("overdue") is True
+            and demo["recovered"].get("return", {}).get("overdue") is False,
+            "Native window evidence must retain expiry and warning deadline until recovery",
+        )
     else:
         required.add("LAB-REALISTIC-SOAK")
         soak = next((item for item in scenarios if item["id"] == "LAB-REALISTIC-SOAK"), {})

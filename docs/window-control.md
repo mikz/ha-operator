@@ -145,3 +145,36 @@ Use the [migration runbook](migration.md) for ownership transfer and rollback.
 Inspect every saved consumer after a registry rename. Keep the group and shared
 presets guarded during a staged transfer, then verify the final HomeKit filter
 and unrelated accessory identities.
+
+### Synthetic native policy demonstration
+
+The `windows` lab keeps the helper compatibility checks, then disables their
+writers and reconfigures the same policy IDs through the native two-step forms.
+Its temperature comes from the simulator's independent `window_temperature`
+sensor, with a `°C` unit. Read-only diagnostics provide episode and return
+deadlines; diagnostic entities stay disabled.
+
+The native checks use a two-second qualification, a 12-second opening request,
+and a six-second return warning. The dashboard demonstration uses an 18-second
+request. Accepted restart checks use a 180-second request so the original expiry
+can survive HA startup. These are accelerated configurations, not observations
+of production timing. The existing ten-minute soak remains a separate release
+gate with production retry intervals.
+
+Open `/window-native/return` in the retained isolated lab. Its native Lovelace
+cards show desired position, raw observed position, reason, effective expiry,
+return overdue, and the public ventilation timer. The runner saves five states:
+opening, refused opening, expired request with the 7% baseline, overdue return,
+and confirmed raw return. It also saves `window-native-evidence.json` with the
+clock settings, ordered explanations, typed deadlines, and simulator journal
+markers. `window-native-dashboard.json` records the native dashboard definition.
+
+The refusal demonstration injects raw positions through simulator controls and
+records that choice in its journal. Commands and physical movement remain
+independently journaled. Unknown raw feedback and a virtual cover at 7% cannot
+clear the return warning. Clearing refusal permits a paced retry, physical
+movement to 7%, and dismissal of the stable notification.
+
+Both supported HA versions must complete the native window cases and save all
+five screenshots. Preparing a lab image or passing helper tests alone does not
+establish native policy acceptance.

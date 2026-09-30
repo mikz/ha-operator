@@ -44,6 +44,7 @@ class Device:
     exclusive_group: str | None = None
     airflow_role: str | None = None
     airflow_requires_any: tuple[str, ...] = ()
+    unit: str | None = None
     observable: dict[str, Any] = field(default_factory=dict)
     pending: deque[tuple[float, dict[str, Any]]] = field(default_factory=deque)
     sampled: dict[str, Any] = field(default_factory=dict)
@@ -62,6 +63,8 @@ class Device:
         if self.kind == "fan":
             result["speed_count"] = self.speed_count
             result["supports_direction"] = True
+        if self.unit is not None:
+            result["unit"] = self.unit
         return result
 
 
@@ -94,6 +97,7 @@ def default_devices() -> list[dict[str, Any]]:
         {"id": "cellar_demand", "kind": "binary_sensor"},
         {"id": "cellar_policy", "kind": "binary_sensor"},
         {"id": "cellar_target", "kind": "sensor", "value": 100},
+        {"id": "window_temperature", "kind": "sensor", "value": 20, "unit": "°C"},
         {"id": "cellar_low_relay", "kind": "switch", "exclusive_group": "cellar_speed"},
         {"id": "cellar_high_relay", "kind": "switch", "exclusive_group": "cellar_speed"},
         {
@@ -179,6 +183,11 @@ class Simulator:
             kind = spec["kind"]
             if kind not in {"cover", "switch", "fan", "binary_sensor", "sensor"}:
                 raise ValueError(f"Unknown device kind: {kind}")
+            unit = spec.get("unit")
+            if unit is not None and (
+                kind != "sensor" or not isinstance(unit, str) or not unit.strip()
+            ):
+                raise ValueError("unit must be nonempty text on a sensor")
             position = self._percentage(spec.get("position", 0))
             percentage = self._percentage(spec.get("percentage", 0))
             physical = {
@@ -222,6 +231,7 @@ class Simulator:
                 exclusive_group=spec.get("exclusive_group"),
                 airflow_role=spec.get("airflow_role"),
                 airflow_requires_any=tuple(dependencies),
+                unit=unit,
             )
             if controls["hidden_rain"] and controls["rain_autoclose"] and position > 0:
                 physical.update(target=0.0, moving=True)

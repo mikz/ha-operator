@@ -1,6 +1,6 @@
 """Exercise explicit safety-guard mutants in a disposable source copy.
 
-This intentionally bounded suite tests four identified failure mechanisms, rather
+This intentionally bounded suite tests identified failure mechanisms, rather
 than reporting a misleading whole-program mutation score. Changed source patterns,
 collection errors, skips, timeouts, and surviving mutants fail the gate.
 """
@@ -77,6 +77,70 @@ MUTANTS = (
             "test_cancellation_serializes_writes_and_publishes_committed_revision",
         ),
     ),
+    Mutant(
+        "native_timer_survives_exact_expiry",
+        "custom_components/ha_operator/policy_inputs.py",
+        'if state.phase in ("qualifying", "accepted"):\n'
+        "        assert state.expires_at is not None\n        if now >= state.expires_at:",
+        'if state.phase in ("qualifying", "accepted"):\n'
+        "        assert state.expires_at is not None\n        if now > state.expires_at:",
+        (
+            "tests/unit/test_policy_inputs.py::"
+            "test_accepted_request_expires_exactly_once_and_cannot_replay",
+            "tests/unit/test_policy_inputs.py::"
+            "test_late_qualification_never_extends_request_or_admits_at_expiry",
+        ),
+    ),
+    Mutant(
+        "pending_finish_becomes_accepted_during_save",
+        "custom_components/ha_operator/policy_inputs.py",
+        'event.kind == "finish"\n'
+        '                    and (state.phase == "qualifying" '
+        "or event.accepted_at_capture is False)",
+        'event.kind == "finish"\n                    and state.phase == "qualifying"',
+        (
+            "tests/unit/test_policy_inputs.py::"
+            "test_finish_captured_during_admission_save_invalidates_later_published_request",
+        ),
+    ),
+    Mutant(
+        "unknown_position_confirms_return",
+        "custom_components/ha_operator/return_monitor.py",
+        "observed_position is not None\n"
+        "            and abs(observed_position - target_position) <= config.tolerance",
+        "observed_position is None\n"
+        "            or abs(observed_position - target_position) <= config.tolerance",
+        ("tests/unit/test_return_monitor.py::test_mismatch_or_unknown_cannot_confirm",),
+    ),
+    Mutant(
+        "queued_mutator_commits_after_close",
+        "custom_components/ha_operator/runtime.py",
+        "            if self._closed:\n"
+        '                raise HomeAssistantError("HA Operator is unloaded")\n'
+        '            candidate_revision = state["revision"]',
+        "            if False:\n"
+        '                raise HomeAssistantError("HA Operator is unloaded")\n'
+        '            candidate_revision = state["revision"]',
+        (
+            "tests/integration/test_policy_inputs_lifecycle.py::"
+            "test_reload_drains_admission_then_fences_and_rejects_queued_mutator",
+        ),
+    ),
+    Mutant(
+        "pending_source_fact_dispatches_inside_adapter",
+        "custom_components/ha_operator/runtime.py",
+        "            def still_current(generation=generation, target=target):\n"
+        "                if self._input_ingress[resource_id] "
+        "!= self._input_processed[resource_id]:\n"
+        "                    return False",
+        "            def still_current(generation=generation, target=target):\n"
+        "                if False:\n"
+        "                    return False",
+        (
+            "tests/integration/test_policy_inputs_runtime.py::"
+            "test_pending_cancel_is_checked_inside_inflight_adapter",
+        ),
+    ),
 )
 
 
@@ -94,6 +158,8 @@ def run_tests(root: Path, tests: tuple[str, ...], evidence: Path, name: str, tim
         "pytest",
         "-q",
         "--tb=short",
+        "--disable-socket",
+        "--allow-unix-socket",
         "-p",
         "no:cacheprovider",
         "-o",
@@ -131,14 +197,18 @@ def run_tests(root: Path, tests: tuple[str, ...], evidence: Path, name: str, tim
             counts[key] += int(suite.get(key, 0))
     result.update(counts)
     assertion_failures = sum(
-        (failure.get("message", "").startswith(("assert ", "AssertionError")))
+        (
+            failure.get("message", "").startswith(
+                ("assert ", "AssertionError", "Failed: DID NOT RAISE ")
+            )
+        )
         for failure in document.iter("failure")
     )
     result["assertion_failures"] = assertion_failures
     if counts["tests"] > 0 and counts["errors"] == 0 and counts["skipped"] == 0:
         if process.returncode == 0 and counts["failures"] == 0:
             result["status"] = "passed"
-        elif process.returncode == 1 and assertion_failures > 0:
+        elif process.returncode == 1 and assertion_failures == counts["failures"] > 0:
             result["status"] = "failed_assertions"
     return result
 
@@ -153,7 +223,7 @@ def mutation_gate(root: Path, output: Path, timeout: int) -> dict:
         path.relative_to(root).as_posix(): path.read_bytes()
         for path in (root / "custom_components/ha_operator").rglob("*.py")
     }
-    results = {"schema_version": 1, "scope": "four explicit safety guards", "status": "failed"}
+    results = {"schema_version": 1, "scope": "explicit safety guards", "status": "failed"}
     results["source_sha256"] = {name: sha256(data).hexdigest() for name, data in production.items()}
     try:
         with TemporaryDirectory(prefix="ha-operator-mutations-") as temporary:

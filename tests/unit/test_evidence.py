@@ -19,6 +19,8 @@ from scripts.evidence import (
     SLEEP_FILES,
     SLEEP_SCENARIOS,
     TEST_FILES,
+    WINDOW_FILES,
+    WINDOW_SCENARIOS,
     build_evidence,
     validate_lab,
     validate_tests,
@@ -92,10 +94,41 @@ def complete_evidence(tmp_path):
             if scenario == "observability"
             else SLEEP_SCENARIOS
             if scenario == "sleep"
+            else WINDOW_SCENARIOS
+            if scenario == "windows"
             else INITIAL_SCENARIOS | {"LAB-REALISTIC-SOAK"}
         )
-        for name in OBSERVABILITY_FILES | SLEEP_FILES:
+        for name in OBSERVABILITY_FILES | SLEEP_FILES | WINDOW_FILES:
             (run / name).write_text("{}")
+        write_json(
+            run / "window-native-evidence.json",
+            {
+                "schema": 1,
+                "status": "passed",
+                "clock": "real wall clock, accelerated configured durations",
+                "snapshots": [
+                    {
+                        "label": label,
+                        "at": index,
+                        "explain": {
+                            "decision": {"target": {"position": desired}},
+                            "observation": {"target": {"position": observed}},
+                        },
+                        "timer": {"expires_at": 20},
+                        "return": {"due_at": 30, "overdue": label == "overdue"},
+                    }
+                    for index, (label, desired, observed) in enumerate(
+                        (
+                            ("opening", 100, 7),
+                            ("refusal", 100, 7),
+                            ("baseline", 7, 100),
+                            ("overdue", 7, 100),
+                            ("recovered", 7, 7),
+                        )
+                    )
+                ],
+            },
+        )
         write_json(
             run / "scenarios.json",
             [
@@ -604,4 +637,53 @@ def test_lock_receipt_must_prove_no_commands_at_all_lifecycle_boundaries(complet
     run = next(path for path in complete_evidence["labs"] if path.name.endswith("all"))
     change(run / "shadow-lock-journal.json", **update)
     with pytest.raises(ValueError, match="zero commands through reload and restart"):
+        build_evidence(**complete_evidence)
+
+
+@pytest.mark.parametrize("version", ["2026.9.3", "2026.9.4"])
+def test_native_windows_are_required_on_both_pins(complete_evidence, version):
+    run = next(path for path in complete_evidence["labs"] if path.name == version + "-windows")
+    scenarios = json.loads((run / "scenarios.json").read_text())
+    missing = "WINDOW-NATIVE-RETURN-DEMO"
+    write_json(run / "scenarios.json", [case for case in scenarios if case["id"] != missing])
+    with pytest.raises(ValueError, match="Missing lab scenarios.*" + missing):
+        build_evidence(**complete_evidence)
+
+
+@pytest.mark.parametrize("missing", sorted(WINDOW_FILES))
+def test_windows_native_evidence_files_are_required(complete_evidence, missing):
+    run = next(path for path in complete_evidence["labs"] if path.name.endswith("windows"))
+    (run / missing).unlink()
+    with pytest.raises(ValueError, match="Missing " + missing):
+        build_evidence(**complete_evidence)
+
+
+@pytest.mark.parametrize(
+    "update", [{"status": "pending"}, {"clock": "unspecified"}, {"snapshots": []}]
+)
+def test_windows_incomplete_demonstration_cannot_pass(complete_evidence, update):
+    run = next(path for path in complete_evidence["labs"] if path.name.endswith("windows"))
+    native = json.loads((run / "window-native-evidence.json").read_text())
+    write_json(run / "window-native-evidence.json", {**native, **update})
+    with pytest.raises(ValueError, match="Native window evidence"):
+        build_evidence(**complete_evidence)
+
+
+@pytest.mark.parametrize("field", ["chronology", "desired", "raw", "expiry", "warning"])
+def test_native_windows_inconsistent_snapshots_cannot_pass(complete_evidence, field):
+    run = next(path for path in complete_evidence["labs"] if path.name.endswith("windows"))
+    native = json.loads((run / "window-native-evidence.json").read_text())
+    snapshots = native["snapshots"]
+    if field == "chronology":
+        snapshots[1]["at"] = -1
+    elif field == "desired":
+        snapshots[2]["explain"]["decision"]["target"]["position"] = 100
+    elif field == "raw":
+        snapshots[3]["explain"]["observation"]["target"]["position"] = 7
+    elif field == "expiry":
+        snapshots[1]["timer"]["expires_at"] += 10
+    else:
+        snapshots[3]["return"]["due_at"] += 10
+    write_json(run / "window-native-evidence.json", native)
+    with pytest.raises(ValueError, match="Native window evidence"):
         build_evidence(**complete_evidence)

@@ -519,3 +519,44 @@ async def test_native_ha_bridge_reports_feedback_not_receipts(
         assert hass.states.get("binary_sensor.sim_cellar_on").state == "off"
     finally:
         await coordinator.async_shutdown()
+
+
+def test_optional_sensor_unit_metadata_is_independent_of_values_and_controls(sim):
+    simulator, clock = sim
+    device = next(
+        item for item in simulator.public()["devices"] if item["id"] == "window_temperature"
+    )
+    assert device["unit"] == "°C"
+    assert device["observable"]["value"] == 20
+    assert "unit" not in simulator.devices["window_temperature"].physical
+    simulator.control("window_temperature", {"value": 15})
+    clock.advance(0.25)
+    simulator.tick()
+    device = next(
+        item for item in simulator.public()["devices"] if item["id"] == "window_temperature"
+    )
+    assert device["unit"] == "°C"
+    assert device["observable"]["value"] == 15
+    assert any(
+        event["kind"] == "feedback"
+        and event["device_id"] == "window_temperature"
+        and event["data"]["observation"]["value"] == 15
+        for event in simulator.events
+    )
+    with pytest.raises(ValueError, match="Unknown scenario controls"):
+        simulator.control("window_temperature", {"unit": "K"})
+
+
+@pytest.mark.parametrize(
+    "spec",
+    [
+        {"id": "bad", "kind": "cover", "unit": "°C"},
+        {"id": "bad", "kind": "sensor", "unit": ""},
+        {"id": "bad", "kind": "sensor", "unit": 42},
+    ],
+)
+def test_invalid_sensor_metadata_is_rejected_before_reset(sim, spec):
+    simulator, _ = sim
+    with pytest.raises(ValueError, match="unit"):
+        simulator.reset([spec])
+    assert "window_temperature" in simulator.devices

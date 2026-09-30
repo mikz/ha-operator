@@ -20,6 +20,10 @@ async def async_setup_platform(hass, config, async_add_entities, discovery_info=
 
 
 class SimulatorSensor(SimulatorEntity, SensorEntity):
+    def __init__(self, coordinator, device):
+        super().__init__(coordinator, device)
+        self._attr_native_unit_of_measurement = device.get("unit")
+
     @property
     def native_value(self) -> float | None:
         return self.observation.get("value")

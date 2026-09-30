@@ -6,7 +6,6 @@ import argparse
 import json
 import os
 import pstats
-import shutil
 import statistics
 import subprocess
 import sys
@@ -22,20 +21,36 @@ def run(args):
     destination = args.output.resolve()
     destination.mkdir(parents=True, exist_ok=False)
     disk_suite = args.suite == "trace-disk"
+    native_suite = args.suite == "native-policies"
     probe = (
         REPOSITORY
         / "tests/performance"
-        / ("test_trace_disk_profile.py" if disk_suite else "test_event_profile.py")
+        / (
+            "test_trace_disk_profile.py"
+            if disk_suite
+            else "test_native_policy_profile.py"
+            if native_suite
+            else "test_event_profile.py"
+        )
     )
+    recipe = REPOSITORY / "tests/lab/window_recipe.py" if native_suite else None
+    probe_bytes = probe.read_bytes()
+    recipe_bytes = recipe.read_bytes() if recipe else None
     traces = (False,) if disk_suite else (False, True)
     workloads = (
         ("disk",)
         if disk_suite
+        else ("idle", "unchanged", "changing", "timer", "reload")
+        if native_suite
         else ("unchanged", "changed_burst", "trace_only", "followers_commands", "followers_reports")
     )
+    if args.workloads:
+        if set(args.workloads) - set(workloads):
+            raise ValueError("Workload is not part of the selected suite")
+        workloads = tuple(args.workloads)
     receipts = []
     # Alternate versions to reduce machine-load and thermal-order bias.
-    for measurement in ("timing", "cprofile", "memory"):
+    for measurement in args.measurements:
         for trace in traces:
             for workload in workloads:
                 repeats = range(args.repeats if measurement == "timing" else 1)
@@ -60,7 +75,9 @@ def run(args):
                                     if Path(member).is_absolute() or ".." in Path(member).parts:
                                         raise ValueError("Unsafe release member")
                                 archive.extractall(component)
-                            shutil.copyfile(probe, root / "test_event_profile.py")
+                            (root / "test_event_profile.py").write_bytes(probe_bytes)
+                            if recipe_bytes is not None:
+                                (root / "window_recipe.py").write_bytes(recipe_bytes)
                             (root / "pytest.ini").write_text(
                                 "[pytest]\nasyncio_mode=auto\nfilterwarnings=ignore::DeprecationWarning\n"
                             )
@@ -73,6 +90,8 @@ def run(args):
                                 "OPERATOR_PROFILE_MEASURE": measurement,
                                 "OPERATOR_PROFILE_COUNT": str(args.batches),
                                 "OPERATOR_PROFILE_TRACE": str(int(trace)),
+                                "OPERATOR_PROFILE_VARIANT": label,
+                                "OPERATOR_PROFILE_WARMUP": str(args.warmup_batches),
                             }
                             with output.with_suffix(".log").open("w") as log:
                                 result = subprocess.run(
@@ -108,7 +127,7 @@ def run(args):
                                 stats.print_stats("ha_operator", 35)
                         print(name, f"CPU {receipt['cpu_seconds']:.4f}s", flush=True)
     comparison = []
-    for trace in traces:
+    for trace in traces if "timing" in args.measurements else ():
         for workload in (name for name in workloads if not name.startswith("followers_")):
             row = {"workload": workload, "trace_enabled": trace}
             for label in ("baseline", "candidate"):
@@ -133,9 +152,13 @@ def run(args):
         "suite": args.suite,
         "baseline_sha256": sha256(args.baseline.read_bytes()).hexdigest(),
         "candidate_sha256": sha256(args.candidate.read_bytes()).hexdigest(),
-        "probe_sha256": sha256(probe.read_bytes()).hexdigest(),
+        "probe_sha256": sha256(probe_bytes).hexdigest(),
+        **({"recipe_sha256": sha256(recipe_bytes).hexdigest()} if recipe_bytes is not None else {}),
         "batches": args.batches,
         "timing_repeats": args.repeats,
+        "measurements": args.measurements,
+        "workloads": workloads,
+        **({"warmup_batches": args.warmup_batches} if native_suite else {}),
         "comparison": comparison,
         "runs": receipts,
     }
@@ -149,5 +172,17 @@ if __name__ == "__main__":
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--batches", type=int, default=300)
     parser.add_argument("--repeats", type=int, default=3)
-    parser.add_argument("--suite", choices=("events", "trace-disk"), default="events")
+    parser.add_argument(
+        "--suite", choices=("events", "trace-disk", "native-policies"), default="events"
+    )
+    parser.add_argument("--workloads", nargs="+", help="Run only these workloads from the suite")
+    parser.add_argument(
+        "--measurements",
+        nargs="+",
+        choices=("timing", "cprofile", "memory"),
+        default=["timing", "cprofile", "memory"],
+    )
+    parser.add_argument(
+        "--warmup-batches", type=int, default=10, help="Native policy warm-up batches"
+    )
     run(parser.parse_args())
