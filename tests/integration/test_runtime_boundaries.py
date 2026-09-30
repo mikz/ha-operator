@@ -6,6 +6,7 @@ import asyncio
 import threading
 
 import pytest
+from homeassistant.exceptions import HomeAssistantError
 
 from tests.integration.test_runtime_reconciliation import reported, runtime_factory  # noqa: F401
 
@@ -228,7 +229,10 @@ async def test_unload_waits_for_an_inflight_stop_operation(hass, runtime_factory
         assert not closing.done()
         assert not finished.is_set()
         release.set()
-        await asyncio.wait_for(asyncio.gather(stopping, closing), 1)
+        with pytest.raises(HomeAssistantError, match="unloaded"):
+            await asyncio.wait_for(stopping, 1)
+        assert await asyncio.wait_for(closing, 1)
+        assert runtime.store.state["manuals"] == {}
         assert finished.is_set()
         assert journal == ["stop"]
         await hass.async_block_till_done()

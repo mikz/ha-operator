@@ -91,7 +91,9 @@ async def _async_updated(hass: HomeAssistant, entry: ConfigEntry) -> None:
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
-    await entry.runtime_data.async_close()
+    interrupt = not hass.is_stopping
+    if not await entry.runtime_data.async_close(interrupt_timer_inputs=interrupt):
+        return False
     return await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
 
 

@@ -189,6 +189,7 @@ class OperatorRuntime:
         self._tasks: list[asyncio.Task] = []
         self._stop_tasks: set[asyncio.Task] = set()
         self._close_task: asyncio.Task | None = None
+        self._close_interrupts_timer_inputs = False
         self._generation = dict.fromkeys(self.resources, 0)
         self._signatures: dict[str, Any] = {}
         self._last_send: dict[str, float] = {}
@@ -694,24 +695,28 @@ class OperatorRuntime:
         ]
         self._wake_all()
 
-    async def async_close(self) -> None:
+    async def async_close(self, *, interrupt_timer_inputs: bool = False) -> bool:
+        """Fence synchronously, then finish the first boundary's owned cleanup."""
         if self._close_task is None:
+            self._closed = True
+            self._timer_admissions_open = False
+            self._close_interrupts_timer_inputs = interrupt_timer_inputs
+            for key in self._generation:
+                self._generation[key] += 1
             self._close_task = self.hass.async_create_task(
                 self._async_close(), "ha_operator:quiesce"
             )
-        _, cancelled = await async_settle(self._close_task)
+        success, cancelled = await async_settle(self._close_task)
         if cancelled:
             raise asyncio.CancelledError
+        return success
 
-    async def _async_close(self) -> None:
-        self._closed = True
+    async def _async_close(self) -> bool:
         flush, self._input_flush = self._input_flush, None
         if flush is not None:
             flush.cancel()
         self._pending_resources.clear()
         self._policy_events.clear()
-        for key in self._generation:
-            self._generation[key] += 1
         for unsubscribe in self._unsubscribers:
             unsubscribe()
         self._unsubscribers.clear()
@@ -727,28 +732,80 @@ class OperatorRuntime:
             await asyncio.gather(flush, return_exceptions=True)
         await asyncio.gather(*self._tasks, return_exceptions=True)
         await asyncio.gather(*self._stop_tasks, return_exceptions=True)
-        # A lock observed by this instance cannot be undone by an options race
-        # before reload. Save observe before a replacement can start unlocked.
-        if (
-            self.shadow_locked
-            and not self.fault
-            and not self.store.fault
-            and any(self.store.state["modes"].get(key) == "live" for key in self.resources)
-        ):
+        # Waiting for this lock also drains service writes already in flight.
+        # Mutators queued before close recheck _closed under the same store lock.
+        interrupted = []
+        demote = self.shadow_locked
+        interrupt = self._close_interrupts_timer_inputs and any(
+            policy.get("input", {}).get("type") == "timer_episode"
+            for policy in self.policies.values()
+        )
+
+        def fence(state):
+            if interrupt:
+                for policy_id in self._input_fingerprints:
+                    record = state["policy_inputs"].get(policy_id)
+                    if (
+                        record is not None
+                        and record["type"] == "timer_episode"
+                        and record["state"]["phase"] in {"qualifying", "accepted"}
+                    ):
+                        self._suppress_timer_input(state, policy_id)
+                        interrupted.append(policy_id)
+            if demote:
+                state["modes"].update(dict.fromkeys(self.resources, "observe"))
+
+        success = True
+        if interrupt or demote:
             try:
-                await self.store.async_update(
-                    lambda state: state["modes"].update(dict.fromkeys(self.resources, "observe"))
-                )
+                await self.store.async_update(fence, skip_unchanged=True)
+                self._state = self.store.state
             except IntentStoreError as err:
                 self._storage_fault(err)
-                # Direct options mutations can bypass the native unlock flow.
-                # Retain the lock for the replacement if demotion was uncertain.
-                self.hass.config_entries.async_update_entry(
-                    self.entry, options={**self.entry.options, "shadow_lock": True}
-                )
+                success = not interrupt
+                if demote:
+                    self.hass.config_entries.async_update_entry(
+                        self.entry, options={**self.entry.options, "shadow_lock": True}
+                    )
+            else:
+                if interrupted:
+                    for policy_id in interrupted:
+                        record = self._state["policy_inputs"][policy_id]
+                        episode_id = record["state"]["episode_id"]
+                        self._trace.event(
+                            "admission",
+                            {
+                                "action": "policy_input",
+                                "policy_id": policy_id,
+                                "input": record,
+                                "occurrences": [
+                                    self._state["occurrences"][json.dumps([policy_id, episode_id])]
+                                ],
+                                "revision": self._state["revision"],
+                            },
+                        )
+                        policy = self.policies[policy_id]
+                        entity_id = er.async_get(self.hass).async_get_entity_id(
+                            "sensor", DOMAIN, f"{policy['resource_id']}_reason"
+                        )
+                        self.hass.bus.async_fire(
+                            "logbook_entry",
+                            {
+                                "name": policy["name"],
+                                "message": (
+                                    "Timer episode interrupted by HA Operator reload or unload"
+                                ),
+                                "domain": DOMAIN,
+                                "entity_id": entity_id,
+                            },
+                        )
         await self.store.async_close()
         await self._trace.async_close()
+        # Failed unload retains platforms. Publish inhibition before dropping subscribers.
+        if not success:
+            self._notify()
         self._listeners.clear()
+        return success
 
     @callback
     def subscribe(self, listener: Callable[[], None]) -> Callable[[], None]:
@@ -923,6 +980,8 @@ class OperatorRuntime:
         context=None,
         skip_unchanged=False,
     ) -> dict:
+        if self._closed:
+            raise HomeAssistantError("HA Operator is unloaded")
         if self.fault or self.store.fault:
             raise HomeAssistantError("HA Operator storage is inhibited; inspect Repairs")
         candidate = None
@@ -930,6 +989,8 @@ class OperatorRuntime:
 
         def own_mutation(state):
             nonlocal candidate, candidate_revision
+            if self._closed:
+                raise HomeAssistantError("HA Operator is unloaded")
             candidate_revision = state["revision"]
             mutator(state)
             candidate = state

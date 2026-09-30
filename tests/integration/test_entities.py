@@ -68,6 +68,7 @@ def fake_runtime():
         reason="confirmed",
     )
     runtime = SimpleNamespace(
+        _closed=False,
         resources=resources,
         policies={"morning": {"name": "Morning", "kind": "state"}},
         requirements={"air": {"name": "Air"}},

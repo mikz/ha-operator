@@ -88,6 +88,8 @@ class ResourceSensor(OperatorEntity, SensorEntity):
     @property
     def native_value(self) -> float | str | datetime | None:
         if self.key == "observed":
+            if self.runtime._closed:
+                return None
             observation = self.runtime.observations.get(self.identifier)
             return (
                 target_value(observation.target) if observation and observation.available else None
@@ -127,9 +129,15 @@ class ResourceSensor(OperatorEntity, SensorEntity):
             }
         if self.key == "observed":
             observation = self.runtime.observations.get(self.identifier)
-            target = observation.target if observation and observation.available else None
+            target = (
+                observation.target
+                if not self.runtime._closed and observation and observation.available
+                else None
+            )
             return {"target": target.to_dict() if target else None, **self.linked_entities}
         if self.key == "status":
+            if self.runtime.fault:
+                return {"reason": self.runtime.fault, "execution_reason": self.runtime.fault}
             decision = self.runtime.decisions.get(self.identifier)
             return (
                 {

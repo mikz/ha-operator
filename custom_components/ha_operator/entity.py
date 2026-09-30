@@ -112,12 +112,16 @@ class ResourceEntity(OperatorEntity):
     @property
     def observed_target(self) -> Any:
         observation = self.observation
-        return observation.target if observation and observation.available else None
+        return (
+            observation.target
+            if not self.runtime._closed and observation and observation.available
+            else None
+        )
 
     @property
     def available(self) -> bool:
         observation = self.observation
-        return observation is not None and observation.available
+        return not self.runtime._closed and observation is not None and observation.available
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:

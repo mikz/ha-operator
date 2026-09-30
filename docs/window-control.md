@@ -53,6 +53,27 @@ it; resume does not open another window. Natural completion keeps an accepted
 request until its expiry. The request expires one qualification delay plus one
 request duration after the fresh start.
 
+A full Home Assistant restart retains accepted timer requests with their original
+absolute expiry. Operator discards pending timer qualification and waits for a
+fresh start. Restoring an active timer does not create an opening. Numeric
+qualification retains its deadline but requires a fresh finite report before it
+becomes eligible. Restored or optimistic device feedback does not confirm movement.
+
+Reloading or unloading the integration while Home Assistant runs interrupts
+pending and accepted timer episodes. Operator closes admissions, drains active
+writes, and saves their suppression in one snapshot before a replacement starts.
+It records each interruption in the Logbook. Enabling a disabled diagnostic entity
+can cause Home Assistant to reload the entry and interrupt a timer episode.
+Manual leases, fan settings, and sleep intent survive this boundary.
+
+If the interruption save fails, Home Assistant reports a failed unload and keeps
+the old views with **Control status** set to `fault`. Operator stops its workers
+and rejects commands. Home Assistant cannot reload an entry in this failed-unload
+state. Resolve the storage problem and restart Home Assistant. A crash or failed
+write leaves only the last durable snapshot available; it can still contain the
+previous accepted request. The failure itself is not a saved suppression.
+An event captured but not committed before shutdown is not a durable withdrawal.
+
 Cover resources can also configure **Return confirmation**: the highest target
 to monitor and the warning delay in seconds. Confirmation uses raw position and
 the resource's position tolerance. An overdue return creates one notification
