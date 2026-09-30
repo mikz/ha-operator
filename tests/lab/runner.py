@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import os
 import re
 import secrets
@@ -20,6 +21,65 @@ from .readiness import wait_native_tokens
 ARTIFACTS = Path("/artifacts")
 CONTROL = Path("/control")
 STATE = Path("/state")
+
+
+def validate_native_diagnostics(data):
+    """Allow only the bounded, anonymized native input and return-monitor records."""
+
+    def number(value):
+        return value is None or type(value) in (int, float) and math.isfinite(value)
+
+    def opaque(value):
+        return isinstance(value, str) and re.fullmatch(r"[0-9a-f]{12}", value) is not None
+
+    for row in data["resources"].values():
+        if "return_monitor" not in row:
+            continue
+        state = row["return_monitor"]
+        assert set(state) == {"phase", "target_position", "due_at", "overdue"}
+        assert state["phase"] in {"idle", "waiting", "overdue"}
+        assert type(state["overdue"]) is bool
+        assert number(state["target_position"]) and number(state["due_at"])
+    for row in data["policies"].values():
+        assert type(row["enabled"]) is bool
+        source = row.get("input")
+        if source is None:
+            continue
+        kind = source["type"]
+        assert kind in {"qualified_numeric", "timer_episode"}
+        fields = {"type", "entity", "qualification_seconds", "state"}
+        assert set(source) == fields | (
+            {"threshold", "comparison", "unit"}
+            if kind == "qualified_numeric"
+            else {"request_seconds"}
+        )
+        assert opaque(source["entity"])
+        assert number(source["qualification_seconds"])
+        if kind == "qualified_numeric":
+            assert number(source["threshold"]) and source["comparison"] == "below"
+            assert opaque(source["unit"])
+        else:
+            assert number(source["request_seconds"])
+        state = source["state"]
+        if state is None:
+            continue
+        if kind == "qualified_numeric":
+            assert set(state) == {
+                "phase",
+                "due_at",
+                "qualified",
+                "source_quality",
+                "recovery_pending",
+            }
+            assert state["phase"] in {"idle", "qualifying", "qualified", "recovering"}
+            assert type(state["qualified"]) is bool and type(state["recovery_pending"]) is bool
+            assert state["source_quality"] in {"numeric", "unknown"}
+        else:
+            assert set(state) == {"phase", "due_at", "expires_at", "finish_at", "episode_id"}
+            assert state["phase"] in {"idle", "qualifying", "accepted", "suppressed", "expired"}
+            assert number(state["expires_at"]) and number(state["finish_at"])
+            assert state["episode_id"] is None or opaque(state["episode_id"])
+        assert number(state["due_at"])
 
 
 async def eventually(
@@ -651,8 +711,15 @@ class Lab:
                 "attempts",
                 "next_attempt",
             }
-            assert all(set(row) == resource_fields for row in data["resources"].values())
-            assert all(set(row) == {"enabled"} for row in data["policies"].values())
+            assert all(
+                set(row)
+                == resource_fields | ({"return_monitor"} if "return_monitor" in row else set())
+                for row in data["resources"].values()
+            )
+            assert all(
+                set(row) in ({"enabled"}, {"enabled", "input"}) for row in data["policies"].values()
+            )
+            validate_native_diagnostics(data)
             assert all(
                 set(row) == {"status", "selected_provider", "acquiring_provider"}
                 for row in data["requirements"].values()

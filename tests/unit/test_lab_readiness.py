@@ -185,3 +185,131 @@ async def test_native_policy_helper_submits_two_forms_and_keeps_id(source_type, 
         assert await ha.add_subentry("entry", "policy", data) == "stable-policy"
     assert len([path for path, _ in ha.requests if path.endswith("/flow/flow")]) == 2
     assert data["input"]["type"] == source_type
+
+
+def native_diagnostics():
+    return {
+        "resources": {
+            "a" * 12: {
+                "return_monitor": {
+                    "phase": "overdue",
+                    "target_position": 7,
+                    "due_at": 300,
+                    "overdue": True,
+                }
+            }
+        },
+        "policies": {
+            "b" * 12: {"enabled": True, "input": None},
+            "c" * 12: {"enabled": False},
+            "d" * 12: {
+                "enabled": True,
+                "input": {
+                    "type": "qualified_numeric",
+                    "entity": "e" * 12,
+                    "qualification_seconds": 1800,
+                    "threshold": 16,
+                    "comparison": "below",
+                    "unit": "f" * 12,
+                    "state": {
+                        "phase": "recovering",
+                        "due_at": 300,
+                        "qualified": True,
+                        "source_quality": "unknown",
+                        "recovery_pending": True,
+                    },
+                },
+            },
+            "e" * 12: {
+                "enabled": True,
+                "input": {
+                    "type": "timer_episode",
+                    "entity": "f" * 12,
+                    "qualification_seconds": 60,
+                    "request_seconds": 1800,
+                    "state": {
+                        "phase": "accepted",
+                        "due_at": None,
+                        "expires_at": 1860,
+                        "finish_at": 600,
+                        "episode_id": "a" * 12,
+                    },
+                },
+            },
+        },
+    }
+
+
+def test_native_diagnostics_accepts_only_known_anonymized_records():
+    from tests.lab.runner import validate_native_diagnostics
+
+    data = native_diagnostics()
+    validate_native_diagnostics(data)
+    data["resources"]["a" * 12].pop("return_monitor")
+    data["policies"]["d" * 12]["input"]["state"] = None
+    data["policies"]["e" * 12]["input"]["state"]["episode_id"] = None
+    validate_native_diagnostics(data)
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("phase", "secret-status"),
+        ("overdue", 1),
+        ("due_at", float("nan")),
+        ("target_position", "7"),
+        ("secret", "private-name"),
+    ],
+)
+def test_native_return_diagnostics_rejects_unknown_fields_and_types(field, value):
+    from tests.lab.runner import validate_native_diagnostics
+
+    data = native_diagnostics()
+    data["resources"]["a" * 12]["return_monitor"][field] = value
+    with pytest.raises(AssertionError):
+        validate_native_diagnostics(data)
+
+
+@pytest.mark.parametrize(
+    "kind,field,value",
+    [
+        ("numeric", "entity", "sensor.private_temperature"),
+        ("numeric", "unit", "°C"),
+        ("numeric", "threshold", True),
+        ("numeric", "comparison", "above"),
+        ("numeric", "type", "other"),
+        ("numeric", "secret", "private-name"),
+        ("timer", "request_seconds", float("inf")),
+    ],
+)
+def test_native_input_diagnostics_rejects_plain_identifiers_and_unknown_fields(kind, field, value):
+    from tests.lab.runner import validate_native_diagnostics
+
+    data = native_diagnostics()
+    key = "d" if kind == "numeric" else "e"
+    data["policies"][key * 12]["input"][field] = value
+    with pytest.raises(AssertionError):
+        validate_native_diagnostics(data)
+
+
+@pytest.mark.parametrize(
+    "kind,field,value",
+    [
+        ("numeric", "qualified", 1),
+        ("numeric", "source_quality", "private-quality"),
+        ("numeric", "recovery_pending", 1),
+        ("numeric", "phase", "private-phase"),
+        ("timer", "episode_id", "plain-episode-id"),
+        ("timer", "expires_at", "1860"),
+        ("timer", "phase", "private-phase"),
+        ("timer", "secret", "private-name"),
+    ],
+)
+def test_native_input_state_diagnostics_rejects_unrecognized_records(kind, field, value):
+    from tests.lab.runner import validate_native_diagnostics
+
+    data = native_diagnostics()
+    key = "d" if kind == "numeric" else "e"
+    data["policies"][key * 12]["input"]["state"][field] = value
+    with pytest.raises(AssertionError):
+        validate_native_diagnostics(data)

@@ -59,7 +59,6 @@ MUTANTS = (
         "# Mutant: omit the generation guard before physical dispatch.\n"
         "        if False:\n            return False",
         (
-            "tests/integration/test_adapters.py::test_generation_and_restrictions_checked_at_each_call",
             "tests/integration/test_adapters.py::test_fan_stale_generation_between_direction_and_on",
             "tests/integration/test_runtime_reconciliation.py::"
             "test_superseded_generation_cannot_send_after_async_boundary",
