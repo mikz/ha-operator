@@ -66,3 +66,60 @@ def test_cleanup_receipt_queries_scoped_objects(monkeypatch, remaining):
         assert receipt[key] == (["residual-lab-object"] if key == remaining else [])
     assert all("--filter" in command for command in calls)
     assert all(command[-1].endswith("=lab-2026-9-3-test") for command in calls)
+
+
+@pytest.mark.parametrize("kind", ["manual", "timer"])
+def test_kill_precondition_waits_for_matching_normal_store_save(monkeypatch, kind):
+    probes = []
+    readiness = iter([False, True])
+
+    def inspect(args):
+        probes.append(args)
+        return next(readiness)
+
+    monkeypatch.setattr(lab, "json_output", inspect)
+    monkeypatch.setattr(lab.time, "sleep", lambda _: None)
+    expected = {"kind": kind, "key": "synthetic", "identity": "episode", "expires_at": 100}
+    result = lab.wait_saved_request("owned-lab-ha", "SyntheticEntry", expected)
+    assert len(probes) == 2 and all(p[:3] == ["docker", "exec", "owned-lab-ha"] for p in probes)
+    assert result["identity"] == "episode" and result["expires_at"] == 100
+    assert result["verified_at"] > 0
+
+
+def test_kill_precondition_timeout_does_not_claim_saved_state(monkeypatch):
+    monkeypatch.setattr(lab, "json_output", lambda _: False)
+    monkeypatch.setattr(lab.time, "sleep", lambda _: None)
+    expected = {"kind": "manual", "key": "synthetic", "identity": "request", "expires_at": 100}
+    with pytest.raises(RuntimeError, match="did not reach native Store"):
+        lab.wait_saved_request("owned-lab-ha", "SyntheticEntry", expected, timeout=0)
+
+
+def test_timer_kill_requires_saved_accepted_phase(monkeypatch, tmp_path):
+    import subprocess
+    import sys
+
+    expected = {"kind": "timer", "key": "timer", "identity": "episode", "expires_at": 100}
+    state = {
+        "policy_inputs": {
+            "timer": {"state": {"episode_id": "episode", "expires_at": 100, "phase": "qualifying"}}
+        }
+    }
+    path = tmp_path / "ha_operator.SyntheticEntry"
+    path.write_text(json.dumps({"data": state}))
+    probes = []
+
+    def inspect(args):
+        probe = args[5].replace("/config/.storage", str(tmp_path))
+        result = json.loads(subprocess.check_output([sys.executable, "-c", probe, *args[6:]]))
+        probes.append(result)
+        return result
+
+    def ordinary_save(_):
+        state["policy_inputs"]["timer"]["state"]["phase"] = "accepted"
+        path.write_text(json.dumps({"data": state}))
+
+    monkeypatch.setattr(lab, "json_output", inspect)
+    monkeypatch.setattr(lab.time, "sleep", ordinary_save)
+    result = lab.wait_saved_request("owned-lab-ha", "SyntheticEntry", expected)
+    assert probes == [False, True]
+    assert result["identity"] == "episode" and result["expires_at"] == 100

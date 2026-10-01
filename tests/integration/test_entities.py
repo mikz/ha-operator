@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import logging
-from collections import deque
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
@@ -88,8 +87,6 @@ def fake_runtime():
         last_commands={},
         fault=None,
         shadow_locked=False,
-        trace_health=Mock(return_value={"enabled": False, "healthy": True, "complete": True}),
-        history=deque(maxlen=100),
         mode=Mock(return_value="observe"),
         manual=Mock(return_value=None),
         manual_control=Mock(return_value=True),
@@ -240,15 +237,15 @@ async def test_control_callbacks_and_failed_persistence(fake_runtime):
     assert mode.current_option == "observe"
     await mode.async_select_option("live")
     fake_runtime.async_set_mode.assert_awaited_once_with("roof", "live")
-    assert mode.current_option == "observe"  # runtime publishes only committed mode
+    assert mode.current_option == "observe"  # runtime publishes only current mode
     with pytest.raises(ServiceValidationError):
         await mode.async_select_option("automatic")
     await button.OperatorButton(fake_runtime, "roof", "release").async_press()
     fake_runtime.async_release.assert_awaited_once_with("roof")
     await button.OperatorButton(fake_runtime, "roof", "reconcile").async_press()
     fake_runtime.async_reconcile.assert_awaited_once_with("roof")
-    fake_runtime.async_request.side_effect = ServiceValidationError("durable save failed")
-    with pytest.raises(ServiceValidationError, match="durable save failed"):
+    fake_runtime.async_request.side_effect = ServiceValidationError("request rejected")
+    with pytest.raises(ServiceValidationError, match="request rejected"):
         await cover.OperatorCover(fake_runtime, "roof").async_open_cover()
     assert fake_runtime.observations["roof"].target.position == 0
 
@@ -407,28 +404,11 @@ async def test_native_entities_attach_to_their_own_subentries(hass, fake_runtime
     assert {item.unique_id for item in added["roof"]} == {"roof_manual", "roof_return_overdue"}
 
 
-async def test_diagnostics_allowlist_and_bounded_history(hass, fake_runtime):
+async def test_diagnostics_allowlist_and_read_only_state(hass, fake_runtime):
     secret = "private-address-and-token"
     fake_runtime.resources["roof"].update(token=secret, entity_id="cover.secret_room")
     fake_runtime.fault = secret
     fake_runtime.shadow_locked = True
-    fake_runtime.trace_health.return_value = {
-        "enabled": True,
-        "healthy": False,
-        "complete": False,
-        "session_id": secret,
-        "last_sequence": 24,
-        "durable_sequence": 20,
-        "queued_records": 4,
-        "dropped_records": 0,
-        "write_errors": 1,
-        "rotations": 2,
-        "last_heartbeat": 10,
-        "last_write_at": 9,
-        "path": secret,
-        "records": [{"secret": secret}],
-        "token": secret,
-    }
     fake_runtime.decisions["roof"] = SimpleNamespace(
         status="pending", source=secret, target=Target(position=100, profile=secret)
     )
@@ -436,36 +416,18 @@ async def test_diagnostics_allowlist_and_bounded_history(hass, fake_runtime):
         "roof", "target", Target(position=100, direction="reverse"), expires_at=5000
     )
     fake_runtime.last_commands["roof"] = {"target": {"on": True}, "at": 4000, "secret": secret}
-    fake_runtime.history = [
-        {
-            "resource_id": "roof",
-            "source": secret,
-            "status": "pending",
-            "target": {"position": 100, "direction": secret, "secret": secret},
-            "at": i,
-        }
-        for i in range(120)
-    ]
     result = await async_get_config_entry_diagnostics(
         hass, SimpleNamespace(runtime_data=fake_runtime)
     )
     text = json.dumps(result)
     assert secret not in text and "Private roof" not in text and "cover.secret_room" not in text
     assert '"roof"' not in text and '"morning"' not in text
-    assert result["faulted"] and len(result["history"]) == 100
+    assert result["faulted"]
+    assert "history" not in result and "trace" not in result
     assert result["shadow_locked"] is True
-    assert result["trace"]["enabled"] is True
-    assert result["trace"]["healthy"] is False
-    assert result["trace"]["durable_sequence"] == 20
-    assert result["trace"]["queued_records"] == 4
-    assert "records" not in result["trace"] and "path" not in result["trace"]
-    assert fake_runtime.trace_health.call_count == 1
-    assert result["history"][0]["at"] == 20
-    assert len(fake_runtime.history) == 120  # download is read-only
     fake_runtime.async_request.assert_not_awaited()
     assert len(result["resources"]) == 4 and len(result["policies"]) == 1
     fake_runtime.manual.return_value = ManualLease("roof", "hands_off")
-    fake_runtime.history = [{"status": secret, "target": secret, "at": secret}]
     fake_runtime.observations = {}
     fake_runtime.requirement_results = {}
     fake_runtime.resources["roof"]["kind"] = secret
@@ -473,7 +435,6 @@ async def test_diagnostics_allowlist_and_bounded_history(hass, fake_runtime):
         hass, SimpleNamespace(runtime_data=fake_runtime)
     )
     assert secret not in json.dumps(result)
-    assert result["history"][0]["status"] == "unknown"
 
 
 async def test_native_input_and_return_diagnostics_preserve_bounded_state_without_names(

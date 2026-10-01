@@ -57,7 +57,7 @@ async def async_add_physical_cover(hass):
 
 
 def operator_entry(
-    *, resources=None, policies=None, requirements=None, intents=None, data=None, version=1
+    *, resources=None, policies=None, requirements=None, intents=None, data=None, version=3
 ):
     """Build genuine HA subentries with stable identifiers."""
     subentries = []
@@ -95,7 +95,7 @@ def operator_entry(
 
 
 async def async_setup_operator(hass, tmp_path, **kwargs):
-    """Load all production platforms and atomic persistence in a temporary directory."""
+    """Load all production platforms and native Store persistence in a temporary directory."""
     hass.config.config_dir = str(tmp_path)
     entry = operator_entry(**kwargs)
     entry.add_to_hass(hass)

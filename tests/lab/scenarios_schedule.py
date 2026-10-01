@@ -1,7 +1,7 @@
 """Schedule acceptance through the packaged integration's public HA boundaries.
 
 The timed-block test creates an actual native schedule helper. Occurrence tests
-use stable identifiers containing explicit DST offsets; they exercise durable
+use stable identifiers containing explicit DST offsets; they exercise persistent
 identity/absolute expiry across a real HA restart and timezone configuration
 change, without pretending to advance the container's wall clock through DST.
 """

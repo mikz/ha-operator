@@ -14,8 +14,8 @@ from scripts.evidence import (
     MUTANTS,
     OBSERVABILITY_FILES,
     OBSERVABILITY_SCENARIOS,
-    SHADOW_FILES,
-    SHADOW_SCENARIOS,
+    OBSERVE_FILES,
+    OBSERVE_SCENARIOS,
     SLEEP_FILES,
     SLEEP_SCENARIOS,
     STATIC_FILES,
@@ -85,6 +85,10 @@ def complete_evidence(tmp_path):
                 "cleanup": "passed",
                 "completed_at": 600,
                 "artifact_sha256": manifest["sha256"],
+                "integration_version": manifest["version"],
+                "release_manifest_sha256": digest(
+                    (root / "dist/ha_operator.manifest.json").read_bytes()
+                ),
             },
         )
         write_json(run / "sanitized.json", {"run_id": run.name, "completed_at": 601})
@@ -104,6 +108,10 @@ def complete_evidence(tmp_path):
             {
                 "ha_version": version,
                 "artifact_sha256": manifest["sha256"],
+                "integration_version": manifest["version"],
+                "release_manifest_sha256": digest(
+                    (root / "dist/ha_operator.manifest.json").read_bytes()
+                ),
                 "uv_lock_sha256": manifest["locks"]["uv.lock"],
                 "images": dict.fromkeys(("ha", "runner", "simulator"), "sha256:" + "0" * 64),
             },
@@ -166,48 +174,13 @@ def complete_evidence(tmp_path):
             "simulator-journal.json",
             "hap-accessories.json",
             "downloaded-diagnostics.json",
-            *sorted(SHADOW_FILES),
+            *sorted(OBSERVE_FILES),
         ):
             write_json(run / name, {})
         for name in ("hap-transcript.jsonl", "crash-events.jsonl", "ha.log"):
             (run / name).write_text("Bearer accidental-test-token\n")
         write_json(
-            run / "shadow-trace.json",
-            {
-                "schema": 1,
-                "pages": [
-                    {
-                        "schema": 1,
-                        "integration_version": manifest["version"],
-                        "component_sha256": manifest["component_sha256"],
-                        "config_hash": "a" * 64,
-                        "gap": False,
-                        "more": False,
-                        "health": {"enabled": True, "healthy": True},
-                        "records": [{"sequence": 1, "kind": "decision"}],
-                    }
-                ],
-            },
-        )
-        write_json(
-            run / "shadow-replay.json",
-            {
-                "schema": 1,
-                "status": "passed",
-                "complete": True,
-                "gaps": [],
-                "trace_sha256": digest((run / "shadow-trace.json").read_bytes()),
-                "artifact_sha256": manifest["sha256"],
-                "component_sha256": manifest["component_sha256"],
-                "config_hash": "a" * 64,
-                "provenance": "recorded_engine_snapshot_replay",
-                "clock": "recorded_epoch_per_snapshot",
-                "physical_effects": "not_observed",
-                "comparisons": [{"sequence": 1, "matched": True}],
-            },
-        )
-        write_json(
-            run / "shadow-lock-journal.json",
+            run / "observe-lock-effects.json",
             {
                 "schema": 1,
                 "status": "passed",
@@ -389,7 +362,7 @@ def test_bundle_contains_only_selected_successes_and_preserves_release_bytes(com
             if "observability" in run.name:
                 for name in OBSERVABILITY_FILES:
                     assert f"evidence/lab/{run.name}/{name}" in bundle.namelist()
-            for name in SHADOW_FILES:
+            for name in OBSERVE_FILES:
                 assert f"evidence/lab/{run.name}/{name}" in bundle.namelist()
 
 
@@ -567,11 +540,9 @@ def test_cleanup_and_matching_sanitization_are_required(complete_evidence):
 
 
 def test_shadow_and_cellar_scenarios_are_mandatory():
-    assert SHADOW_SCENARIOS == {
+    assert OBSERVE_SCENARIOS == {
         "SHADOW-LOCK-ZERO-COMMANDS",
         "SHADOW-LOCK-RELOAD-RESTART",
-        "SHADOW-TRACE-EXPORT",
-        "SHADOW-TRACE-REPLAY",
     }
     assert CELLAR_SCENARIOS == {
         "CELLAR-HAP-FAN-COMPOSITION",
@@ -582,10 +553,10 @@ def test_shadow_and_cellar_scenarios_are_mandatory():
         "CELLAR-FALLBACK-KEEP-EXTRACTING",
         "CELLAR-MANUAL-SCOPE-EXPIRY",
     }
-    assert SHADOW_SCENARIOS | CELLAR_SCENARIOS <= ALL_SCENARIOS
+    assert OBSERVE_SCENARIOS | CELLAR_SCENARIOS <= ALL_SCENARIOS
 
 
-@pytest.mark.parametrize("missing", sorted(SHADOW_SCENARIOS | CELLAR_SCENARIOS))
+@pytest.mark.parametrize("missing", sorted(OBSERVE_SCENARIOS | CELLAR_SCENARIOS))
 def test_missing_shadow_or_cellar_scenario_cannot_pass(complete_evidence, missing):
     run = next(path for path in complete_evidence["labs"] if path.name.endswith("all"))
     scenarios = json.loads((run / "scenarios.json").read_text())
@@ -594,7 +565,7 @@ def test_missing_shadow_or_cellar_scenario_cannot_pass(complete_evidence, missin
         build_evidence(**complete_evidence)
 
 
-@pytest.mark.parametrize("missing", sorted(SHADOW_FILES))
+@pytest.mark.parametrize("missing", sorted(OBSERVE_FILES))
 def test_shadow_and_cellar_evidence_must_exist(complete_evidence, missing):
     run = next(path for path in complete_evidence["labs"] if path.name.endswith("all"))
     (run / missing).unlink()
@@ -628,40 +599,6 @@ def test_cleanup_receipt_is_required(complete_evidence):
 @pytest.mark.parametrize(
     ("update", "error"),
     [
-        ({"status": "incomplete"}, "incomplete"),
-        ({"complete": False}, "incomplete"),
-        ({"gaps": ["missing session"]}, "incomplete"),
-        ({"trace_sha256": "old trace"}, "another trace"),
-        ({"artifact_sha256": "old archive"}, "another artifact"),
-        ({"component_sha256": "other installation"}, "another artifact"),
-        ({"provenance": "counterfactual"}, "recorded snapshots"),
-        ({"clock": "wall_clock"}, "recorded snapshots"),
-        ({"physical_effects": "observed"}, "unobserved physical effects"),
-        ({"comparisons": []}, "compare matching"),
-        ({"comparisons": [{"sequence": 1, "matched": False}]}, "compare matching"),
-    ],
-)
-def test_replay_rejects_partial_mismatched_or_overstated_evidence(complete_evidence, update, error):
-    run = next(path for path in complete_evidence["labs"] if path.name.endswith("all"))
-    change(run / "shadow-replay.json", **update)
-    with pytest.raises(ValueError, match=error):
-        build_evidence(**complete_evidence)
-
-
-def test_redaction_cannot_silently_invalidate_replay_provenance(complete_evidence):
-    run = next(path for path in complete_evidence["labs"] if path.name.endswith("all"))
-    change(run / "shadow-trace.json", accidental="Bearer sensitive-test-token")
-    change(
-        run / "shadow-replay.json",
-        trace_sha256=digest((run / "shadow-trace.json").read_bytes()),
-    )
-    with pytest.raises(ValueError, match="another trace"):
-        build_evidence(**complete_evidence)
-
-
-@pytest.mark.parametrize(
-    ("update", "error"),
-    [
         ({"provenance": "house_observed"}, "simulator-generated"),
         ({"physical_effects": "not_observed"}, "simulator-generated"),
         ({"scenarios": []}, "every required fault scenario"),
@@ -677,25 +614,6 @@ def test_cellar_receipt_requires_explicit_simulator_scope(complete_evidence, upd
 @pytest.mark.parametrize(
     "update",
     [
-        {"component_sha256": "other component"},
-        {"integration_version": "0.0.9"},
-        {"gap": True},
-        {"more": True},
-        {"health": {"enabled": True, "healthy": False}},
-    ],
-)
-def test_native_export_headers_must_match_release_and_be_healthy(complete_evidence, update):
-    run = next(path for path in complete_evidence["labs"] if path.name.endswith("all"))
-    trace = json.loads((run / "shadow-trace.json").read_text())
-    trace["pages"][0].update(update)
-    write_json(run / "shadow-trace.json", trace)
-    with pytest.raises(ValueError, match="Shadow trace pages"):
-        build_evidence(**complete_evidence)
-
-
-@pytest.mark.parametrize(
-    "update",
-    [
         {"command_count": 1},
         {"events": [{"kind": "command"}]},
         {"boundaries": ["locked", "reload"]},
@@ -705,7 +623,7 @@ def test_native_export_headers_must_match_release_and_be_healthy(complete_eviden
 )
 def test_lock_receipt_must_prove_no_commands_at_all_lifecycle_boundaries(complete_evidence, update):
     run = next(path for path in complete_evidence["labs"] if path.name.endswith("all"))
-    change(run / "shadow-lock-journal.json", **update)
+    change(run / "observe-lock-effects.json", **update)
     with pytest.raises(ValueError, match="zero commands through reload and restart"):
         build_evidence(**complete_evidence)
 

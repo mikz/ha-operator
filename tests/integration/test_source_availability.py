@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from copy import deepcopy
 
 import pytest
 from homeassistant.components.fan import FanEntityFeature
@@ -70,7 +71,7 @@ async def test_source_outage_logs_once_and_preserves_durable_intent(hass, tmp_pa
     await async_activate(hass)
     await runtime.async_request("roof", target={"position": 65}, duration=60)
     await hass.async_block_till_done()
-    saved = runtime.store.state
+    saved = deepcopy(runtime._state)
     lease = runtime.manual("roof")
     observed = managed_id(hass, "sensor", key="observed")
     desired = managed_id(hass, "sensor", key="desired")
@@ -81,7 +82,7 @@ async def test_source_outage_logs_once_and_preserves_durable_intent(hass, tmp_pa
         await runtime.async_reconcile()
     assert hass.states.get(observed).state == "unavailable"
     assert float(hass.states.get(desired).state) == 65
-    assert runtime.store.state == saved and runtime.manual("roof") == lease
+    assert deepcopy(runtime._state) == saved and runtime.manual("roof") == lease
     attempts = dict(runtime.next_attempts)
     for _ in range(5):
         hass.states.async_set("cover.physical_roof", "unknown", attrs)
@@ -90,7 +91,7 @@ async def test_source_outage_logs_once_and_preserves_durable_intent(hass, tmp_pa
     assert hass.states.get(observed).state == "unknown"
     assert hass.states.get(managed_id(hass, "cover")).state == "unknown"
     assert runtime.next_attempts == attempts
-    assert runtime.store.state == saved and runtime.manual("roof") == lease
+    assert deepcopy(runtime._state) == saved and runtime.manual("roof") == lease
     assert raw.commands == [("position", 65)]
     messages = [record.getMessage() for record in caplog.records if record.levelno == logging.INFO]
     assert messages.count("Resource roof source is unavailable") == 1
@@ -100,7 +101,7 @@ async def test_source_outage_logs_once_and_preserves_durable_intent(hass, tmp_pa
     raw.async_write_ha_state()
     await hass.async_block_till_done()
     assert float(hass.states.get(observed).state) == 0
-    assert runtime.store.state == saved
+    assert deepcopy(runtime._state) == saved
     assert await hass.config_entries.async_unload(entry.entry_id)
 
 
@@ -146,19 +147,16 @@ async def test_reachable_cover_without_usable_feedback_is_unknown(hass, tmp_path
 
 
 @pytest.mark.parametrize(
-    "case,trace",
+    "case",
     [
-        ("cover_open", False),
-        ("cover_unknown", False),
-        ("cover_unknown", True),
-        ("fan", False),
-        ("confirmation", False),
-        ("policy_target", False),
+        "cover_open",
+        "cover_unknown",
+        "fan",
+        "confirmation",
+        "policy_target",
     ],
 )
-async def test_native_oversized_feedback_clears_stale_state_and_recovers(
-    hass, tmp_path, case, trace
-):
+async def test_native_oversized_feedback_clears_stale_state_and_recovers(hass, tmp_path, case):
     """Unusable raw scalars cannot abort setup or retain usable stale evidence."""
     raw = await async_add_physical_cover(hass)
     resources = requirements = policies = None
@@ -238,13 +236,12 @@ async def test_native_oversized_feedback_clears_stale_state_and_recovers(
     hass.config.config_dir = str(tmp_path)
     entry = operator_entry(resources=resources, requirements=requirements, policies=policies)
     entry.add_to_hass(hass)
-    hass.config_entries.async_update_entry(entry, options={"trace_enabled": trace})
     runtime = None
     try:
         assert await hass.config_entries.async_setup(entry.entry_id)
         await hass.async_block_till_done()
         runtime = entry.runtime_data
-        saved = runtime.store._path.read_bytes()
+        saved = deepcopy(runtime._state)
         # Initial malformed setup and valid -> malformed -> valid state events.
         for value in (10**399, valid, 10**399, valid):
             usable = value == valid
@@ -282,7 +279,7 @@ async def test_native_oversized_feedback_clears_stale_state_and_recovers(
                     desired = hass.states.get(managed_id(hass, "sensor", key="desired"))
                     assert desired.state == ("30.0" if usable else "unknown")
                     assert (runtime.decisions["roof"].target is not None) is usable
-            assert runtime.store._path.read_bytes() == saved
+            assert deepcopy(runtime._state) == saved
             assert runtime.fault is None
             assert ir.async_get(hass).async_get_issue(DOMAIN, f"storage_{entry.entry_id}") is None
             assert outputs == raw.commands == []

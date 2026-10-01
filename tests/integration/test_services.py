@@ -1,13 +1,12 @@
-"""Run public services through HA validation and real durable request admission."""
+"""Run public services through HA validation and request admission."""
 
 from __future__ import annotations
 
-import json
+from copy import deepcopy
 
 import pytest
-import voluptuous as vol
-from homeassistant.core import Context, SupportsResponse
-from homeassistant.exceptions import HomeAssistantError, ServiceValidationError, Unauthorized
+from homeassistant.core import SupportsResponse
+from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
 from homeassistant.helpers import entity_registry as er
 from homeassistant.setup import async_setup_component
 from homeassistant.util import dt as dt_util
@@ -52,17 +51,14 @@ async def call(hass, action, data=None, response=False):
 async def test_registration_and_missing_configuration(hass):
     assert await async_setup_component(hass, DOMAIN, {})
     assert set(hass.services.async_services()[DOMAIN]) == {
-        "seed_intents",
         "request",
         "release",
         "submit_occurrence",
         "skip_occurrence",
         "reconcile",
         "explain",
-        "export_trace",
     }
     assert hass.services.supports_response(DOMAIN, "explain") is SupportsResponse.ONLY
-    assert hass.services.supports_response(DOMAIN, "export_trace") is SupportsResponse.ONLY
     assert hass.services.supports_response(DOMAIN, "request") is SupportsResponse.OPTIONAL
     with pytest.raises(ServiceValidationError, match="Configure HA Operator"):
         await call(hass, "explain", response=True)
@@ -76,10 +72,10 @@ async def test_registration_and_missing_configuration(hass):
 
 async def test_observe_rejects_commands_and_allows_explanation(hass, integration):
     entry, raw = integration
-    before = entry.runtime_data.store.state
+    before = deepcopy(entry.runtime_data._state)
     with pytest.raises(ServiceValidationError, match="observe"):
         await call(hass, "request", {"resource_id": "roof", "target": {"position": 100}})
-    assert entry.runtime_data.store.state == before and raw.commands == []
+    assert deepcopy(entry.runtime_data._state) == before and raw.commands == []
     result = await call(hass, "explain", response=True)
     assert result["resources"]["roof"]["mode"] == "observe"
     assert result["resources"]["roof"]["observation"]["target"]["position"] == 0
@@ -87,7 +83,7 @@ async def test_observe_rejects_commands_and_allows_explanation(hass, integration
     assert raw.commands == []
 
 
-async def test_request_receipt_follows_real_atomic_file_and_release(hass, tmp_path, integration):
+async def test_request_response_tracks_runtime_and_release(hass, tmp_path, integration):
     entry, raw = integration
     await async_activate(hass)
     data = {
@@ -99,11 +95,7 @@ async def test_request_receipt_follows_real_atomic_file_and_release(hass, tmp_pa
     receipt = await call(hass, "request", data, response=True)
     assert receipt["accepted"] and receipt["request_id"] == "manual-001"
     assert receipt["resource_id"] == "roof"
-    snapshot = json.loads(
-        await hass.async_add_executor_job(
-            (tmp_path / f"ha_operator.{entry.entry_id}.json").read_text,
-        )
-    )["data"]
+    snapshot = deepcopy(entry.runtime_data._state)
     assert snapshot["manuals"]["roof"]["target"] == {"position": 70}
     assert snapshot["manuals"]["roof"]["expires_at"] == receipt["expires_at"]
     duplicate = await call(hass, "request", data, response=True)
@@ -200,13 +192,12 @@ async def test_occurrence_submit_response_suppression_and_no_catchup(hass, integ
 
 
 @pytest.mark.parametrize("action", ["submit_occurrence", "skip_occurrence"])
-async def test_oversized_occurrence_expiry_rejects_before_durable_admission(
+async def test_oversized_occurrence_expiry_rejects_before_admission(
     hass, integration, tmp_path, action
 ):
     entry, raw = integration
     await async_activate(hass)
-    path = tmp_path / f"ha_operator.{entry.entry_id}.json"
-    before = path.read_bytes()
+    before = deepcopy(entry.runtime_data._state)
     with pytest.raises(ServiceValidationError) as raised:
         await call(
             hass,
@@ -217,7 +208,7 @@ async def test_oversized_occurrence_expiry_rejects_before_durable_admission(
     assert raised.value.translation_key == "finite_number"
     assert raised.value.translation_placeholders == {"field": "expires_at"}
     await hass.async_block_till_done()
-    assert path.read_bytes() == before
+    assert entry.runtime_data._state == before
     assert entry.runtime_data.fault is None and raw.commands == []
     assert all(not task.done() for task in entry.runtime_data._tasks)
 
@@ -227,81 +218,3 @@ async def test_action_rejects_unloaded_entry(hass, integration):
     assert await hass.config_entries.async_unload(entry.entry_id)
     with pytest.raises(HomeAssistantError):
         await call(hass, "explain", {"config_entry_id": entry.entry_id}, response=True)
-
-
-async def test_trace_export_disabled_returns_no_records_and_does_not_actuate(hass, integration):
-    entry, raw = integration
-    result = await call(hass, "export_trace", response=True)
-    assert result["schema"] == 1
-    assert result["records"] == []
-    assert result["health"]["enabled"] is False
-    assert raw.commands == []
-    with pytest.raises(ServiceValidationError):
-        await call(hass, "export_trace")
-
-
-@pytest.mark.parametrize(
-    "data",
-    [
-        {"after": -1},
-        {"after": True},
-        {"after": 1.5},
-        {"after": "0"},
-        {"limit": 0},
-        {"limit": 1001},
-        {"limit": False},
-        {"limit": 1.2},
-        {"resource_id": "roof"},
-        {"entity_id": "cover.physical_roof"},
-    ],
-)
-async def test_trace_export_rejects_invalid_pagination_and_resource_targets(
-    hass, integration, data
-):
-    with pytest.raises(vol.Invalid):
-        await call(hass, "export_trace", data, response=True)
-
-
-async def test_trace_export_pages_use_durable_sequence_cursor(hass, integration):
-    entry, raw = integration
-    form = await hass.config_entries.options.async_init(entry.entry_id)
-    await hass.config_entries.options.async_configure(
-        form["flow_id"], {"trace_enabled": True, "shadow_lock": True}
-    )
-    await hass.async_block_till_done()
-    first = await call(hass, "export_trace", {"limit": 1}, response=True)
-    assert first["health"]["enabled"] is True
-    assert len(first["records"]) == 1
-    cursor = first["next_after"]
-    assert type(cursor) is int and cursor == first["records"][0]["sequence"]
-    second = await call(hass, "export_trace", {"after": cursor, "limit": 1000}, response=True)
-    assert all(record["sequence"] > cursor for record in second["records"])
-    assert first["config_hash"] == second["config_hash"]
-    assert "cover.physical_roof" not in json.dumps([first, second])
-    assert raw.commands == []
-
-
-async def test_trace_export_requires_admin(hass, integration, hass_read_only_user):
-    entry, raw = integration
-    with pytest.raises(Unauthorized):
-        await hass.services.async_call(
-            DOMAIN,
-            "export_trace",
-            {},
-            blocking=True,
-            return_response=True,
-            context=Context(user_id=hass_read_only_user.id),
-        )
-    assert raw.commands == []
-
-
-async def test_trace_export_accepts_admin(hass, integration, hass_admin_user):
-    result = await hass.services.async_call(
-        DOMAIN,
-        "export_trace",
-        {},
-        blocking=True,
-        return_response=True,
-        context=Context(user_id=hass_admin_user.id),
-    )
-    assert result["health"]["enabled"] is False

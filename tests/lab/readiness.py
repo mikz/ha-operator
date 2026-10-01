@@ -26,16 +26,15 @@ async def wait_native_tokens(page):
         await handle.dispose()
 
 
-async def wait_trace_ready(
+async def wait_operator_ready(
     ha,
     entry_id,
-    previous_session,
     *,
     locked,
-    timeout=30,  # noqa: ASYNC109 -- polling owns a bounded readiness deadline
+    timeout=30,  # noqa: ASYNC109 -- bounded native readiness polling
     interval=0.2,
 ):
-    """Require a new recorder instance, not a stale pre-reload loaded state."""
+    """Check loaded state and explanation after the awaited native reload."""
     deadline = time.monotonic() + timeout
     last = None
     while time.monotonic() < deadline:
@@ -43,20 +42,12 @@ async def wait_trace_ready(
         entry = next((item for item in entries if item["entry_id"] == entry_id), None)
         last = {"entry_state": entry.get("state") if entry else None}
         if entry is not None and entry.get("state") == "loaded":
-            result = await ha.service(
-                "ha_operator",
-                "export_trace",
-                {"config_entry_id": entry_id, "limit": 1},
-                response=True,
+            explained = await ha.service(
+                "ha_operator", "explain", {"config_entry_id": entry_id}, response=True
             )
-            health = result["service_response"]["health"]
-            last.update(enabled=health["enabled"], session_id=health["session_id"])
-            if health["enabled"] and health["session_id"] != previous_session:
-                explained = await ha.service(
-                    "ha_operator", "explain", {"config_entry_id": entry_id}, response=True
-                )
-                last["shadow_locked"] = explained["service_response"].get("shadow_locked")
-                if last["shadow_locked"] is locked:
-                    return health
+            result = explained["service_response"]
+            last["shadow_locked"] = result.get("shadow_locked")
+            if last["shadow_locked"] is locked:
+                return result
         await asyncio.sleep(interval)
-    raise AssertionError(f"Trace did not become ready after native reload: {last!r}")
+    raise AssertionError(f"Operator did not become ready after native reload: {last!r}")

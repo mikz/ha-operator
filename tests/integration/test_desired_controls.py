@@ -1,9 +1,7 @@
 """Exercise desired controls, follower permissions and migration through native HA."""
 
 import asyncio
-import json
-import threading
-from pathlib import Path
+from copy import deepcopy
 from unittest.mock import patch
 
 import pytest
@@ -12,6 +10,7 @@ from homeassistant.components.switch import SwitchEntity
 from homeassistant.core import Context, callback
 from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
 from homeassistant.helpers import entity_registry as er
+from homeassistant.helpers.storage import WriteError
 from homeassistant.setup import async_setup_component
 
 from custom_components.ha_operator.const import DOMAIN
@@ -19,7 +18,7 @@ from custom_components.ha_operator.const import DOMAIN
 from .helpers import managed_id, operator_entry
 
 
-async def setup(hass, tmp_path, *, trace=False, manual=False):
+async def setup(hass, tmp_path, *, manual=False):
     hass.config.config_dir = str(tmp_path)
     calls = []
 
@@ -73,7 +72,6 @@ async def setup(hass, tmp_path, *, trace=False, manual=False):
         },
     )
     entry.add_to_hass(hass)
-    hass.config_entries.async_update_entry(entry, options={"trace_enabled": trace})
     assert await hass.config_entries.async_setup(entry.entry_id)
     await hass.async_block_till_done()
     return entry, calls
@@ -91,7 +89,7 @@ async def command(hass, key, on):
 
 
 def saved(entry, tmp_path):
-    return json.loads(Path(tmp_path, f"ha_operator.{entry.entry_id}.json").read_text())["data"]
+    return deepcopy(entry.runtime_data._state)
 
 
 async def test_native_desired_controls_and_followers(hass, tmp_path):
@@ -118,9 +116,9 @@ async def test_native_desired_controls_and_followers(hass, tmp_path):
         managed_id(hass, "switch", "room_mode", "desired"),
     )
     await command(hass, "room_mode", False)
-    revision = saved(entry, tmp_path)["revision"]
+    unchanged = saved(entry, tmp_path)
     await command(hass, "global_mode", True)
-    assert saved(entry, tmp_path)["revision"] == revision  # repeated ON performs no save
+    assert saved(entry, tmp_path) == unchanged  # repeated ON does not change held intent
     assert runtime.desired_value("room_mode") is False
     await command(hass, "global_mode", False)
     assert runtime.desired_value("room_mode") is False
@@ -152,37 +150,6 @@ async def test_follower_manual_admission_is_rejected(hass, tmp_path, action):
         else:
             await getattr(runtime, f"async_{action}")("room")
     assert saved(entry, tmp_path) == before
-    assert calls == []
-    await hass.config_entries.async_unload(entry.entry_id)
-
-
-async def test_migration_seed_and_restart_do_not_replay_edge(hass, tmp_path):
-    entry, calls = await setup(hass, tmp_path)
-    runtime = entry.runtime_data
-    await hass.services.async_call(
-        DOMAIN, "seed_intents", {"values": {"global_mode": True, "room_mode": False}}, blocking=True
-    )
-    assert calls == []
-    assert saved(entry, tmp_path)["intents"] == {"global_mode": True, "room_mode": False}
-    assert await hass.config_entries.async_reload(entry.entry_id)
-    await hass.async_block_till_done()
-    runtime = entry.runtime_data
-    assert runtime.desired_value("global_mode") is True
-    assert runtime.desired_value("room_mode") is False
-    for key in runtime.resources:
-        await runtime.async_set_mode(key, "live")
-    await hass.async_block_till_done()
-    assert calls == [("switch.raw_central", "turn_on")]
-    with pytest.raises(ServiceValidationError, match="observe"):
-        await runtime.async_seed_intents({"global_mode": False})
-    await hass.config_entries.async_unload(entry.entry_id)
-
-
-@pytest.mark.parametrize("values", [{}, {"unknown": True}, {"room_mode": "on"}, []])
-async def test_seed_rejects_invalid_values(hass, tmp_path, values):
-    entry, calls = await setup(hass, tmp_path)
-    with pytest.raises(ServiceValidationError):
-        await entry.runtime_data.async_seed_intents(values)
     assert calls == []
     await hass.config_entries.async_unload(entry.entry_id)
 
@@ -220,55 +187,34 @@ async def test_public_group_routes_only_to_desired_source(hass, tmp_path):
     await hass.config_entries.async_unload(entry.entry_id)
 
 
-async def test_failed_save_publishes_no_new_mode_or_actuation(hass, tmp_path):
+async def test_desired_controls_actuate_despite_native_save_failure(hass, tmp_path):
     entry, calls = await setup(hass, tmp_path)
-    for key in entry.runtime_data.resources:
-        await entry.runtime_data.async_set_mode(key, "live")
-    before = saved(entry, tmp_path)
-    with patch("custom_components.ha_operator.storage.save_json", side_effect=OSError("failed")):
-        with pytest.raises(HomeAssistantError, match="persistence"):
-            await command(hass, "global_mode", True)
-    await hass.async_block_till_done()
-    assert saved(entry, tmp_path) == before
-    assert calls == []
-    assert (
-        hass.states.get(managed_id(hass, "switch", "global_mode", "desired")).state == "unavailable"
-    )
+    runtime = entry.runtime_data
+    for key in runtime.resources:
+        await runtime.async_set_mode(key, "live")
+    with patch("homeassistant.helpers.storage.write_utf8_file", side_effect=WriteError("failed")):
+        await command(hass, "global_mode", True)
+        await runtime._store.async_save(runtime._state)
+    assert runtime.fault is None and runtime.desired_value("global_mode") is True
+    assert set(calls) == {("switch.raw_central", "turn_on"), ("switch.raw_room", "turn_on")}
     await hass.config_entries.async_unload(entry.entry_id)
 
 
-async def test_concurrent_commands_use_durable_order_and_cancelled_save_is_drained(hass, tmp_path):
+async def test_concurrent_desired_commands_keep_loop_order_and_reload_without_edge(hass, tmp_path):
     entry, _ = await setup(hass, tmp_path)
     runtime = entry.runtime_data
-    from custom_components.ha_operator import storage
-
-    original = storage.save_json
-    entered, release = threading.Event(), threading.Event()
-
-    def slow(*args, **kwargs):
-        entered.set()
-        assert release.wait(5)
-        return original(*args, **kwargs)
-
-    with patch.object(storage, "save_json", slow):
-        first = asyncio.create_task(runtime.async_set_desired("global_mode", True))
-        await asyncio.wait_for(asyncio.to_thread(entered.wait, 5), 6)
-        second = asyncio.create_task(runtime.async_set_desired("room_mode", False))
-        first.cancel()
-        await asyncio.sleep(0)
-        assert not first.done()
-        assert runtime.desired_value("global_mode") is False
-        release.set()
-        with pytest.raises(asyncio.CancelledError):
-            await first
-        await second
+    await asyncio.gather(
+        runtime.async_set_desired("global_mode", True),
+        runtime.async_set_desired("room_mode", False),
+    )
     assert saved(entry, tmp_path)["intents"] == {"global_mode": True, "room_mode": False}
+    assert await hass.config_entries.async_reload(entry.entry_id)
+    runtime = entry.runtime_data
+    assert runtime.desired_value("global_mode") is True
     assert runtime.desired_value("room_mode") is False
     await hass.config_entries.async_unload(entry.entry_id)
     with pytest.raises(HomeAssistantError, match="unloaded"):
         await runtime.async_set_desired("room_mode", True)
-    with pytest.raises(HomeAssistantError, match="unloaded"):
-        await runtime.async_seed_intents({"room_mode": True})
 
 
 async def test_coupled_context_and_renamed_source_links(hass, tmp_path):
@@ -347,20 +293,11 @@ async def test_manual_to_follower_conversion_retires_old_controls(hass, tmp_path
     await hass.config_entries.async_unload(entry.entry_id)
 
 
-async def test_desired_sources_export_through_strict_trace_schema(hass, tmp_path):
-    from tests.lab.shadow_trace import validate_trace
-
-    entry, _ = await setup(hass, tmp_path, trace=True)
-    runtime = entry.runtime_data
-    await runtime.async_seed_intents({"global_mode": True, "room_mode": False})
-    await command(hass, "global_mode", False)
-    await command(hass, "global_mode", True)
-    exported = await runtime.async_export_trace(limit=500)
-    assert not exported["more"]
-    trace = validate_trace(exported)
-    assert trace.report["replay_complete"], trace.report
-    assert {"set_desired", "seed_intents"} <= {
-        record["data"].get("action") for record in trace.records if record["kind"] == "admission"
-    }
-    assert "global_mode" not in json.dumps(exported)
-    await hass.config_entries.async_unload(entry.entry_id)
+@pytest.mark.parametrize(("key", "value"), [("missing", True), ("global_mode", 1)])
+async def test_invalid_desired_command_preserves_current_pair(hass, tmp_path, key, value):
+    entry, _ = await setup(hass, tmp_path)
+    before = deepcopy(entry.runtime_data._state)
+    with pytest.raises(ServiceValidationError):
+        await entry.runtime_data.async_set_desired(key, value)
+    assert entry.runtime_data._state == before
+    assert await hass.config_entries.async_unload(entry.entry_id)

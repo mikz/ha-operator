@@ -1,6 +1,10 @@
 # Architecture
 
-HA Operator coordinates durable intent inside Home Assistant. Native config
+This document defines the approved architecture for the
+[baseline alignment](baseline-alignment.md). Implementation and validation are
+tracked separately; this contract does not establish release readiness.
+
+HA Operator coordinates desired state inside Home Assistant. Native config
 subentries define resources, policies, requirements, and desired controls. Managed entities accept
 commands, while adapters observe and control the underlying entities. The
 simulator belongs only to the test lab and is excluded from the release archive.
@@ -9,7 +13,7 @@ simulator belongs only to the test lab and is excluded from the release archive.
 
 | State | Meaning | Example |
 | --- | --- | --- |
-| Request | A durable source's desired outcome, validity, and ownership. | A ventilation policy requests position 40. |
+| Request | A source's desired outcome, validity, and ownership. | A ventilation policy requests position 40. |
 | Effective target | The resolver's selected target after priority, leases, restrictions, and requirements. | A manual lease selects position 20. |
 | Last command | The most recent dispatched attempt, with its request generation and timing. | Position 20 was sent at a recorded timestamp. |
 | Observation | The underlying entity's reported position, power, direction, availability, or movement. | The window still reports position 0. |
@@ -21,7 +25,7 @@ confirmation.
 
 ```mermaid
 flowchart LR
-  P[Policies and occurrences] --> D[Durable requests]
+  P[Policies and occurrences] --> D[Requests]
   M[Managed entities and manual actions] --> D
   D --> R[Resolver]
   Q[Requirements and evidence] --> R
@@ -45,7 +49,7 @@ Home Assistant provides a
 [native config-entry and subentry lifecycle](https://developers.home-assistant.io/docs/config_entries_index/).
 
 Observe mode rejects new manual requests and occurrence submissions. It preserves
-existing durable intent for inspection while suppressing all actuation, including
+existing intent for inspection while suppressing all actuation, including
 STOP. Explicit skips can still consume an occurrence without dispatching it.
 
 Native subentry deletion does not protect references from policies or
@@ -80,7 +84,7 @@ occurrences without disabling future occurrences after reenablement.
 A target lease supplies a manual target until its deadline or explicit release.
 A hands-off lease suppresses dispatch without replacing the policy requests.
 Leases can be finite or explicitly indefinite. Expiry and release reevaluate
-durable intent rather than restoring a cached command.
+current intent rather than restoring a cached command.
 
 Managed commands and explicit integration actions establish ownership. Raw
 telemetry does not establish that a person acted. Context IDs can help explain
@@ -96,17 +100,17 @@ See the [versioned cover service capability checks](https://github.com/home-assi
 For a live resource, STOP first invalidates pending commands and establishes
 hands-off state in memory, then attempts physical STOP and persists a hands-off
 lease for the resource's default manual duration. Physical STOP takes precedence
-over storage health. If a prior adapter service is still in flight, the STOP
+over saving the lease. If a prior adapter service is still in flight, the STOP
 action also waits for it to finish and sends a final STOP, provided the STOP
-lease has not been superseded. Acknowledgement waits for both this barrier and
-the durable save. This orders work tracked through HA's awaited service boundary;
-it cannot establish what a device does with an internal command queue after its
-service returns.
+lease has not been superseded. The action waits for this service barrier and
+schedules persistence through native Store behavior. This orders work tracked
+through HA's awaited service boundary. It cannot establish what a device does
+with an internal command queue after its service returns.
 
-A failed save inhibits the running process but leaves that new lease unsaved;
-an abrupt crash can lose it and restore older durable intent.
-Expose the save failure rather than promising that physical STOP persisted a
-manual override. Observe mode still permits no STOP actuation.
+A save failure does not inhibit the running process. An abrupt crash can lose
+an unsaved lease and restore older saved intent. Store logging exposes write
+failures.
+Observe mode still permits no STOP actuation.
 
 ## Retry and concurrency
 
@@ -121,8 +125,8 @@ intent. Lack of progress must remain visible in status and explanation.
 
 Each asynchronous command sequence must recheck its request generation before
 each effect. Supersession, STOP, hands-off, observe mode, expiry, unload, and
-storage failure invalidate pending work. A queued or delayed attempt cannot act
-on a target that was valid only when the sequence began.
+invalid configuration invalidate pending work. A queued or delayed attempt
+cannot act on a target that was valid only when the sequence began.
 
 Routine input changes join one HA-tracked batch per event-loop turn. A dependency
 map wakes affected actuator workers, including every resource participating in a
@@ -137,7 +141,7 @@ alone does not suppress that traffic. Unload cancels and drains the pending batc
 Explicit commands, STOP, and current pre-dispatch checks retain their direct paths.
 
 See [desired controls](desired-controls.md) for held boolean intent, source-only
-followers, atomic ON attachment, and migration. This logical control layer never
+followers, ON attachment, and configuration. This logical control layer never
 promotes output feedback into a new request.
 
 ## Adapter contracts
@@ -159,7 +163,7 @@ A native fan requires a configured default target. Its bare turn-on needs a
 speed in that default or a usable observed speed when speed control is supported.
 For relay fans, bare turn-on uses the configured default profile unless a valid
 manual lease retains selected fan settings. A direction-only command while the
-committed fan target is off leaves every output off and durably retains the
+selected fan target is off leaves every output off and retains the
 selected direction in that lease's `fan_settings`. A later ON or speed command
 can use it, including after restart. Expiry or release ends that preference.
 These saved settings are intent, not observed direction or airflow. Native fans
@@ -201,57 +205,62 @@ and diagnosis; extraction continues. Requirement configuration has no extractor
 shutdown output. Automatic resumption of valid intent after manual-lease expiry
 still applies.
 
-## Persistence and acknowledgement
+## Native persistence and request responses
 
-Accepted manual leases, occurrence receipts and skips, modes, policy enablement,
-and request-id receipts survive restart. They use UTC deadlines rather than
-in-memory countdowns. Derived decisions and observed actuator state are rebuilt
-from committed intent and fresh HA state.
+Use Home Assistant's `helpers.storage.Store` for runtime state in `.storage`.
+Save modes, policy enablement, desired values, leases, absolute deadlines,
+occurrence suppression, duplicate-request records, policy inputs, and return
+monitors. Derived decisions and actuator observations are rebuilt from loaded
+intent and usable HA state. Expire stale state without extending deadlines.
+Reload must not synthesize a desired control's OFF-to-ON attachment edge.
 
-The intent store serializes updates against the latest committed revision.
-It validates and writes a complete versioned envelope before publishing the new
-state. A rejected mutation leaves committed state unchanged. A failed write or
-invalid existing store inhibits dispatch and exposes a fault. Recovery requires
-an explicit reload after the cause is corrected; silently treating a corrupt or
-missing expected store as empty would lose acknowledged intent.
+Runtime transitions update in-memory state and use native Store persistence.
+Keep request validation, same-run ordering, and duplicate-request behavior.
+State saves use Store’s ordinary delayed lifecycle; command responses confirm
+runtime acceptance. Write failures follow Store behavior. Invalid configuration or unusable restored data still
+fails setup with an actionable Repair. See the
+[HA storage implementation](https://github.com/home-assistant/core/blob/2026.9.3/homeassistant/helpers/storage.py).
 
-Awaiting HA's standard `Store.async_save` is insufficient for this acceptance
-contract: its implementation can catch write errors or defer work while stopping.
-The strict writer uses failure-propagating atomic JSON writes instead. A failure
-after rename can still leave an uncertain commit outcome; recovery must inspect
-the saved envelope rather than asserting that no bytes reached disk. See the
-[HA storage implementation](https://github.com/home-assistant/core/blob/2026.9.3/homeassistant/helpers/storage.py)
-and [atomic JSON writer](https://github.com/home-assistant/core/blob/2026.9.3/homeassistant/helpers/json.py).
+The upgrade preserves config entries, subentries, and entity IDs. It discards
+the obsolete schema 1–3 runtime snapshot without importing any state. The first
+Store starts with configured desired defaults, policy controls enabled by default,
+and resources in observe mode. Old leases, occurrences, modes, and deadlines
+are not resumed. Live activation belongs to the deployment procedure after
+checking these defaults. After a deployment backup exists, remove only this
+entry's obsolete snapshot and operator trace files. Never load obsolete files
+as a fallback or keep a second writer active.
 
-Durability has two separate boundaries:
+Validate HomeKit commands against independent simulator effects and HA
+observations. Acknowledgements do not establish physical completion. Reconcile uncertain attempts using
+idempotent targets, duplicate-request suppression, and fresh observations;
+use observations to resolve device state after restart.
 
-- The integration must await durable storage before reporting an accepted
-  request through its own request path.
-- A client protocol acknowledgement is not a storage receipt or physical
-  completion. HomeKit and other bridges can acknowledge a characteristic write
-  before downstream work is durably committed. The bridge cannot strengthen the
-  integration's contract. HA's [HomeKit accessory implementation](https://github.com/home-assistant/core/blob/2026.9.3/homeassistant/components/homekit/accessories.py)
-  schedules service work with a context that has no user ID.
+## Native observability
 
-HomeKit acceptance therefore needs a transcript correlated with the durable
-receipt and simulator journal. Successful pairing, an HTTP response, or an
-optimistic client tile is insufficient. Do not promise exactly-once physical
-effects across a process crash; use idempotent targets, durable request IDs, and
-fresh observations to reconcile uncertain attempts.
+Native entities expose Desired, Observed, Reason, and expiry values.
+`explain` includes the effective target and last dispatched command.
+Recorder history, Activity/Logbook, the integration logger, downloadable
+diagnostics, and `explain` provide the normal investigation paths. Dashboard
+values must open the underlying entity's details and history.
+
+Observe/live modes and the global shadow lock control actuation. Playwright traces remain browser test artifacts.
+The lab uses independent simulator effects and HA state and Recorder assertions;
+it does not introduce a replacement audit framework.
 
 ## Lifecycle and release evidence
 
-Startup loads durable intent, waits for usable entity observations, and
+Startup loads native Store state, waits for usable entity observations, and
 reconciles. It does not replay missed or consumed occurrences. Unload removes
 subscriptions, cancels resource work, and drains outstanding adapter services and
-persistence before replacement workers start. Cancellation waits for an already
-running service, including its executor work, instead of abandoning that I/O.
+native Store lifecycle work before replacement workers start. Cancellation waits
+for an already running service, including its executor work, instead of
+abandoning that I/O.
 Reload and recovery must not leave duplicate listeners or independent writers.
 
 HA's [restored entity state](https://github.com/home-assistant/core/blob/2026.9.3/homeassistant/helpers/restore_state.py)
 is historical data. It is neither fresh actuator feedback nor the operator's
-accepted-intent transaction. Restore absolute lease deadlines from the intent
-store and obtain usable current observations independently.
+runtime persistence. Restore absolute lease deadlines from native Store and
+obtain usable current observations independently.
 
 The bound producer must supply physical feedback after restart. HA's
 `last_reported` timestamp records publication to HA; it does not prove a hardware

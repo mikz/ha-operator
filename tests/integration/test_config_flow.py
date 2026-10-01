@@ -477,21 +477,21 @@ async def test_initial_shadow_options_are_explicit_and_saved_separately(hass):
     ):
         form = await hass.config_entries.flow.async_init(DOMAIN, context={"source": "user"})
         defaults = form["data_schema"]({})
-        assert defaults == {"trace_enabled": False, "shadow_lock": False, "trace_entities": []}
+        assert defaults == {
+            "shadow_lock": False,
+        }
         created = await hass.config_entries.flow.async_configure(
             form["flow_id"],
-            {"trace_enabled": True, "shadow_lock": True, "trace_entities": ["switch.cellar_power"]},
+            {
+                "shadow_lock": True,
+            },
         )
         assert created["data"] == {}
         assert created["options"] == {
-            "trace_enabled": True,
             "shadow_lock": True,
-            "trace_entities": ["switch.cellar_power"],
         }
         assert created["result"].options == {
-            "trace_enabled": True,
             "shadow_lock": True,
-            "trace_entities": ["switch.cellar_power"],
         }
 
 
@@ -504,13 +504,13 @@ async def test_options_preserve_existing_settings_and_reload_once(hass, tmp_path
     form = await hass.config_entries.options.async_init(entry.entry_id)
     assert form["step_id"] == "init"
     assert form["data_schema"]({}) == {
-        "trace_enabled": False,
         "shadow_lock": False,
-        "trace_entities": [],
     }
     result = await hass.config_entries.options.async_configure(
         form["flow_id"],
-        {"trace_enabled": True, "shadow_lock": True, "trace_entities": ["switch.cellar_power"]},
+        {
+            "shadow_lock": True,
+        },
     )
     assert result["type"] is FlowResultType.CREATE_ENTRY
     await hass.async_block_till_done()
@@ -518,22 +518,23 @@ async def test_options_preserve_existing_settings_and_reload_once(hass, tmp_path
     assert entry.runtime_data is not original
     assert len(entry.update_listeners) == 1
     assert entry.options == {
-        "trace_enabled": True,
         "shadow_lock": True,
-        "trace_entities": ["switch.cellar_power"],
     }
     form = await hass.config_entries.options.async_init(entry.entry_id)
     assert form["data_schema"]({}) == {
-        "trace_enabled": True,
         "shadow_lock": True,
-        "trace_entities": ["switch.cellar_power"],
     }
     # The explicit false values must survive the native form submission.
     result = await hass.config_entries.options.async_configure(
-        form["flow_id"], {"trace_enabled": False, "shadow_lock": False, "trace_entities": []}
+        form["flow_id"],
+        {
+            "shadow_lock": False,
+        },
     )
     await hass.async_block_till_done()
-    assert entry.options == {"trace_enabled": False, "shadow_lock": False, "trace_entities": []}
+    assert entry.options == {
+        "shadow_lock": False,
+    }
     assert len(entry.update_listeners) == 1
     assert await hass.config_entries.async_unload(entry.entry_id)
 
@@ -541,17 +542,18 @@ async def test_options_preserve_existing_settings_and_reload_once(hass, tmp_path
 async def test_options_preserve_unrelated_entry_options(hass):
     entry = MockConfigEntry(
         domain=DOMAIN,
-        options={"future_setting": "preserved", "trace_entities": ["switch.cellar_power"]},
+        options={
+            "future_setting": "preserved",
+        },
     )
     entry.add_to_hass(hass)
     form = await hass.config_entries.options.async_init(entry.entry_id)
-    assert form["data_schema"]({})["trace_entities"] == ["switch.cellar_power"]
+    assert form["data_schema"]({}) == {"shadow_lock": False}
     result = await hass.config_entries.options.async_configure(
-        form["flow_id"], {"trace_enabled": True, "shadow_lock": True}
+        form["flow_id"], {"shadow_lock": True}
     )
     assert result["data"]["future_setting"] == "preserved"
     assert entry.options["future_setting"] == "preserved"
-    assert entry.options["trace_entities"] == ["switch.cellar_power"]
 
 
 async def _lock_options_without_reloading(hass, entry):
@@ -561,9 +563,7 @@ async def _lock_options_without_reloading(hass, entry):
     assert entry.runtime_data.mode("roof") == "observe"
 
 
-async def test_unlock_saves_observe_before_publishing_options(hass, tmp_path):
-    import json
-
+async def test_unlock_sets_observe_before_publishing_options(hass, tmp_path):
     from .helpers import async_add_physical_cover, async_setup_operator
 
     await async_add_physical_cover(hass)
@@ -571,13 +571,12 @@ async def test_unlock_saves_observe_before_publishing_options(hass, tmp_path):
     runtime = entry.runtime_data
     await runtime.async_set_mode("roof", "live")
     await _lock_options_without_reloading(hass, entry)
-    assert runtime.store.state["modes"]["roof"] == "live"
+    assert runtime._state["modes"]["roof"] == "live"
     form = await hass.config_entries.options.async_init(entry.entry_id)
     observed_at_option_update = []
 
     async def inspect_committed_state(hass, changed_entry):
-        contents = await hass.async_add_executor_job(runtime.store._path.read_text)
-        observed_at_option_update.append(json.loads(contents)["data"]["modes"]["roof"])
+        observed_at_option_update.append(runtime._state["modes"]["roof"])
 
     with patch.object(entry, "update_listeners", [inspect_committed_state]):
         result = await hass.config_entries.options.async_configure(
@@ -587,7 +586,7 @@ async def test_unlock_saves_observe_before_publishing_options(hass, tmp_path):
     assert result["type"] is FlowResultType.CREATE_ENTRY
     assert entry.options["shadow_lock"] is False
     assert observed_at_option_update == ["observe"]
-    assert runtime.store.state["modes"]["roof"] == "observe"
+    assert runtime._state["modes"]["roof"] == "observe"
     assert runtime.mode("roof") == "observe"  # Old instance retains its latch until reload.
     assert await hass.config_entries.async_reload(entry.entry_id)
     await hass.async_block_till_done()
@@ -595,8 +594,8 @@ async def test_unlock_saves_observe_before_publishing_options(hass, tmp_path):
     assert await hass.config_entries.async_unload(entry.entry_id)
 
 
-async def test_failed_unlock_save_keeps_options_locked(hass, tmp_path, monkeypatch):
-    from custom_components.ha_operator import storage
+async def test_unlock_uses_observe_even_when_native_save_fails(hass, tmp_path):
+    from homeassistant.helpers.storage import WriteError
 
     from .helpers import async_add_physical_cover, async_setup_operator
 
@@ -604,22 +603,18 @@ async def test_failed_unlock_save_keeps_options_locked(hass, tmp_path, monkeypat
     entry = await async_setup_operator(hass, tmp_path)
     await entry.runtime_data.async_set_mode("roof", "live")
     await _lock_options_without_reloading(hass, entry)
-    saved_options = dict(entry.options)
     form = await hass.config_entries.options.async_init(entry.entry_id)
-
-    def failed_write(*_):
-        raise OSError("simulated disk full")
-
-    monkeypatch.setattr(storage, "_write_snapshot", failed_write)
-    result = await hass.config_entries.options.async_configure(
-        form["flow_id"], {"shadow_lock": False, "trace_enabled": True}
-    )
-    assert result["type"] is FlowResultType.FORM
-    assert result["errors"] == {"base": "unlock_persistence_failed"}
-    assert result["data_schema"]({})["shadow_lock"] is True
-    assert dict(entry.options) == saved_options
+    with patch(
+        "homeassistant.helpers.storage.write_utf8_file", side_effect=WriteError("disk full")
+    ):
+        result = await hass.config_entries.options.async_configure(
+            form["flow_id"], {"shadow_lock": False}
+        )
+        await hass.async_block_till_done()
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    assert entry.options["shadow_lock"] is False
     assert entry.runtime_data.mode("roof") == "observe"
-    assert entry.runtime_data.store.state["modes"]["roof"] == "live"
+    assert entry.runtime_data.fault is None
     assert await hass.config_entries.async_unload(entry.entry_id)
 
 
@@ -642,7 +637,7 @@ async def test_unlock_without_available_runtime_keeps_lock(hass, loaded):
 
 
 @pytest.mark.parametrize("change", ["state", "runtime"])
-async def test_unlock_rechecks_runtime_after_save(hass, tmp_path, monkeypatch, change):
+async def test_unlock_rechecks_runtime_after_preparation(hass, tmp_path, monkeypatch, change):
     from homeassistant.config_entries import ConfigEntryState
 
     from .helpers import async_add_physical_cover, async_setup_operator
@@ -672,41 +667,17 @@ async def test_unlock_rechecks_runtime_after_save(hass, tmp_path, monkeypatch, c
     assert await hass.config_entries.async_unload(entry.entry_id)
 
 
-async def test_cancelled_unlock_waits_for_write_but_keeps_options_locked(
-    hass, tmp_path, monkeypatch
-):
-    import asyncio
-    import threading
-
-    from custom_components.ha_operator import storage
-
+async def test_unlock_closed_runtime_keeps_lock(hass, tmp_path):
     from .helpers import async_add_physical_cover, async_setup_operator
 
     await async_add_physical_cover(hass)
     entry = await async_setup_operator(hass, tmp_path)
-    await entry.runtime_data.async_set_mode("roof", "live")
     await _lock_options_without_reloading(hass, entry)
-    entered, release = threading.Event(), threading.Event()
-    write = storage._write_snapshot
-
-    def delayed_write(path, state):
-        entered.set()
-        assert release.wait(5)
-        write(path, state)
-
-    monkeypatch.setattr(storage, "_write_snapshot", delayed_write)
+    await entry.runtime_data.async_close()
     form = await hass.config_entries.options.async_init(entry.entry_id)
-    pending = asyncio.create_task(
-        hass.config_entries.options.async_configure(form["flow_id"], {"shadow_lock": False})
+    result = await hass.config_entries.options.async_configure(
+        form["flow_id"], {"shadow_lock": False}
     )
-    try:
-        assert await asyncio.wait_for(asyncio.to_thread(entered.wait, 5), 6)
-        pending.cancel()
-        assert entry.options["shadow_lock"] is True
-    finally:
-        release.set()
-    with pytest.raises(asyncio.CancelledError):
-        await pending
+    assert result["errors"] == {"base": "unlock_unavailable"}
     assert entry.options["shadow_lock"] is True
-    assert entry.runtime_data.store.state["modes"]["roof"] == "observe"
     assert await hass.config_entries.async_unload(entry.entry_id)

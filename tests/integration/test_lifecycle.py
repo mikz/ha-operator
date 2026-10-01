@@ -3,16 +3,16 @@
 from __future__ import annotations
 
 import json
+from copy import deepcopy
 from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
 from homeassistant.config_entries import ConfigEntryState
-from homeassistant.exceptions import ConfigEntryError, ServiceValidationError
+from homeassistant.exceptions import ServiceValidationError
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers import issue_registry as ir
-from homeassistant.setup import async_setup_component
 
 import custom_components.ha_operator as integration
 from custom_components.ha_operator import (
@@ -33,12 +33,18 @@ from .helpers import (
 )
 
 
+def native_path(tmp_path, entry):
+    directory = tmp_path / ".storage"
+    directory.mkdir(exist_ok=True)
+    return directory / f"ha_operator.{entry.entry_id}"
+
+
 async def test_real_setup_observe_registry_and_reload(hass, tmp_path):
     raw = await async_add_physical_cover(hass)
     entry = await async_setup_operator(hass, tmp_path)
     registry = er.async_get(hass)
     cover_id = managed_id(hass, "cover")
-    assert entry.state is ConfigEntryState.LOADED and entry.data["initialized"]
+    assert entry.state is ConfigEntryState.LOADED
     assert hass.states.get(cover_id).attributes["current_position"] == 0
     assert hass.states.get(managed_id(hass, "select", key="mode")).state == "observe"
     records = [
@@ -163,15 +169,15 @@ async def test_saved_manual_metadata_fails_readiness_before_workers(hass, tmp_pa
     hass.config.config_dir = str(tmp_path)
     entry = operator_entry(data={"initialized": True})
     entry.add_to_hass(hass)
-    saved = storage._empty_state()
+    saved = storage.empty_state()
     saved["manuals"]["roof"] = {
         "mode": "hands_off",
         "target": None,
         "expires_at": None,
         field: value,
     }
-    path = tmp_path / f"ha_operator.{entry.entry_id}.json"
-    contents = json.dumps({"version": 3, "data": saved})
+    path = native_path(tmp_path, entry)
+    contents = json.dumps({"version": 1, "data": saved})
     await hass.async_add_executor_job(path.write_text, contents)
     try:
         assert not await hass.config_entries.async_setup(entry.entry_id)
@@ -189,15 +195,15 @@ async def test_saved_manual_metadata_fails_readiness_before_workers(hass, tmp_pa
 
 
 @pytest.mark.parametrize("record_kind", ["manual", "target", "occurrence", "receipt"])
-async def test_oversized_saved_manual_expiry_fails_readiness_before_workers(
+async def test_unparseable_native_numbers_use_core_corruption_recovery(
     hass, tmp_path, monkeypatch, record_kind
 ):
-    """An unrepresentable saved deadline must use the native storage Repair boundary."""
+    """Core handles JSON numbers outside its parser range as storage corruption."""
     raw = await async_add_physical_cover(hass)
     hass.config.config_dir = str(tmp_path)
     entry = operator_entry(data={"initialized": True})
     entry.add_to_hass(hass)
-    saved = storage._empty_state()
+    saved = storage.empty_state()
     if record_kind == "manual":
         saved["manuals"]["roof"] = {"mode": "hands_off", "target": None, "expires_at": 10**399}
     elif record_kind == "target":
@@ -219,8 +225,8 @@ async def test_oversized_saved_manual_expiry_fails_readiness_before_workers(
             "fingerprint": "0" * 64,
             "receipt": {"request_id": "legacy", "resource_id": "roof", "expires_at": 10**399},
         }
-    path = tmp_path / f"ha_operator.{entry.entry_id}.json"
-    contents = json.dumps({"version": 3, "data": saved})
+    path = native_path(tmp_path, entry)
+    contents = json.dumps({"version": 1, "data": saved})
     await hass.async_add_executor_job(path.write_text, contents)
     setup_errors = []
     native_setup = integration.async_setup_entry
@@ -233,33 +239,23 @@ async def test_oversized_saved_manual_expiry_fails_readiness_before_workers(
             raise
 
     monkeypatch.setattr(integration, "async_setup_entry", capture_setup_error)
-    assert not await hass.config_entries.async_setup(entry.entry_id)
-    await hass.async_block_till_done()
-    assert entry.state is ConfigEntryState.SETUP_ERROR
+    assert await hass.config_entries.async_setup(entry.entry_id)
     runtime = entry.runtime_data
-    assert runtime._closed and not runtime._tasks and not runtime._unsubscribers
-    assert not runtime._timers and not runtime._listeners and runtime._deadline_timer is None
-    assert path.read_text() == contents and raw.commands == []
-    assert not any(entity.platform == DOMAIN for entity in er.async_get(hass).entities.values())
-    issue = ir.async_get(hass).async_get_issue(DOMAIN, f"storage_{entry.entry_id}")
-    assert len(setup_errors) == 1 and isinstance(setup_errors[0], ConfigEntryError), (
-        f"storage Repair={issue!r}; runtime fault={runtime.fault!r}"
-    )
-    assert setup_errors[0].translation_domain == DOMAIN
-    assert setup_errors[0].translation_key == "storage_error"
-    assert ir.async_get(hass).async_get_issue(DOMAIN, f"storage_{entry.entry_id}") is not None
+    assert runtime.mode("roof") == "observe" and runtime.fault is None
+    assert not setup_errors and raw.commands == []
+    assert list(path.parent.glob(path.name + ".corrupt.*"))
+    assert await hass.config_entries.async_unload(entry.entry_id)
 
 
 @pytest.mark.parametrize("field", ["duration", "expires_at", "position"])
 async def test_oversized_native_request_rejects_with_translated_validation_before_save(
     hass, tmp_path, field
 ):
-    """Reject oversized action numbers before durable admission with native validation."""
+    """Reject oversized action numbers before runtime admission with native validation."""
     raw = await async_add_physical_cover(hass)
     entry = await async_setup_operator(hass, tmp_path)
     await async_activate(hass)
-    path = tmp_path / f"ha_operator.{entry.entry_id}.json"
-    before = path.read_bytes()
+    before = deepcopy(entry.runtime_data._state)
     data = {"resource_id": "roof", "request_id": "oversized-action"}
     if field == "position":
         data.update(mode="target", target={"position": 10**399})
@@ -274,7 +270,7 @@ async def test_oversized_native_request_rejects_with_translated_validation_befor
         assert error.translation_domain == DOMAIN and error.translation_key == "finite_number"
         assert error.translation_placeholders == {"field": field}
         await hass.async_block_till_done()
-        assert path.read_bytes() == before
+        assert entry.runtime_data._state == before
         assert entry.runtime_data.fault is None and raw.commands == []
         assert len(entry.runtime_data._tasks) == 1
         assert all(not task.done() for task in entry.runtime_data._tasks)
@@ -287,7 +283,7 @@ async def test_oversized_native_request_rejects_with_translated_validation_befor
 async def test_far_future_deadline_keeps_native_request_and_timestamp_presentation_safe(
     hass, tmp_path, deadline
 ):
-    """Unrepresentable dates must not interrupt durable native requests."""
+    """Unrepresentable dates must not interrupt native requests."""
     raw = await async_add_physical_cover(hass)
     entry = await async_setup_operator(hass, tmp_path)
     registry = er.async_get(hass)
@@ -295,8 +291,6 @@ async def test_far_future_deadline_keeps_native_request_and_timestamp_presentati
     registry.async_update_entity(next_attempt_id, disabled_by=None)
     assert await hass.config_entries.async_reload(entry.entry_id)
     await async_activate(hass)
-    path = tmp_path / f"ha_operator.{entry.entry_id}.json"
-    before = json.loads(path.read_text())
     try:
         response = await hass.services.async_call(
             DOMAIN,
@@ -311,10 +305,9 @@ async def test_far_future_deadline_keeps_native_request_and_timestamp_presentati
             return_response=True,
         )
         await hass.async_block_till_done()
-        after = json.loads(path.read_text())
+        after = {"data": entry.runtime_data._state}
         assert response["expires_at"] == deadline
         assert response["accepted"] is True
-        assert after["data"]["revision"] == before["data"]["revision"] + 1
         assert after["data"]["manuals"]["roof"]["expires_at"] == deadline
         assert after["data"]["requests"]["far-future-expiry"]["receipt"] == {
             "request_id": "far-future-expiry",
@@ -338,10 +331,10 @@ async def test_saved_finite_far_future_expiry_preserves_native_timestamp_entitie
     hass.config.config_dir = str(tmp_path)
     entry = operator_entry(data={"initialized": True})
     entry.add_to_hass(hass)
-    saved = storage._empty_state()
+    saved = storage.empty_state()
     saved["manuals"]["roof"] = {"mode": "hands_off", "target": None, "expires_at": 1e100}
-    path = tmp_path / f"ha_operator.{entry.entry_id}.json"
-    contents = json.dumps({"version": 3, "data": saved})
+    path = native_path(tmp_path, entry)
+    contents = json.dumps({"version": 1, "data": saved})
     await hass.async_add_executor_job(path.write_text, contents)
     try:
         assert await hass.config_entries.async_setup(entry.entry_id)
@@ -379,15 +372,15 @@ async def test_legacy_manual_metadata_and_falsey_hands_off_targets_load_unchange
     hass.config.config_dir = str(tmp_path)
     entry = operator_entry(data={"initialized": True})
     entry.add_to_hass(hass)
-    saved = storage._empty_state()
+    saved = storage.empty_state()
     saved["manuals"]["roof"] = {
         "mode": "hands_off",
         "target": target,
         "expires_at": None,
         **metadata,
     }
-    path = tmp_path / f"ha_operator.{entry.entry_id}.json"
-    contents = json.dumps({"version": 3, "data": saved})
+    path = native_path(tmp_path, entry)
+    contents = json.dumps({"version": 1, "data": saved})
     await hass.async_add_executor_job(path.write_text, contents)
     try:
         assert await hass.config_entries.async_setup(entry.entry_id)
@@ -406,44 +399,22 @@ async def test_legacy_manual_metadata_and_falsey_hands_off_targets_load_unchange
         await hass.async_block_till_done()
 
 
-async def test_corrupt_storage_fails_setup_with_repair_and_public_diagnostics(
-    hass, tmp_path, hass_client
-):
+async def test_native_corrupt_json_uses_home_assistant_recovery(hass, tmp_path):
     raw = await async_add_physical_cover(hass)
     hass.config.config_dir = str(tmp_path)
-    entry = operator_entry(data={"initialized": True})
+    entry = operator_entry()
     entry.add_to_hass(hass)
-    path = tmp_path / f"ha_operator.{entry.entry_id}.json"
+    path = native_path(tmp_path, entry)
     await hass.async_add_executor_job(path.write_text, "not json")
-    assert await async_setup_component(hass, "diagnostics", {})
-    assert not await hass.config_entries.async_setup(entry.entry_id)
-    await hass.async_block_till_done()
-    assert entry.state is ConfigEntryState.SETUP_ERROR
-    runtime = entry.runtime_data
-    assert runtime._closed and not runtime._tasks and not runtime._unsubscribers
-    assert not any(entity.platform == DOMAIN for entity in er.async_get(hass).entities.values())
-    assert ir.async_get(hass).async_get_issue(DOMAIN, f"storage_{entry.entry_id}") is not None
-    client = await hass_client()
-    response = await client.get(f"/api/diagnostics/config_entry/{entry.entry_id}")
-    assert response.status == 200
-    diagnostics = (await response.json())["data"]
-    assert diagnostics["faulted"] and "physical_roof" not in json.dumps(diagnostics)
-    assert diagnostics["runtime_state"] == "closed"
-    del entry.runtime_data
-    response = await client.get(f"/api/diagnostics/config_entry/{entry.entry_id}")
-    assert response.status == 200
-    absent = (await response.json())["data"]
-    assert absent["runtime_state"] == "absent" and absent["faulted"]
-    assert path.read_text() == "not json"
-    assert raw.commands == []
-    # Recovery is explicit; the retained Repair clears only on a healthy reload.
-    await hass.async_add_executor_job(
-        path.write_text, json.dumps({"version": 3, "data": storage._empty_state()})
-    )
-    assert await hass.config_entries.async_reload(entry.entry_id)
+    assert await hass.config_entries.async_setup(entry.entry_id)
     assert entry.state is ConfigEntryState.LOADED
-    assert ir.async_get(hass).async_get_issue(DOMAIN, f"storage_{entry.entry_id}") is None
-    assert raw.commands == []
+    assert entry.runtime_data.mode("roof") == "observe" and raw.commands == []
+    assert list(path.parent.glob(path.name + ".corrupt.*"))
+    issues = ir.async_get(hass).issues
+    assert any(
+        domain == "homeassistant" and issue.startswith("storage_corruption_")
+        for domain, issue in issues
+    )
     assert await hass.config_entries.async_unload(entry.entry_id)
 
 
@@ -455,15 +426,15 @@ async def test_registry_failure_after_start_quiesces_and_preserves_original_erro
     hass.config.config_dir = str(tmp_path)
     entry = operator_entry(data={"initialized": True})
     entry.add_to_hass(hass)
-    saved = storage._empty_state()
+    saved = storage.empty_state()
     saved["modes"]["roof"] = "live"
     saved["manuals"]["roof"] = {
         "mode": "target",
         "target": {"position": 80},
         "expires_at": None,
     }
-    path = tmp_path / f"ha_operator.{entry.entry_id}.json"
-    await hass.async_add_executor_job(path.write_text, json.dumps({"version": 3, "data": saved}))
+    path = native_path(tmp_path, entry)
+    await hass.async_add_executor_job(path.write_text, json.dumps({"version": 1, "data": saved}))
     registry = er.async_get(hass)
     monkeypatch.setattr(
         registry, "async_get_entity_id", lambda *args: (_ for _ in ()).throw(ValueError("registry"))
@@ -499,36 +470,22 @@ async def test_unusable_downstream_feedback_does_not_fail_setup(hass, tmp_path, 
     assert await hass.config_entries.async_unload(entry.entry_id)
 
 
-@pytest.mark.parametrize("failure", ["missing", "records", "write"])
-async def test_authoritative_initialization_failure_preserves_snapshot_and_quiesces(
-    hass, tmp_path, monkeypatch, failure
-):
+async def test_invalid_native_records_fail_setup_without_overwrite(hass, tmp_path):
     raw = await async_add_physical_cover(hass)
     hass.config.config_dir = str(tmp_path)
-    entry = operator_entry(data={"initialized": failure != "write"})
+    entry = operator_entry()
     entry.add_to_hass(hass)
-    path = tmp_path / f"ha_operator.{entry.entry_id}.json"
-    contents = None
-    if failure == "records":
-        state = storage._empty_state()
-        state["manuals"]["roof"] = {"mode": "target", "target": {}, "expires_at": None}
-        contents = json.dumps({"version": 3, "data": state})
-        await hass.async_add_executor_job(path.write_text, contents)
-    elif failure == "write":
-
-        def fail_write(*args):
-            raise OSError("disk unavailable")
-
-        monkeypatch.setattr(storage, "_write_snapshot", fail_write)
+    path = native_path(tmp_path, entry)
+    state = storage.empty_state()
+    state["manuals"]["roof"] = {"mode": "target", "target": {}, "expires_at": None}
+    contents = json.dumps({"version": 1, "data": state})
+    await hass.async_add_executor_job(path.write_text, contents)
     assert not await hass.config_entries.async_setup(entry.entry_id)
-    assert entry.state is ConfigEntryState.SETUP_ERROR
     runtime = entry.runtime_data
+    assert entry.state is ConfigEntryState.SETUP_ERROR
     assert runtime._closed and not runtime._tasks and not runtime._unsubscribers
-    assert runtime.fault == "storage_error"
-    assert ir.async_get(hass).async_get_issue(DOMAIN, f"storage_{entry.entry_id}") is not None
-    assert path.read_text() == contents if contents is not None else not path.exists()
-    assert raw.commands == []
-    assert not any(entity.platform == DOMAIN for entity in er.async_get(hass).entities.values())
+    assert ir.async_get(hass).async_get_issue(DOMAIN, f"storage_{entry.entry_id}")
+    assert path.read_text() == contents and raw.commands == []
 
 
 async def test_programming_error_during_initialization_is_not_storage_fault(
@@ -550,24 +507,22 @@ async def test_programming_error_during_initialization_is_not_storage_fault(
     assert raw.commands == []
 
 
-async def test_failed_shadow_locked_start_does_not_attempt_abort_persistence(
-    hass, tmp_path, monkeypatch
-):
+async def test_invalid_shadow_locked_start_does_not_save_on_abort(hass, tmp_path, monkeypatch):
     raw = await async_add_physical_cover(hass)
     hass.config.config_dir = str(tmp_path)
-    entry = operator_entry(data={"initialized": True})
+    entry = operator_entry()
     entry.add_to_hass(hass)
     hass.config_entries.async_update_entry(entry, options={"shadow_lock": True})
-    path = tmp_path / f"ha_operator.{entry.entry_id}.json"
-    await hass.async_add_executor_job(path.write_text, "corrupt")
+    path = native_path(tmp_path, entry)
+    contents = json.dumps({"version": 1, "data": {"manuals": []}})
+    await hass.async_add_executor_job(path.write_text, contents)
 
     async def forbidden_write(*args, **kwargs):
-        pytest.fail("Failed authoritative startup must not attempt cleanup persistence")
+        pytest.fail("Failed startup must not save runtime defaults")
 
-    monkeypatch.setattr(storage.IntentStore, "async_update", forbidden_write)
+    monkeypatch.setattr(runtime_module.Store, "async_save", forbidden_write)
     assert not await hass.config_entries.async_setup(entry.entry_id)
-    assert entry.state is ConfigEntryState.SETUP_ERROR
-    assert path.read_text() == "corrupt" and raw.commands == []
+    assert path.read_text() == contents and raw.commands == []
     assert entry.runtime_data._closed
 
 
@@ -612,41 +567,87 @@ async def test_migration_and_device_removal_contract(hass, tmp_path):
     assert await async_remove_config_entry_device(
         hass, entry, SimpleNamespace(config_entry_id="other")
     )
-    assert await async_migrate_entry(hass, entry)
-    assert entry.version == 2
-    assert await async_migrate_entry(hass, operator_entry(version=2))
-    assert not await async_migrate_entry(hass, operator_entry(version=3))
+    assert await async_migrate_entry(hass, entry) and entry.version == 3
+    assert not await async_migrate_entry(hass, operator_entry(version=4))
     assert raw.commands == []
     assert await hass.config_entries.async_unload(entry.entry_id)
 
 
-async def test_native_input_config_migration_preserves_all_settings_and_ids(hass):
+@pytest.mark.parametrize("version", [1, 2])
+async def test_upgrade_discards_runtime_keeps_config_ids_and_scopes_cleanup(
+    hass, tmp_path, version
+):
+    await async_add_physical_cover(hass)
+    hass.config.config_dir = str(tmp_path)
     entry = operator_entry(
-        version=1,
+        version=version,
         data={"initialized": True, "custom": "preserved"},
+        intents={"sleep": {"name": "Sleep", "initial_value": False}},
         policies={
-            "cold": {
-                "name": "Cold",
-                "resource_id": "roof",
+            "baseline": {
+                "name": "Baseline",
                 "kind": "state",
+                "resource_id": "roof",
                 "target": {"position": 7},
-                "eligibility_entity": "input_boolean.ready",
             }
         },
     )
     entry.add_to_hass(hass)
-    hass.config_entries.async_update_entry(entry, options={"shadow_lock": True})
-    data, options, subentries = entry.data, entry.options, entry.subentries
-    identifiers = {key: item.subentry_id for key, item in subentries.items()}
-    assert await async_migrate_entry(hass, entry)
-    assert entry.version == 2 and entry.minor_version == 1
-    assert entry.data is data and entry.options is options and entry.subentries is subentries
-    assert {key: item.subentry_id for key, item in entry.subentries.items()} == identifiers
-    assert "return_monitor" not in entry.subentries["roof"].data
-    assert "input" not in entry.subentries["cold"].data
-    assert entry.subentries["cold"].data["eligibility_entity"] == "input_boolean.ready"
-    assert await async_migrate_entry(hass, entry)
+    hass.config_entries.async_update_entry(
+        entry,
+        options={
+            "shadow_lock": True,
+            "trace_enabled": True,
+            "trace_entities": ["sensor.old"],
+            "custom": 42,
+        },
+    )
+    subentries = entry.subentries
+    old_file = tmp_path / f"ha_operator.{entry.entry_id}.json"
+    old_trace = tmp_path / f"ha_operator_trace.{entry.entry_id}"
+    old_trace.mkdir()
+    (old_trace / "trace-0.jsonl").write_text("obsolete")
+    old_file.write_text("invalid legacy JSON must never be read")
+    unrelated = tmp_path / "ha_operator.other.json"
+    unrelated.write_text("retain")
+    unrelated_trace = tmp_path / "ha_operator_trace.other"
+    unrelated_trace.mkdir()
+    retained_trace = unrelated_trace / "trace-0.jsonl"
+    retained_trace.write_text("retain trace")
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    assert entry.version == 3 and entry.minor_version == 1
+    assert entry.data == {"custom": "preserved"}
+    assert entry.options == {"shadow_lock": True, "custom": 42}
     assert entry.subentries is subentries
+    assert not old_file.exists() and not old_trace.exists()
+    assert unrelated.read_text() == "retain"
+    assert retained_trace.read_text() == "retain trace"
+    assert entry.runtime_data.desired_value("sleep") is False
+    assert entry.runtime_data.policy_enabled("baseline") is True
+    assert entry.runtime_data.mode("roof") == "observe"
+    assert entry.runtime_data._state["manuals"] == {}
+    assert entry.runtime_data._state["occurrences"] == {}
+    identifier = managed_id(hass, "cover")
+    assert await hass.config_entries.async_reload(entry.entry_id)
+    assert managed_id(hass, "cover") == identifier
+    assert entry.subentries is subentries
+    assert not old_file.exists() and not old_trace.exists()
+    assert retained_trace.read_text() == "retain trace"
+    assert await hass.config_entries.async_unload(entry.entry_id)
+
+
+async def test_cleanup_failure_does_not_mark_entry_migrated(hass, tmp_path, monkeypatch):
+    hass.config.config_dir = str(tmp_path)
+    entry = operator_entry(version=2)
+    entry.add_to_hass(hass)
+
+    def fail(*args, **kwargs):
+        raise OSError("cleanup failed")
+
+    monkeypatch.setattr(integration.Path, "unlink", fail)
+    with pytest.raises(OSError, match="cleanup failed"):
+        await async_migrate_entry(hass, entry)
+    assert entry.version == 2
 
 
 async def test_entry_update_listener_reloads_exactly_once(hass, tmp_path):
@@ -680,15 +681,15 @@ async def test_native_request_composes_legacy_indefinite_fan_without_expiry(hass
         data={"initialized": True},
     )
     entry.add_to_hass(hass)
-    saved = storage._empty_state()
+    saved = storage.empty_state()
     saved["modes"]["vent"] = "live"
     saved["manuals"]["vent"] = {
         "mode": "target",
         "target": {"on": True, "percentage": 75, "direction": "forward"},
         "request_id": "legacy",
     }
-    path = tmp_path / f"ha_operator.{entry.entry_id}.json"
-    await hass.async_add_executor_job(path.write_text, json.dumps({"version": 3, "data": saved}))
+    path = native_path(tmp_path, entry)
+    await hass.async_add_executor_job(path.write_text, json.dumps({"version": 1, "data": saved}))
     try:
         assert await hass.config_entries.async_setup(entry.entry_id)
         await hass.async_block_till_done()
@@ -706,3 +707,32 @@ async def test_native_request_composes_legacy_indefinite_fan_without_expiry(hass
     finally:
         if entry.state is ConfigEntryState.LOADED:
             await hass.config_entries.async_unload(entry.entry_id)
+
+
+async def test_upgrade_unlinks_trace_symlink_without_deleting_target(hass, tmp_path):
+    hass.config.config_dir = str(tmp_path)
+    entry = operator_entry(version=2)
+    entry.add_to_hass(hass)
+    target = tmp_path / "unrelated"
+    target.mkdir()
+    retained = target / "trace-0.jsonl"
+    retained.write_text("retain")
+    obsolete = tmp_path / f"ha_operator_trace.{entry.entry_id}"
+    obsolete.symlink_to(target, target_is_directory=True)
+    assert await async_migrate_entry(hass, entry)
+    assert entry.version == 3 and not obsolete.is_symlink()
+    assert retained.read_text() == "retain"
+
+
+async def test_native_entry_removal_removes_store_only(hass, tmp_path):
+    await async_add_physical_cover(hass)
+    entry = await async_setup_operator(hass, tmp_path)
+    await async_activate(hass)
+    await entry.runtime_data.async_request("roof", target={"position": 50})
+    assert await hass.config_entries.async_unload(entry.entry_id)
+    path = native_path(tmp_path, entry)
+    assert path.exists()
+    unrelated = path.parent / "ha_operator.other"
+    unrelated.write_text("retain")
+    await integration.async_remove_entry(hass, entry)
+    assert not path.exists() and unrelated.read_text() == "retain"

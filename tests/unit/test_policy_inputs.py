@@ -213,7 +213,7 @@ def test_finish_before_admission_suppresses_but_accepted_finish_keeps_expiry():
     assert tick(finished.state, now=1860).state.phase == "expired"
 
 
-def test_finish_captured_during_admission_save_invalidates_later_published_request():
+def test_finish_captured_before_admission_rejects_later_request():
     finished = timer(accepted().state, "finish", now=60, accepted_at_capture=False)
     assert finished.state.phase == "suppressed"
     assert finished.occurrence_changes == (OccurrenceChange("suppress", "first", 1860),)

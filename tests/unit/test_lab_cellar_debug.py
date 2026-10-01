@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from tests.lab import runner, scenarios_cellar, scenarios_shadow
+from tests.lab import runner, scenarios_cellar, scenarios_observe
 
 
 @pytest.mark.asyncio
@@ -22,7 +22,7 @@ async def test_standalone_cellar_confirms_extraction_before_running_cases(monkey
     observe = AsyncMock()
     cases = AsyncMock()
     monkeypatch.setattr(runner, "eventually", wait)
-    monkeypatch.setattr(scenarios_shadow, "observe", observe)
+    monkeypatch.setattr(scenarios_observe, "observe", observe)
     monkeypatch.setattr(scenarios_cellar, "run_cellar_scenarios", cases)
     await scenarios_cellar.run_cellar_debug(lab)
 

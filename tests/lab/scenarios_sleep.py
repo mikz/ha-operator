@@ -134,15 +134,19 @@ async def run_sleep(lab):
                 in {f"{resource}_{key}" for key in ("managed", "manual", "expiry", "release")}
                 for item in registry
             )
+        assert (await ha.state(source_entities["central"]))["state"] == "off"
+        assert (await ha.state(source_entities["room"]))["state"] == "off"
+        evidence["configured_defaults"] = {"central": False, "room": False}
         before = (await lab.sim(path="/health"))["journal_seq"]
-        await ha.service("ha_operator", "seed_intents", {"values": {central: True, room: False}})
+        await ha.service("switch", "turn_on", {"entity_id": source_entities["central"]})
+        await ha.service("switch", "turn_off", {"entity_id": source_entities["room"]})
         await asyncio.sleep(1)
         assert not [
             row for row in await lab.journal() if row["seq"] > before and row["kind"] == "command"
         ]
         assert (await ha.state(source_entities["central"]))["state"] == "on"
         assert (await ha.state(source_entities["room"]))["state"] == "off"
-        evidence["seed"] = {"central": True, "room": False, "zero_commands": True}
+        evidence["initial_commands"] = {"central": True, "room": False, "zero_commands": True}
         for key, entry_id in group_entries.items():
             await ha.options(
                 entry_id, {"entities": [source_entities[key]], "hide_members": False, "all": False}
@@ -172,7 +176,7 @@ async def run_sleep(lab):
             )
         evidence.setdefault("confirmed_pairs", []).append({"central": central_on, "room": room_on})
 
-    async with lab.scenario("SLEEP-MIGRATION-SEED-LIVE"):
+    async with lab.scenario("SLEEP-FRESH-COMMANDS-LIVE"):
         for entities in resource_entities.values():
             await ha.service(
                 "select", "select_option", {"entity_id": entities["mode"], "option": "live"}
@@ -188,16 +192,6 @@ async def run_sleep(lab):
             allow_error=True,
         )
         assert response["status"] >= 400
-        response = await ha.request(
-            "POST",
-            "/api/services/ha_operator/seed_intents",
-            {
-                "values": {room: True},
-            },
-            allow_error=True,
-        )
-        assert response["status"] >= 400
-
     async with lab.scenario("SLEEP-SOURCE-ONLY-GROUP-ATTACHMENT"):
 
         async def public(key, on):
@@ -296,10 +290,12 @@ async def run_sleep(lab):
             # STATUS_WAIT can leave the first driver bound to the same port.
             return await eventually(
                 diagnostics,
-                lambda data: data["status"] == 1
-                and (
-                    entities is None
-                    or {item["entity_id"] for item in data["bridge"].values()} == set(entities)
+                lambda data: (
+                    data["status"] == 1
+                    and (
+                        entities is None
+                        or {item["entity_id"] for item in data["bridge"].values()} == set(entities)
+                    )
                 ),
             )
 

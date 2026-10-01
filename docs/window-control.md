@@ -19,7 +19,7 @@ available and live, and submits requests with one absolute deadline. Use a new
 request ID for a new command. An idempotent retry must reuse its original ID and
 absolute deadline.
 
-Each admission is durable independently. A later failure does not undo earlier
+Each request is accepted independently. A later failure does not undo earlier
 admissions. The dispatcher reports partial failure, and accepted requests retain
 their deadlines. Its restart mode cancels remaining script work; it cannot
 revoke requests already accepted by Operator.
@@ -27,7 +27,7 @@ revoke requests already accepted by Operator.
 Callers must check the dispatcher's `accepted` response before continuing to
 other device or helper actions. An HA script stopped with `error: true` can return
 an empty service response. An HTTP success response alone does not establish
-durable acceptance.
+request acceptance.
 
 Use explicit request scripts for position presets. Native cover scenes can skip
 their service call when the observed state already matches. This can leave an
@@ -61,18 +61,14 @@ becomes eligible. Restored or optimistic device feedback does not confirm moveme
 
 Reloading or unloading the integration while Home Assistant runs interrupts
 pending and accepted timer episodes. Operator closes admissions, drains active
-writes, and saves their suppression in one snapshot before a replacement starts.
-It records each interruption in the Logbook. Enabling a disabled diagnostic entity
-can cause Home Assistant to reload the entry and interrupt a timer episode.
-Manual leases, fan settings, and sleep intent survive this boundary.
+services, and saves current suppression through Store before replacement workers
+start. Activity records each interruption. Enabling a disabled diagnostic entity
+can reload the entry and interrupt a timer episode. Manual leases, fan settings,
+and sleep intent survive ordinary reload.
 
-If the interruption save fails, Home Assistant reports a failed unload and keeps
-the old views with **Control status** set to `fault`. Operator stops its workers
-and rejects commands. Home Assistant cannot reload an entry in this failed-unload
-state. Resolve the storage problem and restart Home Assistant. A crash or failed
-write leaves only the last durable snapshot available; it can still contain the
-previous accepted request. The failure itself is not a saved suppression.
-An event captured but not committed before shutdown is not a durable withdrawal.
+Store logs write failures through Home Assistant. Crash recovery uses the last
+saved state, so a command or withdrawal made before a delayed save can be lost.
+The SIGKILL lab cases wait for a normal save before crashing HA.
 
 Cover resources can also configure **Return confirmation**: the highest target
 to monitor and the warning delay in seconds. Confirmation uses raw position and
@@ -91,7 +87,7 @@ occurrence. A paused marker distinguishes resume from active restart. It is save
 before withdrawal, so a failed withdrawal cannot turn resume into a new opening.
 Startup reconciles that marker with the restored timer state and invalidates
 unadmitted qualifications. A timestamp rejects events captured before readiness.
-Operator restores already accepted occurrences through its own durable store.
+Operator restores already accepted occurrences through Home Assistant Store.
 
 The temperature recipe keeps a qualification deadline in a native helper. A
 fresh numeric HA report is required after startup. Unknown values preserve the
@@ -109,9 +105,9 @@ The timer record starts as `{"v":1,"phase":"idle","initialized_at":UTC_EPOCH}`;
 use `"paused"` when the existing timer is paused. Set `UTC_EPOCH` to the actual
 initialization time. Unknown or malformed timer records inhibit admission.
 
-Native helper restoration is weaker than Operator's atomic persistence. Helpers
-track qualification and alert clocks, not durable command acceptance. Only the
-Operator response establishes acceptance of the request or occurrence.
+Native helpers track qualification and alert clocks. The Operator response
+establishes runtime acceptance of a request or occurrence. Ordinary Store saves
+preserve state for reload; a service response does not wait for a disk save.
 
 The confirmation helper reads raw positions individually. It reports true when
 any known raw position exceeds the configured threshold, false only when every

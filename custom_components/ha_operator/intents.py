@@ -45,7 +45,7 @@ def validate_graph(intents: Mapping[str, IntentConfig]) -> None:
 def apply_command(
     values: dict[str, bool], intents: Mapping[str, IntentConfig], key: str, on: bool
 ) -> None:
-    """Apply one explicit command and rising edges within one durable transaction.
+    """Apply one explicit command and rising edges in one state update.
 
     A first explicit ON also establishes its dependents. Initialization and
     restoration do not call this function. Repeated ON does not reattach a child

@@ -1,4 +1,5 @@
 """Common Home Assistant fixtures."""
+
 import pytest
 
 

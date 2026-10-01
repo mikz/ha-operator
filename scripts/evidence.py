@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -38,7 +39,7 @@ INITIAL_SCENARIOS = {"LAB-ONBOARDING", "LAB-NATIVE-CONFIG-FLOW", "LAB-RESOURCE-C
 SLEEP_SCENARIOS = INITIAL_SCENARIOS | {
     "SLEEP-EXISTING-GROUPS-HAP",
     "SLEEP-NATIVE-SETUP-OBSERVE",
-    "SLEEP-MIGRATION-SEED-LIVE",
+    "SLEEP-FRESH-COMMANDS-LIVE",
     "SLEEP-SOURCE-ONLY-GROUP-ATTACHMENT",
     "SLEEP-RESTART-DETACHED-PAIR",
     "SLEEP-HAP-PUBLIC-IDENTITY",
@@ -81,7 +82,7 @@ WINDOW_SCENARIOS = INITIAL_SCENARIOS | {
     "WINDOW-NATIVE-RETURN-DEMO",
     "WINDOW-NATIVE-RETURN-UNKNOWN-VIRTUAL",
     "LAB-HAP-PAIR",
-    "LAB-HAP-RESTART-DURABLE",
+    "LAB-HAP-RESTART-SAVED",
     "LAB-DIAGNOSTICS",
 }
 WINDOW_FILES = {
@@ -94,7 +95,7 @@ WINDOW_FILES = {
     "window-native-recovered.png",
     "crash-events.jsonl",
     "hap-transcript.jsonl",
-    "window-hap-durable-receipt.json",
+    "window-hap-request-result.json",
 }
 OBSERVABILITY_SCENARIOS = INITIAL_SCENARIOS | {
     "OBS-NATIVE-ENTITIES",
@@ -114,11 +115,9 @@ OBSERVABILITY_FILES = {
     "gold-native-mode.png",
     "gold-native-dom.json",
 }
-SHADOW_SCENARIOS = {
+OBSERVE_SCENARIOS = {
     "SHADOW-LOCK-ZERO-COMMANDS",
     "SHADOW-LOCK-RELOAD-RESTART",
-    "SHADOW-TRACE-EXPORT",
-    "SHADOW-TRACE-REPLAY",
 }
 CELLAR_SCENARIOS = {
     "CELLAR-CONFIGURATION",
@@ -129,15 +128,13 @@ CELLAR_SCENARIOS = {
     "CELLAR-MANUAL-SCOPE-EXPIRY",
     "CELLAR-HAP-FAN-COMPOSITION",
 }
-SHADOW_FILES = {
-    "shadow-trace.json",
-    "shadow-replay.json",
-    "shadow-lock-journal.json",
+OBSERVE_FILES = {
+    "observe-lock-effects.json",
     "cellar-evidence.json",
 }
 ALL_SCENARIOS = (
     INITIAL_SCENARIOS
-    | SHADOW_SCENARIOS
+    | OBSERVE_SCENARIOS
     | CELLAR_SCENARIOS
     | {
         "OBSERVE-ZERO",
@@ -151,7 +148,7 @@ ALL_SCENARIOS = (
         "SCHEDULE-ADJACENT-NATIVE-BLOCKS",
         "OCCURRENCE-DST-IDENTITY-EXPIRY",
         "LAB-HAP-PAIR",
-        "LAB-HAP-RESTART-DURABLE",
+        "LAB-HAP-RESTART-SAVED",
         "LAB-NATIVE-COVER",
         "LAB-DIAGNOSTICS",
         "AIRFLOW-CONFIGURATION",
@@ -163,7 +160,7 @@ ALL_SCENARIOS = (
     }
 )
 LAB_FILES = (
-    SHADOW_FILES
+    OBSERVE_FILES
     | OBSERVABILITY_FILES
     | SLEEP_FILES
     | WINDOW_FILES
@@ -183,7 +180,7 @@ LAB_FILES = (
         "trace.zip",
         "hap-transcript.jsonl",
         "hap-accessories.json",
-        "hap-durable-receipt.json",
+        "hap-request-result.json",
         "downloaded-diagnostics.json",
         "ha.log",
         "simulator.log",
@@ -635,6 +632,16 @@ def validate_lab(directory: Path, manifest: dict) -> tuple[str, str]:
     prepared = read_json(directory / "prepared.json")
     sanitized = read_json(directory / "sanitized.json")
     cleanup = read_json(directory / "cleanup-verification.json")
+    require(
+        summary.get("integration_version") == manifest["version"],
+        "Lab integration version differs from the release",
+    )
+    require(
+        summary.get("release_manifest_sha256") == prepared.get("release_manifest_sha256")
+        and isinstance(summary.get("release_manifest_sha256"), str)
+        and re.fullmatch(r"[0-9a-f]{64}", summary["release_manifest_sha256"]),
+        "Lab must carry its prepared release manifest hash",
+    )
     case = (summary["ha_version"], summary["scenario"])
     require(case in LAB_CASES, f"Unexpected release lab case: {case}")
     require(
@@ -685,10 +692,10 @@ def validate_lab(directory: Path, manifest: dict) -> tuple[str, str]:
             "hap-accessories.json",
             "crash-events.jsonl",
             "downloaded-diagnostics.json",
-            *sorted(SHADOW_FILES),
+            *sorted(OBSERVE_FILES),
         ):
             require((directory / name).is_file(), f"Missing {name}")
-        validate_shadow_replay(directory, manifest)
+        validate_observe_effects(directory, manifest)
     elif case[1] == "observability":
         required = OBSERVABILITY_SCENARIOS
         for name in OBSERVABILITY_FILES:
@@ -775,60 +782,9 @@ def validate_lab(directory: Path, manifest: dict) -> tuple[str, str]:
     return case
 
 
-def validate_shadow_replay(directory: Path, manifest: dict) -> None:
-    """Keep recorder replay claims bound to complete, exact-source evidence."""
-    trace = read_json(directory / "shadow-trace.json")
-    pages = trace.get("pages")
-    require(
-        trace.get("schema") == 1 and isinstance(pages, list) and bool(pages),
-        "Shadow trace must preserve native export pages",
-    )
-    require(
-        all(
-            page.get("schema") == 1
-            and page.get("integration_version") == manifest["version"]
-            and page.get("component_sha256") == manifest["component_sha256"]
-            and page.get("gap") is False
-            and page.get("health", {}).get("enabled") is True
-            and page.get("health", {}).get("healthy") is True
-            for page in pages
-        )
-        and pages[-1].get("more") is False,
-        "Shadow trace pages must be healthy, complete, and match the installed component",
-    )
-    replay = read_json(directory / "shadow-replay.json")
-    require(
-        replay.get("schema") == 1
-        and replay.get("status") == "passed"
-        and replay.get("complete") is True
-        and replay.get("gaps") == [],
-        "Shadow replay is incomplete or did not pass",
-    )
-    require(
-        replay.get("trace_sha256") == digest((directory / "shadow-trace.json").read_bytes()),
-        "Shadow replay covers another trace",
-    )
-    require(
-        replay.get("artifact_sha256") == manifest["sha256"]
-        and replay.get("component_sha256") == manifest["component_sha256"]
-        and replay.get("config_hash") == pages[-1].get("config_hash")
-        and isinstance(replay.get("config_hash"), str),
-        "Shadow replay covers another artifact or installed component",
-    )
-    require(
-        replay.get("provenance") == "recorded_engine_snapshot_replay"
-        and replay.get("clock") == "recorded_epoch_per_snapshot"
-        and replay.get("physical_effects") == "not_observed",
-        "Shadow replay must declare recorded snapshots and unobserved physical effects",
-    )
-    comparisons = replay.get("comparisons")
-    require(
-        isinstance(comparisons, list)
-        and bool(comparisons)
-        and all(case.get("matched") is True for case in comparisons),
-        "Shadow replay must compare matching engine snapshots",
-    )
-    lock = read_json(directory / "shadow-lock-journal.json")
+def validate_observe_effects(directory: Path, manifest: dict) -> None:
+    """Check independent simulator effects through lock, reload, and restart."""
+    lock = read_json(directory / "observe-lock-effects.json")
     boundaries = {"locked", "reload", "restart"}
     states = lock.get("states", [])
     require(

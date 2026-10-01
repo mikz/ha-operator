@@ -333,7 +333,7 @@ class Lab:
             print(f"{name}: {item['status']}", flush=True)
             (ARTIFACTS / "scenarios.json").write_text(json.dumps(self.results, indent=2))
 
-    async def crash(self, action):
+    async def crash(self, action, *, saved_request=None):
         nonce = secrets.token_hex(6)
         request = {
             "run_id": os.environ["LAB_RUN_ID"],
@@ -341,6 +341,9 @@ class Lab:
             "requested_at": time.time(),
             "request_id": nonce,
         }
+        if action == "kill":
+            assert saved_request is not None
+            request.update(entry_id=self.entry, saved_request=saved_request)
         pending = CONTROL / f".request-{nonce}.tmp"
         pending.write_text(json.dumps(request))
         pending.rename(CONTROL / f"request-{nonce}.json")
@@ -534,7 +537,19 @@ class Lab:
                         e["kind"] == "refusal" and e["seq"] > health["journal_seq"] for e in events
                     ),
                 )
-                await self.crash(action)
+                saved_request = None
+                if action == "kill":
+                    detail = await self.ha.service(
+                        "ha_operator", "explain", {"resource_id": self.resource}, response=True
+                    )
+                    manual = detail["service_response"]["resources"][self.resource]["manual"]
+                    saved_request = {
+                        "kind": "manual",
+                        "key": self.resource,
+                        "identity": manual["request_id"],
+                        "expires_at": manual["expires_at"],
+                    }
+                await self.crash(action, saved_request=saved_request)
                 if action == "kill":
                     await asyncio.sleep(0.5)
                     await self.crash("start")
@@ -601,8 +616,8 @@ class Lab:
             )
             manual = explained["service_response"]["resources"][self.resource]["manual"]
             assert manual["target"]["position"] == 40 and manual["request_id"], manual
-            (ARTIFACTS / "hap-durable-receipt.json").write_text(json.dumps(manual, indent=2))
-        async with self.scenario("LAB-HAP-RESTART-DURABLE"):
+            (ARTIFACTS / "hap-request-result.json").write_text(json.dumps(manual, indent=2))
+        async with self.scenario("LAB-HAP-RESTART-SAVED"):
             await self.hap.close()
             self.hap = None
             simulator_instance = (await self.sim(path="/health"))["instance_id"]
@@ -667,27 +682,10 @@ class Lab:
                 "intents",
                 "policies",
                 "requirements",
-                "history",
                 "shadow_locked",
-                "trace",
             }, data.keys()
             assert data["version"] == 1 and isinstance(data["faulted"], bool)
             assert isinstance(data["shadow_locked"], bool)
-            assert set(data["trace"]) == {
-                "enabled",
-                "healthy",
-                "complete",
-                "last_sequence",
-                "durable_sequence",
-                "queued_records",
-                "dropped_records",
-                "write_errors",
-                "rotations",
-                "last_heartbeat",
-                "last_write_at",
-                "session",
-            }
-            assert len(data["history"]) <= 100
             for collection in ("resources", "policies", "requirements", "intents"):
                 assert all(re.fullmatch(r"[0-9a-f]{12}", key) for key in data[collection])
             assert all(
@@ -723,10 +721,6 @@ class Lab:
             assert all(
                 set(row) == {"status", "selected_provider", "acquiring_provider"}
                 for row in data["requirements"].values()
-            )
-            assert all(
-                set(row) == {"resource", "status", "source", "target", "at"}
-                for row in data["history"]
             )
             encoded = json.dumps(data)
             for private_value in (
@@ -857,15 +851,10 @@ async def main():
                     await run_windows(lab)
                     await lab.diagnostics()
                     return
-                if os.environ["LAB_SCENARIO"] == "replay":
-                    from .scenarios_shadow import run_external_replay
+                if os.environ["LAB_SCENARIO"] == "observe":
+                    from .scenarios_observe import run_observe_scenarios
 
-                    await run_external_replay(lab)
-                    return
-                if os.environ["LAB_SCENARIO"] == "shadow":
-                    from .scenarios_shadow import run_shadow_scenarios
-
-                    await run_shadow_scenarios(lab)
+                    await run_observe_scenarios(lab)
                     await lab.diagnostics()
                     return
                 if os.environ["LAB_SCENARIO"] == "cellar":
@@ -895,11 +884,11 @@ async def main():
 
                     await run_airflow_scenarios(lab)
                     from .scenarios_cellar import run_cellar_scenarios
-                    from .scenarios_shadow import observe, run_shadow_scenarios
+                    from .scenarios_observe import observe, run_observe_scenarios
 
                     await observe(lab, locked=False)
                     await run_cellar_scenarios(lab)
-                    await run_shadow_scenarios(lab)
+                    await run_observe_scenarios(lab)
                 await lab.diagnostics()
             finally:
                 if lab.hap:

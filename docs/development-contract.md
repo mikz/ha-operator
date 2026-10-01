@@ -1,8 +1,10 @@
 # Implementation boundary contract
 
-This is the shared worker contract for the approved v1 plan. It is implementation
-documentation, not proof that any release gate passed. Root owns runtime.py,
-__init__.py, services.py and the common project/test configuration.
+This contract defines the approved baseline alignment described in
+[Baseline alignment](baseline-alignment.md). It is an implementation requirement,
+not a claim that the changes or release gates have passed. The implementation
+owner owns production code, tests, documentation, and packaging. The coordinating
+owner reviews the changes and runs final acceptance.
 
 ## Configuration
 
@@ -26,14 +28,14 @@ positive `warning_after_seconds`. It uses the existing resource tolerance.
 
 Intent data: `name`, required boolean `initial_value`, optional `on_targets` list
 of other intent IDs. Values are held until explicit command. An OFF-to-ON command
-updates attached controls in one durable transaction. Repeated ON and source OFF
+updates attached controls as one in-memory state change. Repeated ON and source OFF
 do not change dependents. Graph references must exist and remain acyclic.
 
 Policy data: `name`, `resource_id`, `kind` (state/occurrence), `priority` (0),
 `target` (Target dictionary), optional `eligibility_entity` and `eligibility_state`
 (on), optional `target_entity`/`target_attribute`/`target_field` (position default).
 Switch state policies can instead use `intent_id`, an internal stable reference
-to the committed desired boolean; it is exclusive with other target fields.
+to the desired boolean; it is exclusive with other target fields.
 Native attributes are subscribed as well as state changes. Runtime enabled state is
 persisted; disabling tombstones all pending occurrences, not future occurrences.
 
@@ -51,7 +53,7 @@ position/contact/relay/airflow}}, `acquisition_timeout` (120).
 All evidence predicates must hold; unknown means unconfirmed. Provider order is
 list order. Passive providers have no resource_id. No extractor output is configured.
 
-## Core models (engine worker owns exact implementation)
+## Core models
 
 Frozen Target fields: position: float|None; on: bool|None; percentage: float|None;
 direction: str|None; profile: str|None. from_dict/to_dict helpers, omit None values.
@@ -59,14 +61,14 @@ Observation: target: Target|None, available: bool, moving: bool, restriction:
 str|None, reported_at: float. All time arguments are UTC Unix seconds.
 ManualLease: resource_id, mode (target/hands_off), target, expires_at (None indefinite),
 request_id, source. Core resolves valid manual > requirement > ordinary policy.
-Pure API and remaining dataclasses finalized by engine worker and broadcast to root.
+The engine evaluates snapshots without performing persistence or actuator effects.
 
-## HA runtime interface (root owns)
+## HA runtime interface
 
 `entry.runtime_data` is OperatorRuntime, with `resources` mapping ID -> resource data,
 `policies` and `requirements` mappings, `observations` mapping ID -> Observation,
 `decisions` mapping ID -> Decision, `requirement_results` mapping ID -> result,
-`store.state` durable dictionary, `fault` optional str, `last_commands` mapping
+the runtime state dictionary, `fault` optional str, `last_commands` mapping
 ID -> dictionary, `next_attempts` mapping ID -> timestamp, `attempts` mapping ID -> int.
 
 Methods: subscribe(callback)->unsubscribe; async_request(resource_id, *, mode='target',
@@ -77,29 +79,50 @@ async_submit_occurrence(policy_id, occurrence_id, expires_at);
 async_skip_occurrence(policy_id, occurrence_id, expires_at);
 async_reconcile(resource_id: str|None=None); explain(resource_id: str|None=None)->dict.
 `mode(id)` -> observe/live; `manual(id)` -> ManualLease|None; `policy_enabled(id)` bool.
-`policy_input(id)` returns committed `NumericState`/`TimerState` or None;
-`return_monitor(id)` returns committed `ReturnMonitorState`. Read-only entity
+`policy_input(id)` returns `NumericState`/`TimerState` or None;
+`return_monitor(id)` returns `ReturnMonitorState`. Read-only entity
 views never schedule or own these transitions.
 `adapter(id)` returns adapter object, exposes supported_features, read_observation(now),
 normalize(Target)->Target, async_apply(Target, still_current: Callable[[],bool]),
 async_stop(), supports_stop bool. notify callbacks are HA event-loop callbacks.
 
-## Strict storage (storage worker owns)
+## Native persistence
 
-`IntentStore(hass, path: Path)`; `.state` dictionary; `.fault` optional string;
-async_load(expected_existing: bool=False); async_update(mutator: Callable[[dict],None])
-->dict (serialize updates from current committed state, deep copy before mutator);
-async_close() waits outstanding writer; explicit recovery only through reload.
-Empty payload keys: revision=0, manuals={}, occurrences={}, modes={}, policy_enabled={},
-requests={} (idempotency receipts), intents={} (held booleans), policy_inputs={}
-(committed numeric/timer input records), and return_monitors={} (committed cover
-return deadlines). Writes use the version 3 envelope. Reading version 1 adds an
-empty intents map; reading versions 1 and 2 adds empty policy_inputs and
-return_monitors maps before validating the complete state. Existing intent and
-absolute deadlines remain intact. Mutator exceptions must not fault storage.
-Writer failure inhibits; success persists before publication. Unusable
-authoritative state during startup fails config-entry setup with a Repair; a
-write failure after healthy setup leaves the loaded runtime inhibited.
+Use `homeassistant.helpers.storage.Store` directly for runtime state under
+`.storage`. The runtime owns its in-memory state. Use `async_load`,
+`async_delay_save`, and native lifecycle saving where needed. Keep the default
+serializer unless profiling justifies a change. Do not add a
+commit revision, durable acknowledgement, write-confirmation wrapper, second
+writer, or storage-fault latch. Runtime write failures follow ordinary Store
+behavior and do not halt actuation. Invalid configuration or unusable restored
+data fails setup with an actionable Repair.
+
+The runtime maintains modes, policy enablement, held desired values, manual
+leases, absolute deadlines, occurrence suppression, duplicate-request records,
+policy inputs, and return monitors. Preserve request method signatures and
+duplicate-request behavior, but remove commit revision and durable receipt
+semantics. Read-only entity views do not mutate this state.
+
+The upgrade retains config entries, subentries, and entity identities. It does
+not import schema 1–3 `ha_operator.<entry>.json` runtime state. A fresh Store uses
+configured initial desired values, policy controls enabled by default, and observe
+resource modes. Old leases, deadlines, occurrences, request records, and input
+or monitor state do not carry over. Reload after native persistence restores
+absolute deadlines and expires stale state without renewing durations or
+synthesizing OFF-to-ON attachment edges.
+
+After a deployment backup exists, remove only this entry's obsolete snapshot
+and operator trace files through a small, exact-scoped cleanup. Do not read the
+obsolete snapshot as a fallback or retain a second active persistence path.
+
+## Native observability
+
+Use native entities, Recorder history, Activity/Logbook, the integration logger,
+downloadable diagnostics, and `explain`. Remove `ShadowTrace`, its listeners and
+adapter hooks, `export_trace`, `trace_enabled`, `trace_entities`, trace watermarks,
+and operator journal archive, replay, and report tools. Keep observe/live modes
+and the global shadow lock. Keep Playwright browser traces; they are browser
+test artifacts.
 
 ## Entities
 
@@ -112,15 +135,16 @@ follow the same rule. No private HA trace APIs or global service interception.
 
 ## Lab
 
-Production ZIP installed into fresh `/config`; simulator test integration lives only
-under tests/lab/custom_components/ha_operator_sim. Simulator worker owns tests/lab/sim
-and test-only integration; lab worker owns scripts/lab.py, tests/lab/compose.yaml,
-Dockerfiles, runner and E2E scenarios. Agree transport contract directly. No production
-MCP/tool use by implementation workers. Strict isolated network, no published ports.
+Install the production ZIP into fresh `/config`. The simulator test integration
+lives only under `tests/lab/custom_components/ha_operator_sim`. Use independent
+simulator effects, HA states, and Recorder for assertions. Do not replace the
+operator journal with another audit framework. Implementation workers must not
+use production MCP tools. Keep the lab network isolated with no published ports.
 
 ## Gates
 
 Package evidence reflects real execution; no unrun check can be labelled passed.
-Root owns final acceptance. Workers run bounded meaningful tests for their modules and
-report exact commands/results. All workers preserve each other's changes. Consult the
-persistent read-only /root/ha_platform advisor for platform/lifecycle questions.
+The coordinating owner owns final acceptance. Workers run bounded meaningful
+tests and report exact commands and results. Preserve other workers' changes.
+Route platform and lifecycle questions to the coordinating owner when no
+persistent platform advisor exists. Keep the HA 2026.9.3 and 2026.9.4 gates.

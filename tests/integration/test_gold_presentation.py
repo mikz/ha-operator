@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from copy import deepcopy
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -164,7 +165,7 @@ async def test_native_request_errors_are_semantic_and_do_not_commit(
     raw = await async_add_physical_cover(hass)
     entry = await async_setup_operator(hass, tmp_path)
     await async_activate(hass)
-    before = entry.runtime_data.store.state
+    before = deepcopy(entry.runtime_data._state)
     with pytest.raises(ServiceValidationError) as error:
         await hass.services.async_call(
             DOMAIN, "request", {"resource_id": "roof", "target": target}, blocking=True
@@ -174,7 +175,7 @@ async def test_native_request_errors_are_semantic_and_do_not_commit(
     assert error.value.translation_placeholders == (placeholders or {}) or (
         placeholders is None and error.value.translation_placeholders is None
     )
-    assert entry.runtime_data.store.state == before and raw.commands == []
+    assert deepcopy(entry.runtime_data._state) == before and raw.commands == []
     assert await hass.config_entries.async_unload(entry.entry_id)
 
 
@@ -213,13 +214,13 @@ async def test_invalid_fan_percentage_step_action_is_expected_native_error(hass,
         },
     )
     await async_activate(hass)
-    before = entry.runtime_data.store.state
+    before = deepcopy(entry.runtime_data._state)
     with pytest.raises(ServiceValidationError) as error:
         await hass.services.async_call(
             DOMAIN, "request", {"resource_id": "roof", "target": {"percentage": 50}}, blocking=True
         )
     assert error.value.translation_key == "invalid_percentage_step"
-    assert entry.runtime_data.store.state == before
+    assert deepcopy(entry.runtime_data._state) == before
     assert await hass.config_entries.async_unload(entry.entry_id)
 
 

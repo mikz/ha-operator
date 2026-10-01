@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
 from hashlib import sha256
 from typing import TYPE_CHECKING, cast, overload
 
@@ -84,7 +83,7 @@ def _status(value: object) -> str:
 def _policy_input(
     runtime: OperatorRuntime, identifier: str, config: PolicyConfig
 ) -> dict[str, object] | None:
-    """Export the bounded input contract and committed state with opaque identifiers."""
+    """Export the bounded input contract and current state with opaque identifiers."""
     source = config.get("input")
     if source is None:
         return None
@@ -126,27 +125,6 @@ def _policy_input(
     return result
 
 
-def _trace_health(value: Mapping[str, object]) -> dict[str, object]:
-    """Export health counters only; raw records and paths belong outside diagnostics."""
-    return {
-        **{key: value.get(key) is True for key in ("enabled", "healthy", "complete")},
-        **{
-            key: _number(value.get(key))
-            for key in (
-                "last_sequence",
-                "durable_sequence",
-                "queued_records",
-                "dropped_records",
-                "write_errors",
-                "rotations",
-                "last_heartbeat",
-                "last_write_at",
-            )
-        },
-        "session": _identifier(value.get("session_id")),
-    }
-
-
 async def async_get_config_entry_diagnostics(
     hass: HomeAssistant, entry: OperatorConfigEntry
 ) -> dict[str, object]:
@@ -170,7 +148,6 @@ async def async_get_config_entry_diagnostics(
             "intents": {},
             "policies": {},
             "requirements": {},
-            "history": [],
         }
     resources: dict[str, dict[str, object]] = {}
     for identifier, config in runtime.resources.items():
@@ -223,22 +200,10 @@ async def async_get_config_entry_diagnostics(
             "selected_provider": _identifier(result.selected_provider) if result else None,
             "acquiring_provider": _identifier(result.acquiring_provider) if result else None,
         }
-    history = []
-    for event in list(runtime.history)[-100:]:
-        history.append(
-            {
-                "resource": _identifier(event.get("resource_id")),
-                "status": _status(event.get("status")),
-                "source": _identifier(event.get("source")),
-                "target": _target(event.get("target")),
-                "at": _number(event.get("at")),
-            }
-        )
     return {
         "version": 1,
         "faulted": bool(runtime.fault),
         "shadow_locked": bool(runtime.shadow_locked),
-        "trace": _trace_health(runtime.trace_health()),
         "resources": resources,
         "intents": {
             _identifier(key): {"desired": runtime.desired_value(key)} for key in runtime.intents
@@ -251,5 +216,4 @@ async def async_get_config_entry_diagnostics(
             for key, config in runtime.policies.items()
         },
         "requirements": requirements,
-        "history": history,
     }

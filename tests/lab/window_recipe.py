@@ -171,7 +171,7 @@ def dispatcher(windows, group, *, duration=1800):
                 }
             },
             {
-                "stop": "Requests durably accepted; physical position is checked separately.",
+                "stop": "Requests accepted; physical position is checked separately.",
                 "response_variable": "result",
             },
         ],
@@ -228,7 +228,7 @@ def timer_automation(timer, record, policy_id, managed, ready, *, qualify=60, du
     """Do not catch up an unadmitted timer epoch after a restart.
 
     Helper restoration is weaker than Operator persistence. The helper only
-    qualifies a new live event; the admitted occurrence owns the durable expiry.
+    qualifies a new live event; the admitted occurrence owns the absolute expiry.
     """
 
     def save(value):

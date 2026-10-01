@@ -6,14 +6,10 @@
         "title": "HA Operator",
         "description": "Create HA Operator, then add resources, policies, and airflow requirements. New resources start in observe mode. Trace recording and the global shadow lock are optional and default to off.",
         "data": {
-          "trace_enabled": "Record local trace",
-          "shadow_lock": "Lock all resources in observe mode",
-          "trace_entities": "Additional entities to observe"
+          "shadow_lock": "Lock all resources in observe mode"
         },
         "data_description": {
-          "trace_enabled": "Record bounded, sanitized decisions and source observations to local storage for paginated export and replay.",
-          "shadow_lock": "Prevent every resource from entering live mode. Turn off this lock before explicitly activating individual resources.",
-          "trace_entities": "Record these extra source entities when tracing is enabled. This does not grant device ownership or permit commands."
+          "shadow_lock": "Prevent every resource from entering live mode. Turn off this lock before explicitly activating individual resources."
         }
       }
     },
@@ -220,7 +216,7 @@
             "target_entity": "Read the target from this source entity state or its configured attribute. Telemetry does not create manual ownership.",
             "target_attribute": "Optional source attribute. Omit to read the source state; requires a target entity.",
             "target_field": "Target field to populate: position, on, percentage, or direction. Defaults to position; requires a target entity and matching resource capability.",
-            "intent_id": "Desired control subentry ID for a state policy controlling a switch. Replaces all other target fields; uses the durably saved Boolean value."
+            "intent_id": "Desired control subentry ID for a state policy controlling a switch. Replaces all other target fields; uses the current Boolean value."
           }
         },
         "reconfigure": {
@@ -251,7 +247,7 @@
             "target_entity": "Read the target from this source entity state or its configured attribute. Telemetry does not create manual ownership.",
             "target_attribute": "Optional source attribute. Omit to read the source state; requires a target entity.",
             "target_field": "Target field to populate: position, on, percentage, or direction. Defaults to position; requires a target entity and matching resource capability.",
-            "intent_id": "Desired control subentry ID for a state policy controlling a switch. Replaces all other target fields; uses the durably saved Boolean value."
+            "intent_id": "Desired control subentry ID for a state policy controlling a switch. Replaces all other target fields; uses the current Boolean value."
           }
         },
         "qualified_numeric": {
@@ -477,28 +473,28 @@
       "step": {
         "user": {
           "title": "Add desired control",
-          "description": "A durable on/off source with no manual lease. Turning it on from off also turns on its configured dependents. Turning it off leaves them unchanged. Initial value applies only when first created; reload does not replay an on edge.",
+          "description": "A persistent on/off source with no manual lease. Turning it on from off also turns on its configured dependents. Turning it off leaves them unchanged. Initial value applies only when first created; reload does not replay an on edge.",
           "data": {
             "name": "Name",
             "initial_value": "Initial desired value",
             "on_targets": "Also turn on these desired controls"
           },
           "data_description": {
-            "initial_value": "Required explicit true or false. Used only when no saved value exists; changing it does not overwrite committed intent.",
-            "on_targets": "Optional desired control IDs set on in the same durable transaction when this control changes from off to on. Repeated on and switching off do not change dependents. References must exist and remain acyclic."
+            "initial_value": "Required explicit true or false. Used only when no saved value exists; changing it does not overwrite saved intent.",
+            "on_targets": "Optional desired control IDs set on in the same state update when this control changes from off to on. Repeated on and switching off do not change dependents. References must exist and remain acyclic."
           }
         },
         "reconfigure": {
           "title": "Edit desired control",
-          "description": "A durable on/off source with no manual lease. Turning it on from off also turns on its configured dependents. Turning it off leaves them unchanged. Initial value applies only when first created; reload does not replay an on edge.",
+          "description": "A persistent on/off source with no manual lease. Turning it on from off also turns on its configured dependents. Turning it off leaves them unchanged. Initial value applies only when first created; reload does not replay an on edge.",
           "data": {
             "name": "Name",
             "initial_value": "Initial desired value",
             "on_targets": "Also turn on these desired controls"
           },
           "data_description": {
-            "initial_value": "Required explicit true or false. Used only when no saved value exists; changing it does not overwrite committed intent.",
-            "on_targets": "Optional desired control IDs set on in the same durable transaction when this control changes from off to on. Repeated on and switching off do not change dependents. References must exist and remain acyclic."
+            "initial_value": "Required explicit true or false. Used only when no saved value exists; changing it does not overwrite saved intent.",
+            "on_targets": "Optional desired control IDs set on in the same state update when this control changes from off to on. Repeated on and switching off do not change dependents. References must exist and remain acyclic."
           }
         }
       },
@@ -583,8 +579,8 @@
   },
   "issues": {
     "storage_error": {
-      "title": "HA Operator cannot trust saved intent",
-      "description": "Actuation is inhibited because saved intent could not be read, validated, or saved reliably. Preserve a copy of the ha_operator.*.json snapshot in your Home Assistant configuration directory before making changes. Check disk space, file permissions, and the Home Assistant logs. Restore a known-good snapshot if the file is corrupt; do not discard accepted intent to hide the fault. After resolving the storage problem, select Reload from the HA Operator integration menu. The repair clears only after saved intent loads successfully."
+      "title": "HA Operator restored data is unusable",
+      "description": "HA Operator could not set up because restored runtime data is invalid. Check the Home Assistant logs for the validation error. Keep a Home Assistant backup before recovery, and use a matching backup if restoring saved state. After resolving the error, select Reload from the integration menu. The Repair clears when setup succeeds. Ordinary Store write errors are reported in Home Assistant logs."
     },
     "config_object_expected": {
       "title": "Invalid HA Operator configuration",
@@ -877,7 +873,7 @@
   },
   "exceptions": {
     "storage_error": {
-      "message": "HA Operator cannot load authoritative saved intent. Preserve the snapshot, correct the storage problem, and reload the integration. See the Repair for recovery steps."
+      "message": "HA Operator could not set up with the restored runtime data. Inspect the Home Assistant logs and Repair, then reload after recovery."
     },
     "configure_first": {
       "message": "Configure HA Operator before calling actions"
@@ -901,22 +897,13 @@
       "message": "HA Operator is unloaded"
     },
     "storage_inhibited": {
-      "message": "HA Operator storage is inhibited; inspect Repairs"
+      "message": "HA Operator runtime data is unusable. Inspect the Home Assistant logs and Repair, then reload after recovery."
     },
     "observe_request": {
       "message": "Resource is in observe mode; request not accepted"
     },
     "manual_disabled": {
       "message": "This resource follows its source; manual control is disabled"
-    },
-    "invalid_seed": {
-      "message": "Seed configured desired controls with boolean values"
-    },
-    "seed_requires_observe": {
-      "message": "Seed only while all affected followers are in observe mode"
-    },
-    "persistence_failed": {
-      "message": "Request persistence failed; actuation inhibited"
     },
     "invalid_request_mode": {
       "message": "mode must be target or hands_off"
@@ -1409,37 +1396,6 @@
           "description": "Optional entry selector. Defaults to the single HA Operator integration."
         }
       }
-    },
-    "export_trace": {
-      "name": "Export recorded trace",
-      "description": "Administrator-only export of one page of sanitized, locally recorded decision and observation events. Records have durable sequence numbers. Use next_after as the next request cursor; inspect gap and health before treating the trace as complete. This action never commands a device.",
-      "fields": {
-        "after": {
-          "name": "After sequence",
-          "description": "Return records after this durable sequence number. Omit to begin with the oldest retained record."
-        },
-        "limit": {
-          "name": "Page size",
-          "description": "Maximum records to return, from 1 to 1000."
-        },
-        "config_entry_id": {
-          "name": "Configuration entry",
-          "description": "Optional entry selector. Defaults to the single HA Operator integration."
-        }
-      }
-    },
-    "seed_intents": {
-      "name": "Import desired states",
-      "description": "Import a migration snapshot without triggering on attachments. Every affected follower must be in observe mode.",
-      "fields": {
-        "values": {
-          "name": "Desired control values",
-          "description": "An object mapping desired control subentry IDs to boolean values."
-        },
-        "config_entry_id": {
-          "name": "Integration entry ID"
-        }
-      }
     }
   },
   "options": {
@@ -1448,20 +1404,15 @@
         "title": "Recording and shadow control",
         "description": "Changes reload the integration after existing workers stop. A shadow lock prevents device commands; recording-only entities remain observation inputs.",
         "data": {
-          "trace_enabled": "Record local trace",
-          "shadow_lock": "Lock all resources in observe mode",
-          "trace_entities": "Additional entities to observe"
+          "shadow_lock": "Lock all resources in observe mode"
         },
         "data_description": {
-          "trace_enabled": "Record bounded, sanitized decisions and source observations to local storage for paginated export and replay.",
-          "shadow_lock": "Prevent every resource from entering live mode. Unlocking first saves all resource modes as observe; explicitly select live for each resource after unlocking.",
-          "trace_entities": "Record these extra source entities when tracing is enabled. This does not grant device ownership or permit commands."
+          "shadow_lock": "Prevent every resource from entering live mode. Unlocking first saves all resource modes as observe; explicitly select live for each resource after unlocking."
         }
       }
     },
     "error": {
-      "unlock_unavailable": "The shadow lock is still enabled. Reload HA Operator and wait for it to finish loading before trying to unlock again. Resources must be saved in observe mode before unlocking.",
-      "unlock_persistence_failed": "The shadow lock is still enabled because observe mode could not be saved. Check the HA Operator storage Repair and resolve the storage problem, reload the integration, then try again."
+      "unlock_unavailable": "The shadow lock is still enabled. Reload HA Operator and wait for it to finish loading before trying to unlock again. Resources must be saved in observe mode before unlocking."
     }
   },
   "selector": {

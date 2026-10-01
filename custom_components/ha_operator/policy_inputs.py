@@ -1,7 +1,7 @@
 """Two bounded policy inputs, with caller-supplied events and UTC Unix time.
 
 Transitions describe intent to admit or suppress an occurrence. The caller must
-commit the input state and occurrence changes together before using that intent.
+update the input state and occurrence together before using that intent.
 The HA boundary supplies episode IDs and deduplicates previously replaced IDs.
 """
 
@@ -165,7 +165,7 @@ class TimerEvent:
     Non-start events name the episode they affect, so stale callbacks cannot
     cancel a replacement. 'suppress' also dead-ends rejected runtime admissions.
     For finish/change, accepted_at_capture preserves whether admission had been
-    committed when the event arrived, even if an older save completes first.
+    accepted when the event arrived, before queued input processing.
     """
 
     kind: Literal["start", "pause", "resume", "cancel", "finish", "change", "suppress"]

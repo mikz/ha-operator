@@ -1,4 +1,4 @@
-"""HA event boundary, durable admission, and one actuator worker per resource."""
+"""HA event boundary, request handling, and one actuator worker per resource."""
 
 from __future__ import annotations
 
@@ -12,7 +12,6 @@ from collections.abc import Callable, Iterable, Mapping
 from copy import deepcopy
 from dataclasses import asdict, replace
 from datetime import datetime
-from pathlib import Path
 from typing import Any, Literal, TypedDict, TypeGuard, cast
 from uuid import uuid4
 
@@ -37,6 +36,7 @@ from homeassistant.helpers.event import (
     async_track_state_report_event,
 )
 from homeassistant.helpers.start import async_at_started
+from homeassistant.helpers.storage import Store
 from homeassistant.util import dt as dt_util
 
 from . import OperatorConfigEntry
@@ -97,8 +97,7 @@ from .return_monitor import (
     ReturnMonitorTransition,
     return_transition,
 )
-from .shadow import ShadowTrace
-from .storage import IntentStore, IntentStoreError
+from .storage import InvalidSnapshot, empty_state, validate_state
 
 _LOGGER = logging.getLogger(__name__)
 _UNKNOWN = {"unknown", "unavailable"}
@@ -123,10 +122,6 @@ class LastCommand(TypedDict):
 def _is_state_event(value: StateEvent | datetime) -> TypeGuard[StateEvent]:
     """Preserve the existing distinction between native state and deadline callbacks."""
     return hasattr(value, "data")
-
-
-def _input_episode(record: PolicyInputRecord) -> str | None:
-    return record["state"].get("episode_id") if record["type"] == "timer_episode" else None
 
 
 def _now() -> float:
@@ -199,8 +194,6 @@ def _validate_saved_state(state: StoredSnapshot) -> RuntimeSnapshot:
     for request_id, value in state["requests"].items():
         text(request_id, "request_id")
         item = record(value)
-        if item.get("fingerprint_kind", "normalized") not in {"normalized", "requested"}:
-            raise ValueError("Saved request fingerprint kind is invalid")
         fingerprint = item["fingerprint"]
         if (
             not isinstance(fingerprint, str)
@@ -215,8 +208,7 @@ def _validate_saved_state(state: StoredSnapshot) -> RuntimeSnapshot:
         # Reuse the finite-or-explicit-indefinite deadline contract.
         ManualLease(receipt["resource_id"], "hands_off", expires_at=receipt["expires_at"])
 
-    # The current semantic checks have run. Falsey legacy targets retain JSONValue
-    # rather than claiming that their original saved representation was rewritten.
+    # Runtime semantics have been validated before control admission.
     return cast(RuntimeSnapshot, state)
 
 
@@ -231,8 +223,7 @@ class OperatorRuntime:
         self.requirements = configured["requirements"]
         self.intents = configured["intents"]
         self._shadow_lock_latched = bool(entry.options.get("shadow_lock", False))
-        self._trace = ShadowTrace(hass, entry, configured, entry.options.get("trace_entities", []))
-        self.store = IntentStore(hass, Path(hass.config.path(f"ha_operator.{entry.entry_id}.json")))
+        self._store = Store[RuntimeSnapshot](hass, 1, f"{DOMAIN}.{entry.entry_id}", private=True)
         self.observations: dict[str, Observation] = {}
         self._source_availability: dict[str, bool] = {}
         self.decisions: dict[str, Decision] = {}
@@ -243,14 +234,10 @@ class OperatorRuntime:
         self.last_commands: dict[str, LastCommand] = {}
         self.next_attempts: dict[str, float] = {}
         self.attempts: dict[str, int] = {}
-        self.history: deque[dict[str, object]] = deque(maxlen=100)
         self.fault: str | None = None
         self._adapters = {
             key: create_adapter(hass, key, config) for key, config in self.resources.items()
         }
-        if self._trace.enabled:
-            for adapter in self._adapters.values():
-                adapter.audit_callback = lambda data: self._trace.event("dispatch", data)
         self._listeners: set[Callable[[], None]] = set()
         self._unsubscribers: list[Callable[[], None]] = []
         self._timers: dict[str, Callable[[], None]] = {}
@@ -273,8 +260,8 @@ class OperatorRuntime:
         self._memory: dict[str, RequirementMemory] = {}
         self._closed = False
         self._initialized = False
-        # A newly constructed store contains only the known empty maps.
-        self._state = cast(RuntimeSnapshot, self.store.state)
+        # Runtime owns the state; Store only schedules and loads persistence.
+        self._state = cast(RuntimeSnapshot, empty_state())
         self._input_flush: asyncio.Task[None] | None = None
         self._pending_resources: set[str] = set()
         self._policy_events: deque[tuple[str, PolicyEvent, float, Context | None, bool]] = deque()
@@ -312,9 +299,7 @@ class OperatorRuntime:
         self._feedback_resources: dict[str, set[str]] = {}
         self._input_resources = self._input_dependencies()
         self._decision_input_entities = set(self._input_resources)
-        self._observed_entities = self._decision_input_entities | (
-            self._trace.sanitizer.attrs.keys() if self._trace.enabled else set()
-        )
+        self._observed_entities = self._decision_input_entities
 
     def _input_dependencies(self) -> dict[str, set[str]]:
         """Map input changes to owners, including complete provider handovers."""
@@ -471,15 +456,15 @@ class OperatorRuntime:
                     admissible,
                 )
             )
-            self._queue_reconciliation(self._input_resources[entity_id], durable_input=True)
+            self._queue_reconciliation(self._input_resources[entity_id], policy_input=True)
         self._timer_states[entity_id] = (phase, phase, finish)
 
     async def _recover_policy_inputs(self) -> None:
         now = _now()
 
-        def recover(raw_state: StoredSnapshot) -> None:
-            # async_start validated all saved semantics before recovery enters the store lock.
-            state = cast(RuntimeSnapshot, raw_state)
+        def recover(raw_state: RuntimeSnapshot) -> None:
+            # async_start validated all saved semantics before recovery changes runtime state.
+            state = raw_state
             for policy_id in set(state["policy_inputs"]) & (
                 set(self.policies) - set(self._input_fingerprints)
             ):
@@ -526,7 +511,7 @@ class OperatorRuntime:
                         self._timer_episodes[policy_id] = recovered.episode_id
                 state["policy_inputs"][policy_id] = self._input_record(policy_id, recovered)
 
-        await self.store.async_update(recover, skip_unchanged=True)
+        self._mutate_state(recover, skip_unchanged=True)
 
     async def _apply_policy_input(
         self,
@@ -623,7 +608,6 @@ class OperatorRuntime:
                         state["occurrences"][key] = occurrence
             state["policy_inputs"][policy_id] = self._input_record(policy_id, final)
 
-        prior_episode = self._state["policy_inputs"][policy_id]["state"].get("episode_id")
         original_occurrences = {
             key: item
             for key, item in self._state["occurrences"].items()
@@ -637,20 +621,8 @@ class OperatorRuntime:
         mutate(candidate)
         if candidate == original:
             return
-        await self._commit(
+        await self._change(
             mutate,
-            lambda state: {
-                "action": "policy_input",
-                "policy_id": policy_id,
-                "input": state["policy_inputs"][policy_id],
-                "occurrences": [
-                    item
-                    for item in state["occurrences"].values()
-                    if item["policy_id"] == policy_id
-                    and item["occurrence_id"]
-                    in {prior_episode, state["policy_inputs"][policy_id]["state"].get("episode_id")}
-                ],
-            },
             skip_unchanged=True,
             context=context,
             context_key=("occurrence", policy_id, event.episode_id)
@@ -660,9 +632,13 @@ class OperatorRuntime:
 
     async def async_start(self) -> None:
         try:
-            await self.store.async_load(expected_existing=self.entry.data.get("initialized", False))
             try:
-                self._state = _validate_saved_state(self.store.state)
+                loaded = await self._store.async_load()
+                self._state = (
+                    _validate_saved_state(validate_state(loaded))
+                    if loaded is not None
+                    else cast(RuntimeSnapshot, empty_state())
+                )
                 for policy_id, fingerprint in self._input_fingerprints.items():
                     record = self._state["policy_inputs"].get(policy_id)
                     if (
@@ -672,32 +648,27 @@ class OperatorRuntime:
                     ):
                         raise ValueError("Saved policy input type disagrees with its fingerprint")
             except (ValueError, TypeError, KeyError, OverflowError) as err:
-                raise IntentStoreError("Saved intent records are invalid") from err
-            if any(key not in self.store.state["intents"] for key in self.intents):
+                raise InvalidSnapshot("Saved runtime records are invalid") from err
+            if any(key not in self._state["intents"] for key in self.intents):
 
-                def initialize(state: StoredSnapshot) -> None:
+                def initialize(state: RuntimeSnapshot) -> None:
                     for key, config in self.intents.items():
                         state["intents"].setdefault(key, config["initial_value"])
 
-                await self.store.async_update(initialize)
+                self._mutate_state(initialize)
             if self.shadow_locked and any(
-                self.store.state["modes"].get(key) == "live" for key in self.resources
+                self._state["modes"].get(key) == "live" for key in self.resources
             ):
-                await self.store.async_update(
+                self._mutate_state(
                     lambda state: state["modes"].update(dict.fromkeys(self.resources, "observe"))
-                )
-            if not self.entry.data.get("initialized"):
-                await self.store.async_update(lambda _: None)
-                self.hass.config_entries.async_update_entry(
-                    self.entry, data={**self.entry.data, "initialized": True}
                 )
             await self._recover_policy_inputs()
             removed_monitors = (
-                set(self.store.state["return_monitors"]) - self._return_fingerprints.keys()
+                set(self._state["return_monitors"]) - self._return_fingerprints.keys()
             )
 
             # Preserve deadlines only when the monitor settings and raw source agree.
-            def initialize_monitors(state: StoredSnapshot) -> None:
+            def initialize_monitors(state: RuntimeSnapshot) -> None:
                 state["return_monitors"] = {
                     key: state["return_monitors"][key]
                     if key in state["return_monitors"]
@@ -706,16 +677,16 @@ class OperatorRuntime:
                     for key, fingerprint in self._return_fingerprints.items()
                 }
 
-            await self.store.async_update(initialize_monitors, skip_unchanged=True)
+            self._mutate_state(initialize_monitors, skip_unchanged=True)
             for key in removed_monitors:
                 persistent_notification.async_dismiss(
                     self.hass, f"ha_operator_{self.entry.entry_id}_{key}_return"
                 )
             now = _now()
 
-            def prune(raw_state: StoredSnapshot) -> None:
+            def prune(raw_state: RuntimeSnapshot) -> None:
                 # Only startup-owned mutations have followed the saved-intent validation.
-                state = cast(RuntimeSnapshot, raw_state)
+                state = raw_state
                 state["manuals"] = {
                     key: item
                     for key, item in state["manuals"].items()
@@ -729,19 +700,16 @@ class OperatorRuntime:
                 # Earlier startup-owned writes affect other maps, never manuals.
                 for key, item in self._state["manuals"].items()
             ):
-                await self.store.async_update(prune)
-        except IntentStoreError as err:
-            self.store.fault = self.store.fault or "Saved intent records are invalid"
-            self._storage_fault(err)
+                self._mutate_state(prune)
+        except (InvalidSnapshot, OSError, HomeAssistantError) as err:
+            self._invalid_state(err)
             raise ConfigEntryError(
                 translation_domain=DOMAIN,
                 translation_key="storage_error",
             ) from err
         else:
             # Startup semantic validation and owned mutations preserve these records.
-            self._state = cast(RuntimeSnapshot, self.store.state)
             self._initialized = True
-        await self._trace.async_start(self._state, self.shadow_locked)
         self._unsubscribers.append(self.hass.async_add_shutdown_job(HassJob(self.async_close)))
         if self.requirements:
             self._unsubscribers.append(
@@ -797,13 +765,6 @@ class OperatorRuntime:
                         self._numeric_reports[policy_id] = self._numeric_report(
                             cast(NumericInputConfig, self.policies[policy_id]["input"]), native
                         )
-        if self._trace.enabled:
-            self._unsubscribers.append(
-                self.hass.bus.async_listen("homekit_state_change", self._external_command)
-            )
-            for entity_id in sorted(self._trace.sanitizer.attrs):
-                self._trace.input(entity_id, self.hass.states.get(entity_id), "initial")
-            self._trace.record("snapshot_end", {"entities": len(self._trace.sanitizer.attrs)})
         self._recompute()
         self._tasks = [
             self.entry.async_create_background_task(
@@ -850,8 +811,6 @@ class OperatorRuntime:
             await asyncio.gather(flush, return_exceptions=True)
         await asyncio.gather(*self._tasks, return_exceptions=True)
         await asyncio.gather(*self._stop_tasks, return_exceptions=True)
-        # Waiting for this lock also drains service writes already in flight.
-        # Mutators queued before close recheck _closed under the same store lock.
         interrupted = []
         demote = self.shadow_locked and self._initialized
         interrupt = self._close_interrupts_timer_inputs and any(
@@ -859,9 +818,9 @@ class OperatorRuntime:
             for policy in self.policies.values()
         )
 
-        def fence(raw_state: StoredSnapshot) -> None:
+        def fence(raw_state: RuntimeSnapshot) -> None:
             # Unload fencing is entered only for initialized intent; abort cleanup skips it.
-            state = cast(RuntimeSnapshot, raw_state)
+            state = raw_state
             if interrupt:
                 for policy_id in self._input_fingerprints:
                     record = state["policy_inputs"].get(policy_id)
@@ -875,58 +834,26 @@ class OperatorRuntime:
             if demote:
                 state["modes"].update(dict.fromkeys(self.resources, "observe"))
 
-        success = True
-        if interrupt or demote:
-            try:
-                await self.store.async_update(fence, skip_unchanged=True)
-                # The unload fence starts from validated intent and changes only owned records.
-                self._state = cast(RuntimeSnapshot, self.store.state)
-            except IntentStoreError as err:
-                self._storage_fault(err)
-                success = not interrupt
-                if demote:
-                    self.hass.config_entries.async_update_entry(
-                        self.entry, options={**self.entry.options, "shadow_lock": True}
+        if self._initialized:
+            if interrupt or demote:
+                self._mutate_state(fence, skip_unchanged=True)
+                for policy_id in interrupted:
+                    policy = self.policies[policy_id]
+                    entity_id = er.async_get(self.hass).async_get_entity_id(
+                        "sensor", DOMAIN, f"{policy['resource_id']}_reason"
                     )
-            else:
-                if interrupted:
-                    for policy_id in interrupted:
-                        record = self._state["policy_inputs"][policy_id]
-                        episode_id = _input_episode(record)
-                        self._trace.event(
-                            "admission",
-                            {
-                                "action": "policy_input",
-                                "policy_id": policy_id,
-                                "input": record,
-                                "occurrences": [
-                                    self._state["occurrences"][json.dumps([policy_id, episode_id])]
-                                ],
-                                "revision": self._state["revision"],
-                            },
-                        )
-                        policy = self.policies[policy_id]
-                        entity_id = er.async_get(self.hass).async_get_entity_id(
-                            "sensor", DOMAIN, f"{policy['resource_id']}_reason"
-                        )
-                        self.hass.bus.async_fire(
-                            "logbook_entry",
-                            {
-                                "name": policy["name"],
-                                "message": (
-                                    "Timer episode interrupted by HA Operator reload or unload"
-                                ),
-                                "domain": DOMAIN,
-                                "entity_id": entity_id,
-                            },
-                        )
-        await self.store.async_close()
-        await self._trace.async_close()
-        # Failed unload retains platforms. Publish inhibition before dropping subscribers.
-        if not success:
-            self._notify()
+                    self.hass.bus.async_fire(
+                        "logbook_entry",
+                        {
+                            "name": policy["name"],
+                            "message": "Timer episode interrupted by HA Operator reload or unload",
+                            "domain": DOMAIN,
+                            "entity_id": entity_id,
+                        },
+                    )
+            await self._store.async_save(self._state)
         self._listeners.clear()
-        return success
+        return True
 
     @callback
     def subscribe(self, listener: Callable[[], None]) -> Callable[[], None]:
@@ -951,20 +878,12 @@ class OperatorRuntime:
         self._shadow_lock_latched |= bool(self.entry.options.get("shadow_lock", False))
         return self._shadow_lock_latched
 
-    def trace_health(self) -> dict[str, object]:
-        return self._trace.health()
-
-    async def async_export_trace(
-        self, *, after: int | None = None, limit: int = 100
-    ) -> dict[str, object]:
-        return await self._trace.async_export(after, limit)
-
     async def async_prepare_unlock(self) -> None:
-        """Durably demote all resources before the options flow removes its lock."""
+        """Demote all resources before the options flow removes its lock."""
         if self._closed:
             raise HomeAssistantError(translation_domain=DOMAIN, translation_key="unloaded")
         if self.shadow_locked:
-            await self._commit(
+            await self._change(
                 lambda state: state["modes"].update(dict.fromkeys(self.resources, "observe"))
             )
 
@@ -1000,7 +919,7 @@ class OperatorRuntime:
 
     def _admit(self, resource_id: str) -> ResourceConfig:
         config = self._resource(resource_id)
-        if self.fault or self.store.fault:
+        if self.fault:
             raise HomeAssistantError(translation_domain=DOMAIN, translation_key="storage_inhibited")
         if self.mode(resource_id) != "live":
             raise ServiceValidationError(
@@ -1035,13 +954,9 @@ class OperatorRuntime:
     ) -> None:
         if self._closed:
             raise HomeAssistantError(translation_domain=DOMAIN, translation_key="unloaded")
-        replayed = False
         changed: list[str] = []
 
         def mutate(state: RuntimeSnapshot) -> None:
-            nonlocal replayed
-            if self._closed:
-                raise HomeAssistantError(translation_domain=DOMAIN, translation_key="unloaded")
             previous = dict(state["intents"])
             try:
                 apply_command(state["intents"], self.intents, intent_id, on)
@@ -1054,53 +969,15 @@ class OperatorRuntime:
             changed[:] = [
                 key for key, value in state["intents"].items() if previous.get(key) != value
             ]
-            replayed = previous == state["intents"]
 
-        await self._commit(
+        await self._change(
             mutate,
-            lambda state: {
-                "action": "set_desired",
-                "intent_id": intent_id,
-                "intents": state["intents"],
-                "replayed": replayed,
-            },
             context_key=lambda: [("intent", key) for key in changed],
             context=context,
             skip_unchanged=True,
         )
 
-    async def async_seed_intents(self, values: object) -> None:
-        """Import a migration snapshot without replaying logical ON edges."""
-        if self._closed:
-            raise HomeAssistantError(translation_domain=DOMAIN, translation_key="unloaded")
-
-        def mutate(state: RuntimeSnapshot) -> None:
-            if self._closed:
-                raise HomeAssistantError(translation_domain=DOMAIN, translation_key="unloaded")
-            if (
-                not isinstance(values, dict)
-                or not values
-                or any(
-                    key not in self.intents or type(value) is not bool
-                    for key, value in values.items()
-                )
-            ):
-                raise ServiceValidationError(
-                    translation_domain=DOMAIN, translation_key="invalid_seed"
-                )
-            if any(
-                config.get("intent_id") in values and self.mode(config["resource_id"]) != "observe"
-                for config in self.policies.values()
-            ):
-                raise ServiceValidationError(
-                    translation_domain=DOMAIN, translation_key="seed_requires_observe"
-                )
-            # The request dictionary and every configured key/boolean were checked above.
-            state["intents"].update(cast(dict[str, bool], values))
-
-        await self._commit(mutate, lambda state: {"action": "seed_intents", "intents": values})
-
-    def _storage_fault(self, error: Exception) -> None:
+    def _invalid_state(self, error: Exception) -> None:
         self.fault = "storage_error"
         _LOGGER.error("HA Operator state cannot be trusted: %s", error)
         ir.async_create_issue(
@@ -1112,68 +989,43 @@ class OperatorRuntime:
             translation_key="storage_error",
         )
 
-    async def _commit(
+    @callback
+    def _mutate_state(
         self,
         mutator: Callable[[RuntimeSnapshot], object],
-        admission: Callable[[RuntimeSnapshot], dict[str, object]] | None = None,
+        *,
+        skip_unchanged: bool = False,
+    ) -> bool:
+        """Validate a candidate mutation before replacing runtime-owned state."""
+        candidate = deepcopy(self._state)
+        mutator(candidate)
+        if skip_unchanged and candidate == self._state:
+            return False
+        self._state = candidate
+        self._store.async_delay_save(lambda: self._state, 1)
+        return True
+
+    async def _change(
+        self,
+        mutator: Callable[[RuntimeSnapshot], object],
         *,
         context_key: ContextKey | Callable[[], Iterable[ContextKey]] | None = None,
         context: Context | None = None,
         skip_unchanged: bool = False,
     ) -> RuntimeSnapshot:
+        """Apply a synchronous state change, then publish and wake current work."""
         if self._closed:
             raise HomeAssistantError(translation_domain=DOMAIN, translation_key="unloaded")
-        if self.fault or self.store.fault:
+        if self.fault:
             raise HomeAssistantError(translation_domain=DOMAIN, translation_key="storage_inhibited")
-        candidate: RuntimeSnapshot | None = None
-        candidate_revision: int | None = None
-
-        def own_mutation(raw_state: StoredSnapshot) -> None:
-            # Runtime writes start from startup-validated intent and produce typed records.
-            state = cast(RuntimeSnapshot, raw_state)
-            nonlocal candidate, candidate_revision
-            if self._closed:
-                raise HomeAssistantError(translation_domain=DOMAIN, translation_key="unloaded")
-            candidate_revision = state["revision"]
-            mutator(state)
-            candidate = state
-
-        try:
-            committed = await self.store.async_update(
-                own_mutation, **({"skip_unchanged": True} if skip_unchanged else {})
-            )
-            # The store detached and persisted the existing validated intent plus our mutation.
-            return cast(RuntimeSnapshot, committed)
-        except IntentStoreError as err:
-            self._storage_fault(err)
-            raise HomeAssistantError(
-                translation_domain=DOMAIN, translation_key="persistence_failed"
-            ) from err
-        finally:
-            # A cancelled request can still have committed. Store drains its executor
-            # before cancellation escapes, so always observe the committed revision.
-            if not self.fault:
-                # This publication is the validated snapshot plus this owned transaction.
-                self._state = cast(RuntimeSnapshot, self.store.state)
-                if (
-                    admission is not None
-                    and candidate is not None
-                    and candidate["revision"] <= self._state["revision"]
-                    and (not skip_unchanged or candidate["revision"] != candidate_revision)
-                ):
-                    admitted = admission(candidate)
-                    if (
-                        context_key is not None
-                        and context is not None
-                        and not admitted.get("replayed")
-                    ):
-                        for key in context_key() if callable(context_key) else [context_key]:
-                            self._contexts[key] = context
-                    self._trace.event("admission", {**admitted, "revision": candidate["revision"]})
-            if not self._closed:
-                self._recompute()
-                self._wake_all()
-                self._notify()
+        changed = self._mutate_state(mutator, skip_unchanged=skip_unchanged)
+        if changed and context_key is not None and context is not None:
+            for key in context_key() if callable(context_key) else [context_key]:
+                self._contexts[key] = context
+        self._recompute()
+        self._wake_all()
+        self._notify()
+        return self._state
 
     async def async_request(
         self,
@@ -1273,23 +1125,7 @@ class OperatorRuntime:
             self._admit(resource_id)
             existing = state["requests"].get(request_id)
             if existing:
-                expected = fingerprint
-                # Older snapshots fingerprinted the normalized target. Keep their
-                # receipts usable; new fan receipts identify the submitted command.
-                if (
-                    fan_command
-                    and requested is not None
-                    and existing.get("fingerprint_kind") != "requested"
-                ):
-                    try:
-                        expected = fingerprint_for(self.adapter(resource_id).normalize(requested))
-                    except TargetValidationError as err:
-                        raise ServiceValidationError(
-                            translation_domain=DOMAIN,
-                            translation_key=err.translation_key,
-                            translation_placeholders=err.translation_placeholders,
-                        ) from err
-                if existing["fingerprint"] != expected:
+                if existing["fingerprint"] != fingerprint:
                     raise ServiceValidationError(
                         translation_domain=DOMAIN, translation_key="request_id_conflict"
                     )
@@ -1322,18 +1158,10 @@ class OperatorRuntime:
             if settings is not None:
                 state["manuals"][resource_id]["fan_settings"] = settings
             state["requests"][request_id] = {"fingerprint": fingerprint, "receipt": receipt}
-            if fan_command:
-                state["requests"][request_id]["fingerprint_kind"] = "requested"
 
-        await self._commit(
+        await self._change(
             mutate,
-            lambda state: {
-                "action": "request",
-                "resource_id": resource_id,
-                "manual": state["manuals"].get(resource_id),
-                "replayed": replayed,
-            },
-            context_key=("manual", request_id),
+            context_key=lambda: [] if replayed else [("manual", request_id)],
             context=context,
         )
         return {**receipt, "accepted": True}
@@ -1341,7 +1169,7 @@ class OperatorRuntime:
     def _fan_command(
         self, resource_id: str, requested: Target, state: RuntimeSnapshot
     ) -> tuple[Target, JSONObject]:
-        """Compose under the intent writer lock, never from uncommitted state.
+        """Compose from current runtime intent in the same HA event-loop turn.
 
         Fan protocols send power, speed and direction separately. An off relay
         profile has no direction, so retain selected settings with its lease;
@@ -1398,9 +1226,8 @@ class OperatorRuntime:
 
     async def async_release(self, resource_id: str) -> None:
         self._manual_resource(resource_id)
-        await self._commit(
+        await self._change(
             lambda state: state["manuals"].pop(resource_id, None),
-            lambda state: {"action": "release", "resource_id": resource_id},
         )
         self._emergency_hands_off.pop(resource_id, None)
         self._recompute()
@@ -1453,13 +1280,8 @@ class OperatorRuntime:
             }
 
         try:
-            await self._commit(
+            await self._change(
                 mutate,
-                lambda state: {
-                    "action": "stop",
-                    "resource_id": resource_id,
-                    "manual": state["manuals"][resource_id],
-                },
             )
             emergency = self._emergency_hands_off.get(resource_id)
             if emergency is not None and emergency.request_id == stop_id:
@@ -1515,13 +1337,8 @@ class OperatorRuntime:
                     if policy["resource_id"] == resource_id:
                         self._suppress_timer_input(state, policy_id)
 
-        await self._commit(
+        await self._change(
             mutate,
-            lambda state: {
-                "action": "set_mode",
-                "resource_id": resource_id,
-                "mode": mode,
-            },
         )
 
     def _suppress_timer_input(self, state: RuntimeSnapshot, policy_id: str) -> None:
@@ -1567,13 +1384,8 @@ class OperatorRuntime:
                     if occurrence["policy_id"] == policy_id:
                         occurrence["skipped"] = True
 
-        await self._commit(
+        await self._change(
             mutate,
-            lambda state: {
-                "action": "set_policy_enabled",
-                "policy_id": policy_id,
-                "enabled": enabled,
-            },
         )
 
     def _occurrence(
@@ -1626,15 +1438,9 @@ class OperatorRuntime:
                     or not self._eligible(config, policy_id),
                 }
 
-        await self._commit(
+        await self._change(
             mutate,
-            lambda state: {
-                "action": "submit_occurrence",
-                "policy_id": policy_id,
-                "occurrence": state["occurrences"][key],
-                "replayed": replayed,
-            },
-            context_key=("occurrence", policy_id, occurrence_id),
+            context_key=lambda: [] if replayed else [("occurrence", policy_id, occurrence_id)],
             context=context,
         )
         return self._state["occurrences"][key].copy()
@@ -1655,13 +1461,8 @@ class OperatorRuntime:
             )
             item["skipped"] = True
 
-        await self._commit(
+        await self._change(
             mutate,
-            lambda state: {
-                "action": "skip_occurrence",
-                "policy_id": policy_id,
-                "occurrence": state["occurrences"][key],
-            },
         )
 
     async def async_reconcile(self, resource_id: str | None = None) -> None:
@@ -1669,7 +1470,7 @@ class OperatorRuntime:
             self._resource(resource_id)
         if self._input_fingerprints or self._return_fingerprints:
             self._queue_reconciliation(
-                {resource_id} if resource_id else set(self.resources), durable_input=True
+                {resource_id} if resource_id else set(self.resources), policy_input=True
             )
             if self._input_flush is not None:
                 _, cancelled = await async_settle(self._input_flush)
@@ -1787,34 +1588,15 @@ class OperatorRuntime:
     def _input_changed(self, event: StateEvent | datetime) -> None:
         if self._closed:
             return
-        if self._trace.enabled and _is_state_event(event):
-            # Only state-reported payloads supply these native datetime fields.
-            report_data = (
-                cast(Event[EventStateReportedData], event).data
-                if event.event_type == EVENT_STATE_REPORTED
-                else None
-            )
-            entity_id = event.data.get("entity_id")
-            self._trace.input(
-                entity_id,
-                event.data.get("new_state"),
-                str(event.event_type),
-                event.time_fired.timestamp(),
-                event.context,
-                report_data.get("old_last_reported") if report_data is not None else None,
-                report_data.get("last_reported") if report_data is not None else None,
-            )
-            if entity_id not in self._decision_input_entities:
-                return
         if not _is_state_event(event):
             # Absolute lease/occurrence and provider deadlines need no telemetry.
             self._queue_reconciliation(
-                set(self.resources), durable_input=bool(self._input_fingerprints)
+                set(self.resources), policy_input=bool(self._input_fingerprints)
             )
             return
         entity_id = event.data["entity_id"]
         affected = self._input_resources.get(entity_id, set())
-        durable_input = False
+        policy_input = False
         if entity_id in self._policy_sources:
             native = event.data.get("new_state")
             if entity_id.startswith("timer."):
@@ -1842,7 +1624,7 @@ class OperatorRuntime:
                                 )
                                 if accepted:
                                     continue
-                                durable_input = True
+                                policy_input = True
                                 self._policy_events.append(
                                     (
                                         policy_id,
@@ -1893,7 +1675,7 @@ class OperatorRuntime:
                         self._policy_events.append(
                             (policy_id, report, event.time_fired.timestamp(), event.context, True)
                         )
-                    self._queue_reconciliation(affected, durable_input=True)
+                    self._queue_reconciliation(affected, policy_input=True)
                     return
                 # Native input is unchanged; shared roles still need the ordinary report checks.
         if event.event_type == EVENT_STATE_REPORTED:
@@ -1914,14 +1696,14 @@ class OperatorRuntime:
             deadline_due = self._next_evaluation is not None and self._next_evaluation <= _now()
             if not changed and not affected & self._applying and not deadline_due:
                 return
-        self._queue_reconciliation(affected, durable_input=durable_input)
+        self._queue_reconciliation(affected, policy_input=policy_input)
 
     @callback
-    def _queue_reconciliation(self, resource_ids: set[str], *, durable_input: bool = False) -> None:
+    def _queue_reconciliation(self, resource_ids: set[str], *, policy_input: bool = False) -> None:
         if self._closed:
             return
         self._pending_resources.update(resource_ids)
-        if durable_input:
+        if policy_input:
             for resource_id in resource_ids:
                 self._input_ingress[resource_id] += 1
         if self._input_flush is None:
@@ -1932,7 +1714,7 @@ class OperatorRuntime:
             )
 
     async def _async_flush_inputs(self) -> None:
-        # Keep ownership across every durable write; arriving edges join this drain.
+        # Keep ownership across input state changes; arriving edges join this drain.
         try:
             affected = set()
             while not self._closed:
@@ -1968,7 +1750,7 @@ class OperatorRuntime:
             self._wake_resources(affected)
             self._notify()
         except HomeAssistantError:
-            # _commit already publishes the storage fault and inhibits dispatch.
+            # Closed or unusable runtimes reject input changes.
             pass
         finally:
             self._input_flush = None
@@ -1985,34 +1767,6 @@ class OperatorRuntime:
                 self._queue_reconciliation(set())
 
     @callback
-    def _external_command(self, event: Event[Mapping[str, Any]]) -> None:
-        data = event.data
-        entity_id = data.get("entity_id")
-        if entity_id not in self._trace.sanitizer.attrs or data.get("service") not in {
-            "open_cover",
-            "close_cover",
-            "stop_cover",
-            "set_cover_position",
-            "turn_on",
-            "turn_off",
-            "set_percentage",
-            "set_direction",
-        }:
-            return
-        self._trace.event(
-            "external_command",
-            {
-                "source": "homekit",
-                "entity_id": entity_id,
-                "service": data["service"],
-                "value": data.get("value"),
-                "context_id": event.context.id,
-                "evidence": "bridge_request",
-                "at": event.time_fired.timestamp(),
-            },
-        )
-
-    @callback
     def _wake_all(self) -> None:
         self._wake_resources(self.resources)
 
@@ -2023,7 +1777,7 @@ class OperatorRuntime:
                 self._wake[identifier].set()
 
     def policy_input(self, policy_id: str) -> NumericState | TimerState | None:
-        """Expose committed input state without scheduling or mutating qualification."""
+        """Expose current input state without scheduling or mutating qualification."""
         record = self._state["policy_inputs"].get(policy_id)
         if record is None:
             return None
@@ -2031,7 +1785,7 @@ class OperatorRuntime:
         return model.from_record(record["state"])
 
     def return_monitor(self, resource_id: str) -> ReturnMonitorState:
-        """Expose committed monitor state; telemetry and desired values stay separate."""
+        """Expose current monitor state; telemetry and desired values stay separate."""
         record = self._state["return_monitors"].get(resource_id)
         return ReturnMonitorState.from_record(record["state"]) if record else ReturnMonitorState()
 
@@ -2066,7 +1820,7 @@ class OperatorRuntime:
         self._return_dirty.clear()
 
         def mutate(state: RuntimeSnapshot) -> None:
-            # Run under the existing writer using current inputs, not a queued desired snapshot.
+            # Use current inputs in this synchronous state update.
             self._recompute(mark_returns=False)
             for key, fingerprint in self._return_fingerprints.items():
                 previous = ReturnMonitorState.from_record(state["return_monitors"][key]["state"])
@@ -2075,7 +1829,7 @@ class OperatorRuntime:
                     "state": self._return_transition(key, previous, _now()).state.to_record(),
                 }
 
-        await self._commit(mutate, skip_unchanged=True)
+        await self._change(mutate, skip_unchanged=True)
 
     def _sync_return_notifications(self, now: float) -> None:
         if self._closed or self.fault or self._policy_events:
@@ -2152,7 +1906,7 @@ class OperatorRuntime:
                 for item in self._state["occurrences"].values()
             ]
         except (KeyError, ValueError, TypeError) as err:
-            self._storage_fault(err)
+            self._invalid_state(err)
             manuals, occurrences = [], []
             resources = {key: replace(item, fault=self.fault) for key, item in resources.items()}
         engine: EngineInputs = dict(
@@ -2191,22 +1945,6 @@ class OperatorRuntime:
         self._contexts = {
             key: value for key, value in self._contexts.items() if key in valid_contexts
         }
-        trace_engine = None
-        if self._trace.enabled:
-            trace_engine = {
-                "now": now,
-                "resources": {key: asdict(value) for key, value in engine["resources"].items()},
-                "observations": {
-                    key: asdict(value) for key, value in engine["observations"].items()
-                },
-                "requirement_memory": {
-                    key: asdict(value) for key, value in engine["requirement_memory"].items()
-                },
-                "manuals": [asdict(value) for value in engine["manuals"]],
-                "policies": [asdict(value) for value in engine["policies"]],
-                "occurrences": [asdict(value) for value in engine["occurrences"]],
-                "requirements": [asdict(value) for value in engine["requirements"]],
-            }
         previous_decisions = self.decisions
         previous_selections = self.selections
         # HA state reads and evaluation are synchronous: retain this cause snapshot,
@@ -2290,15 +2028,6 @@ class OperatorRuntime:
                     decision.source,
                 )
             ):
-                self.history.append(
-                    {
-                        "at": now,
-                        "resource_id": key,
-                        "status": decision.status,
-                        "source": decision.source,
-                        "target": decision.target.to_dict() if decision.target else None,
-                    }
-                )
                 if old is not None and (
                     cause_changed
                     or old.target != decision.target
@@ -2397,24 +2126,6 @@ class OperatorRuntime:
         if self._next_evaluation is not None:
             self._deadline_timer = async_call_later(
                 self.hass, max(0.01, self._next_evaluation - now), self._input_changed
-            )
-
-        if trace_engine is not None:
-            self._trace.event(
-                "decision",
-                {
-                    **self.explain(),
-                    "engine": trace_engine,
-                    "engine_result": {
-                        "decisions": {
-                            key: asdict(value) for key, value in result.decisions.items()
-                        },
-                        "requirements": {
-                            key: asdict(value) for key, value in result.requirements.items()
-                        },
-                        "next_evaluation": result.next_evaluation,
-                    },
-                },
             )
 
     def _selection_context(self, resource_id: str) -> Context | None:
@@ -2639,7 +2350,6 @@ class OperatorRuntime:
             self._resource(resource_id)
         ids = [resource_id] if resource_id is not None else list(self.resources)
         return {
-            "revision": self._state["revision"],
             "fault": self.fault,
             "shadow_locked": self.shadow_locked,
             "resources": {

@@ -30,8 +30,8 @@ rules:
       HA integrations. `custom_components/ha_operator/manifest.json`. Source: https://developers.home-assistant.io/docs/core/integration-quality-scale/rules/dependency-transparency/'
   docs-actions:
     status: done
-    comment: 'docs/reference.md documents all eight actions, response contracts, administrator restrictions,
-      and durable acceptance versus physical convergence. README.md links the reference. Source: https://developers.home-assistant.io/docs/core/integration-quality-scale/rules/docs-actions/'
+    comment: 'docs/reference.md documents all six actions, response contracts, administrator restrictions,
+      and runtime acceptance versus physical convergence. README.md links the reference. Source: https://developers.home-assistant.io/docs/core/integration-quality-scale/rules/docs-actions/'
   docs-triggers:
     status: done
     comment: 'No custom automation trigger platform is exposed. Listening to native timer events does
@@ -50,8 +50,7 @@ rules:
       configuration. `README.md`. Source: https://developers.home-assistant.io/docs/core/integration-quality-scale/rules/docs-installation-instructions/'
   docs-removal-instructions:
     status: done
-    comment: 'docs/removal.md documents ownership transfer, dependency order, package removal, and retained
-      snapshots/traces. Source: https://developers.home-assistant.io/docs/core/integration-quality-scale/rules/docs-removal-instructions/'
+    comment: 'docs/removal.md documents ownership transfer, dependency order, package removal, and native Store cleanup. Source: https://developers.home-assistant.io/docs/core/integration-quality-scale/rules/docs-removal-instructions/'
   entity-event-setup:
     status: done
     comment: 'Entity subscriptions start in async_added_to_hass and register async_on_remove cleanup.
@@ -83,7 +82,7 @@ rules:
       Source: https://developers.home-assistant.io/docs/core/integration-quality-scale/rules/unique-config-entry/'
   action-exceptions:
     status: done
-    comment: 'Validation uses ServiceValidationError; durable-write/runtime failure reaches callers as
+    comment: 'Validation uses ServiceValidationError; runtime validation failure reaches callers as
       HomeAssistantError. Native entity commands share that boundary. `custom_components/ha_operator/services.py`;
       `custom_components/ha_operator/runtime.py`. Source: https://developers.home-assistant.io/docs/core/integration-quality-scale/rules/action-exceptions/'
   config-entry-unloading:
@@ -102,7 +101,7 @@ rules:
   entity-unavailable:
     status: done
     comment: 'Adapter source availability distinguishes absent/unavailable sources from reachable unknown
-      or unusable values. Managed and Observed entities use it; durable intent and physical confirmation
+      or unusable values. Managed and Observed entities use it; saved intent and physical confirmation
       guards remain separate. Tests: tests/integration/test_source_availability.py and tests/integration/test_provenance.py.
       Source: https://developers.home-assistant.io/docs/core/integration-quality-scale/rules/entity-unavailable/'
   integration-owner:
@@ -116,9 +115,9 @@ rules:
       Source: https://developers.home-assistant.io/docs/core/integration-quality-scale/rules/log-when-unavailable/'
   parallel-updates:
     status: done
-    comment: 'All seven event-driven platforms declare PARALLEL_UPDATES = 0. Existing durable admission
+    comment: 'All seven event-driven platforms declare PARALLEL_UPDATES = 0. HA-loop state updates
       and one worker per resource own ordering. Native services prove independent progress, same-resource
-      durable order, and STOP bypass. Tests: tests/integration/test_platform_concurrency.py, test_runtime_requests.py,
+      request order, and STOP bypass. Tests: tests/integration/test_platform_concurrency.py, test_runtime_requests.py,
       and test_runtime_boundaries.py. Source: https://developers.home-assistant.io/docs/core/integration-quality-scale/rules/parallel-updates/'
   reauthentication-flow:
     status: exempt
@@ -167,7 +166,7 @@ rules:
       integrations own device support. Source: https://developers.home-assistant.io/docs/core/integration-quality-scale/rules/docs-supported-devices/'
   docs-supported-functions:
     status: done
-    comment: 'docs/reference.md documents seven platforms, four subentries, eight actions, use cases,
+    comment: 'docs/reference.md documents seven platforms, four subentries, six actions, use cases,
       capabilities, and limitations. Source: https://developers.home-assistant.io/docs/core/integration-quality-scale/rules/docs-supported-functions/'
   docs-troubleshooting:
     status: done
@@ -230,8 +229,7 @@ rules:
       https://developers.home-assistant.io/docs/core/integration-quality-scale/rules/stale-devices/'
   async-dependency:
     status: done
-    comment: 'No external client dependency exists. HA calls are async; snapshot reads/writes and trace
-      disk work run in the executor. `custom_components/ha_operator/storage.py`; `custom_components/ha_operator/shadow.py`.
+    comment: 'No external client dependency exists. HA calls are async; native Store handles persistence. `custom_components/ha_operator/runtime.py`.
       Source: https://developers.home-assistant.io/docs/core/integration-quality-scale/rules/async-dependency/'
   inject-websession:
     status: exempt

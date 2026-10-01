@@ -468,7 +468,16 @@ async def run_windows(lab):
             await control(hidden_rain=True)
             await call(100, 3)
             simulator_id = (await lab.sim(path="/health"))["instance_id"]
-            await lab.crash(action)
+            saved_request = None
+            if action == "kill":
+                manual = (await explain())["manual"]
+                saved_request = {
+                    "kind": "manual",
+                    "key": resources[0],
+                    "identity": manual["request_id"],
+                    "expires_at": manual["expires_at"],
+                }
+            await lab.crash(action, saved_request=saved_request)
             if action == "kill":
                 await lab.crash("start")
             await lab.ready()
@@ -571,7 +580,7 @@ async def run_windows(lab):
             explain,
             lambda state: state["manual"] and state["manual"]["target"]["position"] == baseline,
         )
-        (ARTIFACTS / "window-hap-durable-receipt.json").write_text(
+        (ARTIFACTS / "window-hap-request-result.json").write_text(
             json.dumps(accepted["manual"], indent=2)
         )
         await control(hidden_rain=False)
@@ -1071,7 +1080,13 @@ async def run_native_windows(lab, resources, entities, modes):
             original = await phase(timed, "accepted")
             await lab.wait_position(100)
             simulator_id = (await lab.sim(path="/health"))["instance_id"]
-            await lab.crash(action)
+            saved_request = {
+                "kind": "timer",
+                "key": timed,
+                "identity": original["episode_id"],
+                "expires_at": original["expires_at"],
+            }
+            await lab.crash(action, saved_request=saved_request)
             if action == "kill":
                 await lab.crash("start")
             await lab.ready()

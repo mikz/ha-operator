@@ -11,12 +11,11 @@ owns brightness, color, and other lighting behavior.
 ## Configure a source
 
 Add a **Desired control** subentry. Choose its name and initial value. The
-initial value applies only on first creation and is saved before publication.
+initial value applies when no saved value exists.
 Editing the initial value later does not overwrite existing intent.
 
 Optionally select other desired controls under **Also turn on these desired
-controls**. An OFF-to-ON command turns those controls on in the same atomic
-snapshot. Repeating ON leaves independently changed dependents alone. OFF never
+controls**. An OFF-to-ON command turns those controls on in the same state update. Repeating ON leaves independently changed dependents alone. OFF never
 turns a dependent off. Cycles and missing references are rejected.
 
 For example, configure `Central sleep` to turn on `Room sleep`:
@@ -31,8 +30,8 @@ For example, configure `Central sleep` to turn on `Room sleep`:
 | Room on | off | on |
 | Central on, then off | off | on |
 
-A restart restores the committed pair. It does not synthesize an ON transition.
-A successful command means the desired value was durably accepted; physical
+A restart restores the saved pair. It does not synthesize an ON transition.
+A successful command means the runtime accepted the desired value; physical
 convergence is a separate result.
 
 ## Configure followers
@@ -50,7 +49,7 @@ convergence is a separate result.
 4. Inspect the desired, observed, reason, and status sensors in observe mode.
 5. Transfer output ownership before selecting live mode.
 
-The source reference uses the stable subentry ID and reads committed intent
+The source reference uses the stable subentry ID and reads the current desired value
 directly. It does not depend on an entity ID slug or the timing of HA state
 publication. Other managed-entity policy inputs remain prohibited.
 
@@ -86,11 +85,10 @@ private deployment record. Use these stages for a source-only migration:
    control with its ON target. Add each downstream flag as a separate resource
    with manual control disabled and a state policy referencing its source.
    Keep every new follower in observe mode.
-5. Use `ha_operator.seed_intents` to import the final pair atomically. Its
-   `values` object maps desired-control subentry IDs to booleans. This action
-   bypasses ON attachment deliberately, preserving central ON / room OFF. It
-   requires all affected followers to be in observe mode and an administrator.
-   It does not command any output.
+5. Check each configured initial value. The 0.2.0 upgrade starts fresh and does
+   not import old runtime values. Use normal desired-switch commands while
+   followers remain in observe mode to establish reviewed values. To request
+   central ON with room OFF, turn central ON first, then turn room OFF.
 6. At the handover, retire both synchronization automations and the separate
    central-ON-to-room-ON automation. Quiesce running actions. Existing schedule
    automations remain; repoint their actions to the desired controls. Repoint
@@ -109,7 +107,7 @@ private deployment record. Use these stages for a source-only migration:
    running HAP server with the intended accessory mapping. The config entry
    can be loaded before the server is ready. Options already request a reload;
    do not add a second reload while it is starting.
-8. Check for commands during the handover. Refresh the import only while the old
+8. Check for commands during the handover. Establish reviewed values while the old
    entry points remain authoritative. Once a new desired control has accepted a
    command, do not overwrite it with a later read of legacy feedback. If commands
    cross the transfer boundary ambiguously, pause activation and resolve their
@@ -121,7 +119,7 @@ private deployment record. Use these stages for a source-only migration:
    scheduled wake. Compare desired and observed histories. Keep physical lamp
    behavior and reported mode convergence as separate observations.
 
-The isolated `sleep` lab scenario exercises native setup, import, absence of
+The isolated `sleep` lab scenario exercises native setup, configured defaults, absence of
 manual follower controls, group commands, SIGKILL recovery, genuine encrypted
 HAP commands, preserved HAP identity across Operator reload, and the native
 dashboard. It pairs existing native group helpers before replacing their raw
@@ -138,7 +136,7 @@ client-side rebinding still requires its own review.
 ## Roll back the control migration
 
 1. Put all new followers in observe mode and confirm their workers are quiescent.
-2. Preserve the last committed central and room values independently.
+2. Preserve the last saved central and room values independently.
 3. Restore public group membership and direct caller references from the private
    receipt. Keep the corrected synchronization automations disabled while
    transferring the two source values, so their ON coupling cannot overwrite a
@@ -148,12 +146,10 @@ client-side rebinding still requires its own review.
 4. Restore the corrected one-way mirrors and the previous coupling automation
    after both legacy sources reflect the preserved values. Verify each output
    has exactly one controller.
-5. Retain the new integration package and snapshot while other Operator
-   resources remain active. The snapshot migrates from version 1 to version 2
-   on save; an old integration binary cannot read version 2. Operational rollback
-   does not require a binary downgrade. A later binary downgrade needs a separate
-   offline, validated snapshot/configuration conversion; do not restore a stale
-   whole-installation backup or erase current cover/fan intent.
+5. Retain the new integration and native Store while other resources remain
+   active. A binary downgrade to v0.1.6 requires restoring its matching deployment
+   backup; it cannot read the new native Store. Plan rollback separately from
+   transferring current desired values.
 
 Existing Recorder history remains on the original entities. New desired controls
 start their own history; keeping a public group preserves its identity, not the

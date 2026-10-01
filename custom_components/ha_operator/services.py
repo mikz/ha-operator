@@ -44,21 +44,6 @@ _OCCURRENCE = vol.Schema(
 )
 
 
-def _trace_integer(value: object) -> int:
-    if type(value) is not int:
-        raise vol.Invalid("Expected an integer")
-    return value
-
-
-_TRACE = vol.Schema(
-    {
-        vol.Optional("config_entry_id"): cv.string,
-        vol.Optional("after"): vol.All(_trace_integer, vol.Range(min=0)),
-        vol.Optional("limit", default=100): vol.All(_trace_integer, vol.Range(min=1, max=1000)),
-    }
-)
-
-
 @callback
 def async_register_services(hass: HomeAssistant) -> None:
     def runtime_for(call: ServiceCall) -> OperatorRuntime:
@@ -112,13 +97,6 @@ def async_register_services(hass: HomeAssistant) -> None:
         # HA encodes native heterogeneous response values (including tuples and
         # observed attributes); its decoded-JSON alias is narrower than this boundary.
         runtime = runtime_for(call)
-        if call.service == "seed_intents":
-            await runtime.async_seed_intents(call.data["values"])
-            return None
-        if call.service == "export_trace":
-            return await runtime.async_export_trace(
-                after=call.data.get("after"), limit=call.data["limit"]
-            )
         if call.service == "submit_occurrence":
             occurrence = await runtime.async_submit_occurrence(
                 call.data["policy_id"],
@@ -156,26 +134,6 @@ def async_register_services(hass: HomeAssistant) -> None:
         await runtime.async_release(resource_id)
         return None
 
-    service.async_register_admin_service(
-        hass,
-        DOMAIN,
-        "seed_intents",
-        handle,
-        schema=vol.Schema(
-            {
-                vol.Optional("config_entry_id"): cv.string,
-                vol.Required("values"): dict,
-            }
-        ),
-    )
-    service.async_register_admin_service(
-        hass,
-        DOMAIN,
-        "export_trace",
-        handle,
-        schema=_TRACE,
-        supports_response=SupportsResponse.ONLY,
-    )
     for name in (
         "request",
         "release",

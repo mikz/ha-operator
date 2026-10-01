@@ -85,6 +85,16 @@ def lab_source_hashes():
     }
 
 
+def release_metadata():
+    """Carry the exact release version and manifest hash in lab output."""
+    content = (ROOT / "dist/ha_operator.manifest.json").read_bytes()
+    manifest = json.loads(content)
+    return {
+        "integration_version": manifest["version"],
+        "release_manifest_sha256": hashlib.sha256(content).hexdigest(),
+    }
+
+
 def prepare(args):
     """Only this phase is allowed to fetch/build dependencies."""
     command([sys.executable, "scripts/release.py", "verify"], capture=False)
@@ -134,6 +144,7 @@ def prepare(args):
         raise RuntimeError("Lab sources changed during image preparation; run prepare again")
     receipt = {
         "ha_version": args.ha_version,
+        **release_metadata(),
         "artifact_sha256": digest,
         "base_images": {"ha": ha_base, "python": python_base},
         "images": {role: image_id(ref) for role, ref in references.items()},
@@ -162,6 +173,39 @@ def select_subnet():
         if not any(subnet.overlaps(item) for item in used if item.version == 4):
             return str(subnet), str(subnet.network_address + 10)
     raise RuntimeError("No unused lab subnet available")
+
+
+def wait_saved_request(container, entry_id, expected, *, timeout=15):
+    """Wait for this lab request's ordinary Store save before SIGKILL."""
+    if not entry_id.isalnum() or expected["kind"] not in {"manual", "timer"}:
+        raise RuntimeError("Invalid lab Store precondition")
+    probe = """import json, sys
+from pathlib import Path
+path = Path('/config/.storage') / ('ha_operator.' + sys.argv[1])
+expected = json.loads(sys.argv[2])
+try:
+    state = json.loads(path.read_text())['data']
+    if expected['kind'] == 'manual':
+        record = state['manuals'].get(expected['key'], {})
+        identity = record.get('request_id')
+    else:
+        record = state['policy_inputs'].get(expected['key'], {}).get('state', {})
+        identity = record.get('episode_id')
+    ready = identity == expected['identity'] and record.get('expires_at') == expected['expires_at']
+    if expected['kind'] == 'timer':
+        ready = ready and record.get('phase') == 'accepted'
+except (OSError, ValueError, KeyError):
+    ready = False
+print(json.dumps(ready))
+"""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if json_output(
+            ["docker", "exec", container, "python3", "-c", probe, entry_id, json.dumps(expected)]
+        ):
+            return {"verified_at": time.time(), **expected}
+        time.sleep(0.1)
+    raise RuntimeError("Expected lab request did not reach native Store before SIGKILL")
 
 
 def collect_route_snapshot(container):
@@ -207,6 +251,9 @@ def run_lab(args):
         raise RuntimeError("Release differs from prepared image; run prepare again")
     if receipt.get("lab_source_hashes") != lab_source_hashes():
         raise RuntimeError("Lab sources differ from prepared images; run prepare again")
+    metadata = release_metadata()
+    if any(receipt.get(key) != value for key, value in metadata.items()):
+        raise RuntimeError("Release manifest differs from prepared images; run prepare again")
     for image in receipt["images"].values():
         if image_id(image) != image:
             raise RuntimeError("Prepared image unavailable")
@@ -221,13 +268,6 @@ def run_lab(args):
     staging.mkdir(parents=True, mode=0o700)
     control.mkdir(mode=0o700)
     artifacts.mkdir(mode=0o700)
-    if getattr(args, "trace", None):
-        # Only validated, normalized JSON enters the private offline lab. Never
-        # mount the external export or its parent directory into a container.
-        from tests.lab.shadow_trace import load_trace
-
-        atomic_text(control / "shadow-input.json", Path(args.trace).read_text())
-        load_trace(control / "shadow-input.json")
     subnet, ha_address = select_subnet()
     env = dict(
         os.environ,
@@ -257,6 +297,7 @@ def run_lab(args):
         "status": "failed",
         "started_at": started,
         "ha_version": args.ha_version,
+        **metadata,
         "artifact_sha256": archive_digest,
         "docker_engine": engine,
         "scenario": args.scenario,
@@ -325,13 +366,19 @@ def run_lab(args):
                 ):
                     raise RuntimeError("Crash target identity changed")
                 action = message["action"]
+                save_precondition = None
                 if action == "kill":
+                    save_precondition = wait_saved_request(
+                        containers["ha"], message["entry_id"], message["saved_request"]
+                    )
                     command(["docker", "kill", "--signal", "KILL", containers["ha"]])
                 elif action == "restart":
                     command(["docker", "restart", "--time", "60", containers["ha"]], timeout=90)
                 else:
                     command(["docker", "start", containers["ha"]])
                 ack = {**message, "completed_at": time.time(), "container_id": containers["ha"]}
+                if save_precondition is not None:
+                    ack["normal_store_save_verified"] = save_precondition
                 write_json(control / request.name.replace("request-", "ack-"), ack)
                 with (artifacts / "crash-events.jsonl").open("a") as stream:
                     stream.write(json.dumps(ack) + "\n")
@@ -419,8 +466,7 @@ def main():
             "soak",
             "cellar",
             "windows",
-            "shadow",
-            "replay",
+            "observe",
             "observability",
             "sleep",
         ),

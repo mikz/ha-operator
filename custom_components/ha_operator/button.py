@@ -14,7 +14,7 @@ from .entity import OperatorEntity
 if TYPE_CHECKING:
     from .runtime import OperatorRuntime
 
-# The runtime serializes durable admission and owns one worker per resource, owning all its outputs.
+# The runtime updates state on the HA loop and owns one worker per resource and its outputs.
 PARALLEL_UPDATES = 0
 
 

@@ -31,7 +31,7 @@ def digest(data: bytes) -> str:
 
 
 def component_digest(files: dict[str, bytes]) -> str:
-    """Match the installed component's trace fingerprint without ZIP metadata."""
+    """Match the installed component fingerprint without ZIP metadata."""
     source = {
         name: digest(content)
         for name, content in files.items()
@@ -134,9 +134,9 @@ def build(root: Path, output: Path, *, replace: bool = False) -> dict:
     revision = subprocess.run(
         ["git", "rev-parse", "HEAD"], cwd=root, capture_output=True, text=True, check=False
     )
-    locks = sorted({
-        *root.glob("*.lock"), *root.glob("requirements/*.lock"), *root.glob("compat/*/uv.lock")
-    })
+    locks = sorted(
+        {*root.glob("*.lock"), *root.glob("requirements/*.lock"), *root.glob("compat/*/uv.lock")}
+    )
     evidence = {
         "schema_version": 2,
         "domain": DOMAIN,
@@ -181,9 +181,8 @@ def verify(archive: Path, manifest: Path, *, root: Path | None = None) -> dict:
     actual = {name: {"sha256": digest(data), "size": len(data)} for name, data in files.items()}
     if evidence.get("files") != actual or evidence.get("version") != integration["version"]:
         raise ValueError("Archive member evidence or version differs")
-    if (
-        evidence["schema_version"] == 2
-        and evidence.get("component_sha256") != component_digest(files)
+    if evidence["schema_version"] == 2 and evidence.get("component_sha256") != component_digest(
+        files
     ):
         raise ValueError("Installed component fingerprint differs from release manifest")
     if root is not None and files != integration_files(root):

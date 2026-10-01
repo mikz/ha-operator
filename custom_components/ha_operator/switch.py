@@ -1,4 +1,4 @@
-"""Observed switches and durable policy-enabled controls."""
+"""Observed switches and policy-enabled controls."""
 
 from __future__ import annotations
 
@@ -15,7 +15,7 @@ from .entity import OperatorEntity, ResourceEntity
 if TYPE_CHECKING:
     from .runtime import OperatorRuntime
 
-# The runtime serializes durable admission and owns one worker per resource, owning all its outputs.
+# The runtime updates state on the HA loop and owns one worker per resource and its outputs.
 PARALLEL_UPDATES = 0
 
 
@@ -48,7 +48,7 @@ class DesiredSwitch(OperatorEntity, SwitchEntity):
 
     @property
     def available(self) -> bool:
-        return not self.runtime.fault and not self.runtime.store.fault
+        return not self.runtime.fault
 
     @property
     def is_on(self) -> bool | None:

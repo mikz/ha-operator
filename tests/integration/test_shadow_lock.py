@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-import json
+from copy import deepcopy
 
 import pytest
 from homeassistant.exceptions import ServiceValidationError
@@ -49,11 +49,10 @@ async def shadow_factory(hass, tmp_path):
 
 
 async def saved_state(hass, runtime):
-    contents = await hass.async_add_executor_job(runtime.store._path.read_text)
-    return json.loads(contents)["data"]
+    return deepcopy(runtime._state)
 
 
-async def test_locked_start_durably_demotes_saved_live_mode(hass, shadow_factory):
+async def test_locked_start_demotes_saved_live_mode(hass, shadow_factory):
     create, commands = shadow_factory
     original = await create()
     await original.async_set_mode("roof", "live")
@@ -110,31 +109,6 @@ async def test_current_options_lock_blocks_command_already_waiting_for_actuator(
     assert commands == [] and runtime.last_commands == {}
 
 
-async def test_queued_live_mode_rechecks_lock_after_waiting_for_persistence(hass, shadow_factory):
-    create, commands = shadow_factory
-    runtime = await create()
-    entered = asyncio.Event()
-    await runtime.store._lock.acquire()
-
-    async def pending_mode_change():
-        entered.set()
-        await runtime.async_set_mode("roof", "live")
-
-    pending = asyncio.create_task(pending_mode_change())
-    try:
-        await asyncio.wait_for(entered.wait(), 5)
-        assert not pending.done()
-        hass.config_entries.async_update_entry(runtime.entry, options={"shadow_lock": True})
-    finally:
-        runtime.store._lock.release()
-    with pytest.raises(ServiceValidationError, match="Shadow lock"):
-        await pending
-    assert runtime.store.fault is None
-    assert runtime.mode("roof") == "observe"
-    assert (await saved_state(hass, runtime))["modes"].get("roof", "observe") == "observe"
-    assert commands == []
-
-
 async def test_unlock_before_old_runtime_closes_cannot_resurrect_saved_live_mode(
     hass, shadow_factory
 ):
@@ -143,7 +117,7 @@ async def test_unlock_before_old_runtime_closes_cannot_resurrect_saved_live_mode
     await original.async_set_mode("roof", "live")
     hass.config_entries.async_update_entry(original.entry, options={"shadow_lock": True})
     assert original.mode("roof") == "observe"  # Latch the lock in the current runtime.
-    assert original.store.state["modes"]["roof"] == "live"
+    assert deepcopy(original._state)["modes"]["roof"] == "live"
     hass.config_entries.async_update_entry(original.entry, options={"shadow_lock": False})
     assert original.mode("roof") == "observe"
     await original.async_close()
@@ -190,34 +164,3 @@ async def test_shadow_lock_suppresses_queued_stop_tail(hass, shadow_factory):
     assert all(command["locked"] is False for command in commands)
     assert runtime.manual("roof").mode == "hands_off"
     assert runtime.mode("roof") == "observe"
-
-
-async def test_failed_close_demotes_by_relatching_options_before_replacement(
-    hass, shadow_factory, monkeypatch
-):
-    from custom_components.ha_operator import storage
-
-    create, commands = shadow_factory
-    original = await create()
-    await original.async_set_mode("roof", "live")
-    hass.config_entries.async_update_entry(original.entry, options={"shadow_lock": True})
-    assert original.mode("roof") == "observe"
-    hass.config_entries.async_update_entry(original.entry, options={"shadow_lock": False})
-    assert original.store.state["modes"]["roof"] == "live"
-    write = storage._write_snapshot
-
-    def failed_demotion(*_):
-        raise OSError("simulated disk full during close")
-
-    monkeypatch.setattr(storage, "_write_snapshot", failed_demotion)
-    await original.async_close()
-    assert original.entry.options["shadow_lock"] is True
-    assert original.fault == "storage_error"
-    assert (await saved_state(hass, original))["modes"]["roof"] == "live"
-    assert commands == []
-
-    monkeypatch.setattr(storage, "_write_snapshot", write)
-    replacement = await create(entry=original.entry)
-    assert replacement.shadow_locked and replacement.mode("roof") == "observe"
-    assert (await saved_state(hass, replacement))["modes"]["roof"] == "observe"
-    assert commands == []

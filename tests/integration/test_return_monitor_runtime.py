@@ -1,16 +1,13 @@
 """Durable return deadlines and warnings use independently reported raw feedback."""
 
-# ruff: noqa: F811 - imported fixture intentionally injected by name
+from copy import deepcopy
 
-import asyncio
-import threading
+# ruff: noqa: F811 - imported fixture intentionally injected by name
 from unittest.mock import patch
 
 import pytest
 from homeassistant.components import persistent_notification
-from homeassistant.exceptions import HomeAssistantError
 
-from custom_components.ha_operator import storage
 from custom_components.ha_operator.runtime import OperatorRuntime
 from tests.integration.test_runtime_reconciliation import (
     advance,  # noqa: F401
@@ -64,7 +61,7 @@ async def test_refusal_retries_and_unchanged_reports_keep_due_warn_once_then_raw
     create, dismiss = notifications
     runtime = await setup_monitor(hass, factory)
     due = runtime.return_monitor("roof").due_at
-    revision = runtime.store.state["revision"]
+    revision = deepcopy(runtime._state)
     assert commands[0][1]["position"] == 7
     assert runtime.observations["roof"].target.position == 100
     for _ in range(4):
@@ -72,7 +69,7 @@ async def test_refusal_retries_and_unchanged_reports_keep_due_warn_once_then_raw
         await hass.async_block_till_done()
         await advance(hass, freezer, 30)
         assert runtime.return_monitor("roof").due_at == due
-        assert runtime.store.state["revision"] == revision
+        assert deepcopy(runtime._state) == revision
     assert len(commands) > 1
     assert create.call_count == 0
     await advance(hass, freezer, 180)
@@ -82,21 +79,21 @@ async def test_refusal_retries_and_unchanged_reports_keep_due_warn_once_then_raw
     assert "raw position is 100%" in message
     assert "rain" not in message
     warning_id = create.call_args.kwargs["notification_id"]
-    warned_revision = runtime.store.state["revision"]
+    warned_revision = deepcopy(runtime._state)
     for _ in range(3):
         reported(hass, position=100)
         await advance(hass, freezer, 30)
     assert create.call_count == 1
-    assert runtime.store.state["revision"] == warned_revision
+    assert deepcopy(runtime._state) == warned_revision
     reported(hass, position=7)
     await hass.async_block_till_done()
     assert runtime.return_monitor("roof").phase == "idle"
     assert dismiss.call_args.args == (hass, warning_id)
     assert runtime.decisions["roof"].status == "satisfied"
-    settled_revision = runtime.store.state["revision"]
+    settled_revision = deepcopy(runtime._state)
     reported(hass, position=7)
     await hass.async_block_till_done()
-    assert runtime.store.state["revision"] == settled_revision
+    assert deepcopy(runtime._state) == settled_revision
     assert runtime._input_flush is None
 
 
@@ -209,68 +206,6 @@ async def test_confirmed_before_restart_dismisses_durable_overdue_notification(
         await fresh.async_close()
 
 
-async def test_monitor_save_failure_inhibits_control_and_warning(
-    hass, runtime_factory, freezer, notifications, monkeypatch
-):
-    factory, commands = runtime_factory
-    create, _ = notifications
-    runtime = await setup_monitor(hass, factory)
-    prior = runtime.return_monitor("roof")
-
-    def fail(path, state):
-        raise OSError("injected monitor save failure")
-
-    monkeypatch.setattr(storage, "_write_snapshot", fail)
-    await advance(hass, freezer, 300)
-    assert runtime.fault
-    assert runtime.return_monitor("roof") == prior
-    assert create.call_count == 0
-    # An existing durable target may retry before the warning write reports failure.
-    # Once the fault is published, further retries and admissions must be inhibited.
-    count = len(commands)
-    await advance(hass, freezer, 60)
-    assert len(commands) == count
-    with pytest.raises(HomeAssistantError):
-        await runtime.async_request("roof", target={"position": 0})
-
-
-@pytest.mark.parametrize("edge", ["confirmation", "target_end"])
-async def test_queued_transition_during_warning_save_never_submits_stale_notification(
-    hass, runtime_factory, freezer, notifications, monkeypatch, edge
-):
-    factory, _ = runtime_factory
-    create, _ = notifications
-    hass.states.async_set("input_boolean.cold", "on")
-    runtime = await setup_monitor(hass, factory, eligibility_entity="input_boolean.cold")
-    entered, release = threading.Event(), threading.Event()
-    real_write = storage._write_snapshot
-
-    def gate(path, state):
-        if state["return_monitors"]["roof"]["state"]["overdue"]:
-            entered.set()
-            assert release.wait(5)
-        real_write(path, state)
-
-    monkeypatch.setattr(storage, "_write_snapshot", gate)
-    advancing = asyncio.create_task(advance(hass, freezer, 300))
-    try:
-        assert await asyncio.to_thread(entered.wait, 2)
-        if edge == "confirmation":
-            reported(hass, position=7)
-        else:
-            hass.states.async_set("input_boolean.cold", "off")
-        await asyncio.sleep(0)
-        release.set()
-        await advancing
-        await hass.async_block_till_done()
-        assert runtime.return_monitor("roof").phase == "idle"
-        assert create.call_count == 0
-        assert runtime._input_flush is None
-    finally:
-        release.set()
-        await advancing
-
-
 @pytest.mark.parametrize("quality", ["restored", "optimistic", "assumed_state"])
 async def test_untrusted_raw_return_after_restart_does_not_clear_saved_warning(
     hass, runtime_factory, freezer, notifications, quality
@@ -320,7 +255,7 @@ async def test_removed_monitor_dismisses_existing_stable_warning(
     await fresh.async_start()
     try:
         await hass.async_block_till_done()
-        assert fresh.store.state["return_monitors"] == {}
+        assert deepcopy(fresh._state)["return_monitors"] == {}
         assert create.call_count == 0
         assert dismiss.call_args.args == (hass, warning_id)
     finally:

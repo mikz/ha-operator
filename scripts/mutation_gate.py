@@ -65,18 +65,6 @@ MUTANTS = (
         ),
     ),
     Mutant(
-        "publish_before_atomic_save",
-        "custom_components/ha_operator/storage.py",
-        "candidate = deepcopy(candidate)\n            try:",
-        "candidate = deepcopy(candidate)\n            self._state = candidate\n            try:",
-        (
-            "tests/unit/test_storage.py::test_write_failure_never_acknowledges_or_overwrites_in_memory",
-            "tests/unit/test_storage.py::test_real_atomic_writer_failure_boundaries",
-            "tests/unit/test_storage.py::"
-            "test_cancellation_serializes_writes_and_publishes_committed_revision",
-        ),
-    ),
-    Mutant(
         "native_timer_survives_exact_expiry",
         "custom_components/ha_operator/policy_inputs.py",
         'if state.phase in ("qualifying", "accepted"):\n'
@@ -91,7 +79,7 @@ MUTANTS = (
         ),
     ),
     Mutant(
-        "pending_finish_becomes_accepted_during_save",
+        "pending_finish_becomes_accepted_before_processing",
         "custom_components/ha_operator/policy_inputs.py",
         'event.kind == "finish"\n'
         '                    and (state.phase == "qualifying" '
@@ -99,7 +87,7 @@ MUTANTS = (
         'event.kind == "finish"\n                    and state.phase == "qualifying"',
         (
             "tests/unit/test_policy_inputs.py::"
-            "test_finish_captured_during_admission_save_invalidates_later_published_request",
+            "test_finish_captured_before_admission_rejects_later_request",
         ),
     ),
     Mutant(
@@ -110,22 +98,6 @@ MUTANTS = (
         "observed_position is None\n"
         "            or abs(observed_position - target_position) <= config.tolerance",
         ("tests/unit/test_return_monitor.py::test_mismatch_or_unknown_cannot_confirm",),
-    ),
-    Mutant(
-        "queued_mutator_commits_after_close",
-        "custom_components/ha_operator/runtime.py",
-        "            if self._closed:\n"
-        "                raise HomeAssistantError(translation_domain=DOMAIN, "
-        'translation_key="unloaded")\n'
-        '            candidate_revision = state["revision"]',
-        "            if False:\n"
-        "                raise HomeAssistantError(translation_domain=DOMAIN, "
-        'translation_key="unloaded")\n'
-        '            candidate_revision = state["revision"]',
-        (
-            "tests/integration/test_policy_inputs_lifecycle.py::"
-            "test_reload_drains_admission_then_fences_and_rejects_queued_mutator",
-        ),
     ),
     Mutant(
         "pending_source_fact_dispatches_inside_adapter",

@@ -124,7 +124,7 @@ type SubentryConfig = ResourceConfig | PolicyConfig | RequirementConfig | Intent
 
 
 class NumericStateRecord(TypedDict, total=False):
-    """Defaults can be omitted by legacy saved input records."""
+    """Input state fields with model defaults."""
 
     due_at: float | None
     qualified: bool
@@ -168,7 +168,6 @@ class ReturnMonitorRecord(TypedDict):
 
 class ManualRecord(TypedDict):
     mode: Literal["target", "hands_off"]
-    # Legacy validation treats falsey target values as absent, without rewriting them.
     target: NotRequired[TargetData | JSONValue]
     expires_at: NotRequired[float | None]
     request_id: NotRequired[str | None]
@@ -196,12 +195,10 @@ class AcceptedRequestReceipt(RequestReceipt):
 
 class RequestRecord(TypedDict):
     fingerprint: str
-    fingerprint_kind: NotRequired[Literal["normalized", "requested"]]
     receipt: RequestReceipt
 
 
 class _SnapshotMaps(TypedDict):
-    revision: int
     modes: dict[str, Literal["observe", "live"]]
     policy_enabled: dict[str, bool]
     intents: dict[str, bool]
@@ -218,7 +215,7 @@ class StoredSnapshot(_SnapshotMaps):
 
 
 class RuntimeSnapshot(_SnapshotMaps):
-    """Saved intent after runtime semantic validation, or owned transactions."""
+    """Saved intent after runtime semantic validation, or validated state changes."""
 
     manuals: dict[str, ManualRecord]
     occurrences: dict[str, OccurrenceRecord]

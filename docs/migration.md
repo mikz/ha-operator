@@ -90,7 +90,7 @@ control paths in a private deployment record.
 2. Add the integration and resource subentries in observe mode. Bind physical
    entities rather than a legacy virtual proxy when physical feedback is needed.
    For the 0.1.1 shadow rollout, also enable the integration-wide `shadow_lock`
-   and `trace_enabled` options. Keep new managed entities out of HomeKit, mobile
+   option. Keep new managed entities out of HomeKit, mobile
    controls, areas, floors, and labels used by aggregate actions.
 3. Configure retry cadence, movement timeout, tolerance, and any restriction or
    fault inputs from the device's contract. A rain input is optional.
@@ -129,7 +129,7 @@ house. A recorded legacy command or movement never proves HA Operator actuation.
    integration request. Preserve access to the raw entity for diagnosis without
    treating its telemetry as a manual lease.
 4. Set the resource mode select to `live`. Inspect the effective target before
-   this step because valid durable intent resumes automatically.
+   this step because eligible automatic requests resume.
 5. Verify the approved production behavior through observed feedback and logs.
    Lab failure injection, rain-refusal simulation, relay faults, and crash tests
    remain in the isolated lab.
@@ -150,11 +150,10 @@ manual lease, or relabel an unconfirmed provider as ready.
    binding supports it; a raw cover with features `7` has no native STOP.
 3. Restore the recorded legacy owner and bridge routes without leaving two
    command writers enabled.
-4. Preserve the intent store, fault details, release hash, and relevant logs.
-   Correct a storage problem before explicitly reloading for recovery. Do not
-   delete durable intent to clear an error indicator.
+4. Keep a HA backup, fault details, release hash, and relevant logs. Follow
+   the Repair for unusable restored data, then reload after recovery.
 5. Reenter observe mode and repeat the affected gates before another takeover.
 
-Lease expiry and release resume still-valid durable intent. Before resuming live
+Lease expiry and release resume eligible automatic requests. Before resuming live
 operation after an extended rollback, inspect that intent and deliberately
 release or replace obsolete requests.

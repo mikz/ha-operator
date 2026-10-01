@@ -1,8 +1,8 @@
 # Publication privacy
 
 Public examples and tests use synthetic identifiers and inputs. Keep actual
-installation inventories, schedules, trace captures, incident histories, and
-replay bindings in a private directory outside the repository. Do not reuse
+installation inventories, schedules, diagnostics, incident histories, and
+deployment bindings in a private directory outside the repository. Do not reuse
 conversation, device, or configuration IDs as convenient fixture values.
 
 The lab uses disposable credentials and independent simulated devices. Its

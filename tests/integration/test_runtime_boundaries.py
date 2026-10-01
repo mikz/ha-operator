@@ -1,9 +1,9 @@
 """Physical transport ordering at STOP and runtime teardown boundaries."""
 
 # ruff: noqa: F811 - imported pytest fixture is intentionally injected by name
-
 import asyncio
 import threading
+from copy import deepcopy
 
 import pytest
 from homeassistant.exceptions import HomeAssistantError
@@ -232,7 +232,7 @@ async def test_unload_waits_for_an_inflight_stop_operation(hass, runtime_factory
         with pytest.raises(HomeAssistantError, match="unloaded"):
             await asyncio.wait_for(stopping, 1)
         assert await asyncio.wait_for(closing, 1)
-        assert runtime.store.state["manuals"] == {}
+        assert deepcopy(runtime._state)["manuals"] == {}
         assert finished.is_set()
         assert journal == ["stop"]
         await hass.async_block_till_done()

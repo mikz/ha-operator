@@ -75,16 +75,14 @@ these sensors do not reconstruct events from before installation.
 Activity records target, source, and meaningful outcome transitions with the
 managed entity reference. Each physical service call receives a new context.
 When an accepted request or occurrence has a known ingress context, the dispatch
-context references it as its parent. Context is not durable: after restart,
+context references it as its parent. Context is not restored: after restart,
 request IDs and deadlines survive but the original context is unavailable.
 Telemetry never establishes manual ownership or identifies a user.
 
 `ha_operator.explain` includes the selection snapshot, candidates, rejection
 reasons, observation, lease, and requirement predicates. Downloadable diagnostics
 remain allowlisted and omit private labels and entity IDs.
-Native input and return-monitor state is bounded in diagnostics and the initial
-trace snapshot. Trace input sources include sensor unit metadata. Unit strings,
-episode identities, and configuration fingerprints use opaque aliases in exports.
+Native input and return-monitor state is bounded in allowlisted diagnostics.
 
 Keep histories from earlier template helpers separate. Reusing their entity IDs
 does not reliably merge Recorder history with the new native entities.
@@ -128,7 +126,7 @@ Managed observation entities and **Observed** distinguish source availability
 from usable physical feedback. Missing sources and sources reporting
 `unavailable` make these entities unavailable. A present source with an unknown
 or unusable value keeps them available with an unknown state. **Desired target**,
-**Reason**, and durable intent remain available during an outage. The execution
+**Reason**, and current intent remain available during an outage. The execution
 status can still report unavailable when feedback is unusable; source presence
 alone does not permit a command or confirm airflow.
 
@@ -140,7 +138,7 @@ transition or extend accepted deadlines. The distinction can affect dashboards,
 automations, and History that previously treated all unusable values as unknown.
 
 Native entity calls have no platform-wide concurrency semaphore. The runtime
-serializes durable admission and owns one worker per resource, including every
+updates state on the HA loop and owns one worker per resource, including every
 output of a relay fan. Independent resources can make progress while another
 physical command waits. Same-resource supersession and physical STOP retain the
 runtime's generation fences, transport settlement, and pacing rules.

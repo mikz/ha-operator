@@ -3,16 +3,15 @@
 HA Operator uses one configuration entry with four native subentry types:
 resources, policies, airflow requirements, and desired controls. Existing Home
 Assistant integrations own the physical devices. Operator owns logical devices
-and durable intent. See the [adapter examples](../examples/README.md) for complete
+and saved intent. See the [adapter examples](../examples/README.md) for complete
 configuration objects.
 
 ## Configure the integration
 
-Add **HA Operator** in **Settings > Devices & services**. Trace recording and the
-shadow lock default to off. `trace_enabled` records bounded local decision and
-observation evidence. `trace_entities` adds observed source entities; it grants no
-command authority. `shadow_lock` prevents every resource from entering live mode.
-After removing the lock, activate each validated resource through its mode select.
+Add **HA Operator** in **Settings > Devices & services**. The
+shadow lock defaults to off. Enabling it keeps resources in observe mode and
+blocks Operator actuator commands. Disabling it leaves resources in observe
+mode until explicitly activated.
 
 Adding, editing, or removing a subentry reloads the entry automatically after a
 healthy setup. Reload and entity enablement can interrupt active native timer
@@ -119,26 +118,24 @@ Operator never turns extraction off to satisfy an airflow requirement.
 A desired control needs `name` and explicit Boolean `initial_value`. The initial
 value only seeds an absent saved value. Optional `on_targets` lists existing
 desired control IDs in an acyclic graph. An off-to-on command sets those controls
-on in one durable transaction. Repeated on and switching off do not change them.
+on in one state update. Repeated on and switching off do not change them.
 See [desired controls](desired-controls.md) for configuration and migration.
 
 ## Call integration actions
 
-Operator registers eight actions. All require a loaded entry. Optional
+Operator registers six actions. All require a loaded entry. Optional
 `config_entry_id` selects that entry; omission uses the singleton. Resource
 selectors are one `resource_id` or one managed `entity_id`, never both. IDs are
 native subentry IDs, not user labels or raw physical source entities.
 
 | Action | Inputs | Response and acceptance |
 | --- | --- | --- |
-| `ha_operator.request` | Resource selector; `mode` (default `target`); `target` for target mode; optional expiry and `request_id` | Optional response: `accepted`, `request_id`, `resource_id`, `expires_at`. Accepts a durable manual lease for a live resource with manual control. `hands_off` forbids a target. |
+| `ha_operator.request` | Resource selector; `mode` (default `target`); `target` for target mode; optional expiry and `request_id` | Optional response: `accepted`, `request_id`, `resource_id`, `expires_at`. Accepts a manual lease for a live resource with manual control. `hands_off` forbids a target. |
 | `ha_operator.release` | Resource selector | No response. Durably releases the manual lease; valid automatic intent can resume. |
-| `ha_operator.submit_occurrence` | `policy_id`, `occurrence_id`, `expires_at` | Optional durable occurrence response. Requires an enabled occurrence policy on a live resource. |
+| `ha_operator.submit_occurrence` | `policy_id`, `occurrence_id`, `expires_at` | Optional occurrence response. Requires an enabled occurrence policy on a live resource. |
 | `ha_operator.skip_occurrence` | `policy_id`, `occurrence_id`, `expires_at` | No response. Durably suppresses that identity, including before submission. |
 | `ha_operator.reconcile` | Optional resource selector | No response. Reevaluate one resource or all resources; respects mode, deadlines, restrictions, faults, and pacing. |
-| `ha_operator.explain` | Optional resource selector | Required response: revision, fault, current decisions/observations, manual leases, last commands, attempts, and requirements. Read-only explanation is not authoritative device feedback. |
-| `ha_operator.seed_intents` | `values`: mapping of desired control IDs to Boolean values | Administrator only; no response. Atomically seeds explicit migration values while affected resources remain in observe mode. No dependent ON edges are replayed. |
-| `ha_operator.export_trace` | Optional `after` (nonnegative integer), `limit` (1–1000, default 100) | Administrator only; required response: sanitized journal page with records, cursor, gap, and health. Inspect completeness before using it as evidence. No device commands. |
+| `ha_operator.explain` | Optional resource selector | Required response: fault, current decisions/observations, manual leases, last commands, attempts, and requirements. Read-only explanation is not authoritative device feedback. |
 
 For manual expiry, choose at most one of positive `duration` in seconds, future
 `expires_at` in UTC Unix seconds, or `indefinite: true`. Omit all three to use the
@@ -147,10 +144,11 @@ have 1–128 characters. Reuse a request ID only for identical intent. A repeate
 occurrence ID cannot replay a skipped, canceled, or expired occurrence. Source
 updates do not extend absolute deadlines.
 
-Success means accepted intent reached durable storage. Dispatch, physical
-movement, and independent confirmation can follow later or remain blocked.
+Success means the runtime accepted the command. Home Assistant Store saves
+state through its normal delayed lifecycle. Physical movement and independent
+confirmation can follow later or remain blocked.
 Observe mode accepts no new manual requests or occurrences and emits no outputs.
-`seed_intents` is an explicit observe-only migration operation. No custom trigger
+No custom trigger
 or condition platform is exposed: use native entity state triggers/conditions
 and existing timer events. Native cover, fan, switch, and select actions remain
 available according to each entity's capabilities. Supported cover STOP uses

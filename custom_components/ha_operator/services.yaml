@@ -1,17 +1,3 @@
-seed_intents:
-  name: Import desired states
-  description: Import boolean desired states atomically without triggering ON attachments. Every affected follower must be in observe mode. Use only for migration; normal controls use the desired switches.
-  fields:
-    values:
-      name: Desired control values
-      required: true
-      description: An object mapping desired control subentry IDs to true or false.
-      selector:
-        object: null
-    config_entry_id:
-      name: Integration entry ID
-      selector:
-        text: null
 request:
   name: Request control
   description: Durably accept a manual target or hands-off lease for one live resource.
@@ -237,38 +223,6 @@ explain:
       name: Managed resource entity
       description: The managed cover, fan, or switch belonging to one resource. Choose this or Resource ID, not
         both.
-    config_entry_id:
-      name: Configuration entry
-      description: Optional entry selector. Defaults to the single HA Operator integration.
-      advanced: true
-      selector:
-        config_entry:
-          integration: ha_operator
-export_trace:
-  name: Export recorded trace
-  description: Administrator-only export of one page of sanitized, locally recorded decision and observation events.
-    Records have durable sequence numbers. Use next_after as the next request cursor; inspect gap and health before
-    treating the trace as complete. This action never commands a device.
-  fields:
-    after:
-      name: After sequence
-      description: Return records after this durable sequence number. Omit to begin with the oldest retained record.
-      selector:
-        number:
-          min: 0
-          max: 9007199254740991
-          step: 1
-          mode: box
-    limit:
-      name: Page size
-      description: Maximum records to return, from 1 to 1000.
-      default: 100
-      selector:
-        number:
-          min: 1
-          max: 1000
-          step: 1
-          mode: box
     config_entry_id:
       name: Configuration entry
       description: Optional entry selector. Defaults to the single HA Operator integration.

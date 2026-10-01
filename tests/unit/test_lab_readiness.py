@@ -5,9 +5,9 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from tests.lab.readiness import wait_native_tokens, wait_trace_ready
+from tests.lab.readiness import wait_native_tokens, wait_operator_ready
 from tests.lab.runner import HA
-from tests.lab.scenarios_shadow import observe
+from tests.lab.scenarios_observe import observe
 
 
 async def test_native_tokens_wait_for_storage_condition_and_dispose_handle():
@@ -26,10 +26,9 @@ async def test_native_tokens_missing_storage_propagates_readiness_timeout():
 
 
 class PendingHA:
-    def __init__(self, states, sessions, *, enabled=True, locked=True):
+    def __init__(self, states, *, locked=True):
         self.states = iter(states)
-        self.sessions = iter(sessions)
-        self.enabled, self.locked = enabled, locked
+        self.locked = locked
         self.calls = []
 
     async def ws(self, command):
@@ -39,59 +38,47 @@ class PendingHA:
 
     async def service(self, domain, service, data, *, response):
         self.calls.append(("service", service))
-        value = (
-            {"health": {"enabled": self.enabled, "session_id": next(self.sessions, "new")}}
-            if service == "export_trace"
-            else {"shadow_locked": self.locked}
-        )
-        return {"service_response": value}
+        return {"service_response": {"shadow_locked": self.locked}}
 
 
-async def test_waits_for_loaded_entry_and_changed_trace_session():
-    ha = PendingHA(["unload_in_progress", "loaded", "loaded"], ["old", "new"])
-    result = await wait_trace_ready(ha, "test", "old", locked=True, interval=0)
-    assert result["session_id"] == "new"
+async def test_waits_for_native_loaded_entry_and_expected_lock():
+    ha = PendingHA(["unload_in_progress", "loaded"])
+    result = await wait_operator_ready(ha, "test", locked=True, interval=0)
+    assert result["shadow_locked"]
     assert ha.calls == [
         ("entry", "unload_in_progress"),
         ("entry", "loaded"),
-        ("service", "export_trace"),
-        ("entry", "loaded"),
-        ("service", "export_trace"),
         ("service", "explain"),
     ]
 
 
-@pytest.mark.parametrize("enabled,locked", [(False, True), (True, False)])
-async def test_disabled_trace_or_wrong_lock_never_becomes_ready(enabled, locked):
-    ha = PendingHA([], [], enabled=enabled, locked=locked)
+async def test_wrong_lock_never_becomes_ready():
     with pytest.raises(AssertionError, match="did not become ready"):
-        await wait_trace_ready(ha, "test", "old", locked=True, timeout=0.002, interval=0)
+        await wait_operator_ready(
+            PendingHA([], locked=False), "test", locked=True, timeout=0.002, interval=0
+        )
 
 
 async def test_permanent_service_error_is_not_suppressed():
-    ha = PendingHA([], [])
-
-    async def fail(*args, **kwargs):
-        raise AssertionError("persistent HTTP500 while loaded")
-
-    ha.service = fail
+    ha = PendingHA([])
+    ha.service = AsyncMock(side_effect=AssertionError("persistent HTTP500"))
     with pytest.raises(AssertionError, match="persistent HTTP500"):
-        await wait_trace_ready(ha, "test", "old", locked=True, interval=0)
+        await wait_operator_ready(ha, "test", locked=True, interval=0)
 
 
 async def test_options_setup_awaits_explicit_reload_before_readiness(monkeypatch):
-    ha = PendingHA([], ["old"])
+    ha = PendingHA([])
 
     async def options(entry, data):
         ha.calls.append(("options", data["shadow_lock"]))
         ha.calls.append(("reload", "completed"))
 
-    async def ready(actual, entry, previous, *, locked):
-        assert actual is ha and entry == "test" and previous == "old" and locked
+    async def ready(actual, entry, *, locked):
+        assert actual is ha and entry == "test" and locked
         assert ha.calls[-1] == ("reload", "completed")
 
     ha.options = options
-    monkeypatch.setattr("tests.lab.scenarios_shadow.wait_trace_ready", ready)
+    monkeypatch.setattr("tests.lab.scenarios_observe.wait_operator_ready", ready)
     await observe(SimpleNamespace(ha=ha, entry="test"), locked=True)
 
 
@@ -120,7 +107,7 @@ async def test_native_flow_helpers_do_not_return_before_reload_and_loaded_state(
 
     ha = FlowHA()
     if kind == "options":
-        await ha.options("test", {"trace_enabled": True})
+        await ha.options("test", {"shadow_lock": True})
     else:
         assert await ha.add_subentry("test", "resource", {"name": "Resource"}) == "resource"
     reload_index = ha.calls.index("/api/config/config_entries/entry/test/reload")

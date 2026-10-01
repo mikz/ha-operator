@@ -24,10 +24,32 @@ from homeassistant.components.switch import SwitchEntity
 from homeassistant.core import EVENT_STATE_CHANGED, callback
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.event import async_track_state_report_event
+from homeassistant.helpers.storage import Store
 from homeassistant.setup import async_setup_component
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.ha_operator.const import DOMAIN
+
+_NATIVE_LOAD = Store._async_load
+_NATIVE_WRITE = Store._async_write_data
+
+
+@pytest.fixture(autouse=True)
+def native_operator_storage(hass_storage):
+    with pytest.MonkeyPatch.context() as patcher:
+        for method, native in (("_async_load", _NATIVE_LOAD), ("_async_write_data", _NATIVE_WRITE)):
+            mocked = getattr(Store, method)
+
+            def route(native=native, mocked=mocked):
+                async def dispatch(store, *args, **kwargs):
+                    return await (native if store.key.startswith("ha_operator.") else mocked)(
+                        store, *args, **kwargs
+                    )
+
+                return dispatch
+
+            patcher.setattr(Store, method, route())
+        yield
 
 
 @pytest.fixture(autouse=True)
@@ -40,7 +62,6 @@ async def test_profile(hass, tmp_path):
     workload = os.environ["OPERATOR_PROFILE_WORKLOAD"]
     measure = os.environ["OPERATOR_PROFILE_MEASURE"]
     count = int(os.environ["OPERATOR_PROFILE_COUNT"])
-    trace = os.environ["OPERATOR_PROFILE_TRACE"] == "1"
     # Match production scheduling rather than pytest's expensive asyncio debug.
     loop = asyncio.get_running_loop()
     previous_debug = loop.get_debug()
@@ -83,12 +104,11 @@ async def test_profile(hass, tmp_path):
         hass.states.async_set(
             entity_id, "closed", {"current_position": 0, "supported_features": 15}
         )
-    hass.states.async_set("input_boolean.profile_trace", "off")
     entry = MockConfigEntry(
         domain=DOMAIN,
         title="Profile",
         data={},
-        options={"trace_enabled": trace, "trace_entities": ["input_boolean.profile_trace"]},
+        options={},
         subentries_data=[
             {
                 "subentry_id": f"resource{index}",
@@ -148,9 +168,7 @@ async def test_profile(hass, tmp_path):
         source_id = er.async_get(hass).async_get_entity_id("switch", DOMAIN, "central_desired")
         await hass.async_block_till_done()
     managed_ids = {
-        state.entity_id
-        for state in hass.states.async_all()
-        if state.entity_id not in {*raw_ids, "input_boolean.profile_trace"}
+        state.entity_id for state in hass.states.async_all() if state.entity_id not in set(raw_ids)
     }
 
     @callback
@@ -191,16 +209,11 @@ async def test_profile(hass, tmp_path):
             # Twenty-five changes in one loop turn; alternate the final position.
             for position in range(1, 26):
                 report(position if index % 2 else 100 - position)
-        else:
-            hass.states.async_set("input_boolean.profile_trace", "on" if index % 2 else "off")
         await hass.async_block_till_done()
 
     # Warm platforms, caches, and the same workload before the measured interval.
     for index in range(10):
         await batch(index)
-    if trace:
-        await runtime._trace.queue.join()
-    trace_start = runtime.trace_health()
     counts.clear()
     gc.collect()
     tasks_before = len(asyncio.all_tasks())
@@ -221,12 +234,6 @@ async def test_profile(hass, tmp_path):
     if profiler:
         profiler.disable()
     tasks_after = len(asyncio.all_tasks())
-    trace_end = runtime.trace_health()
-    drain_started_wall, drain_started_cpu = time.perf_counter(), time.process_time()
-    if trace:
-        await runtime._trace.queue.join()
-    drain_wall = time.perf_counter() - drain_started_wall
-    drain_cpu = time.process_time() - drain_started_cpu
     memory = None
     if measure == "memory":
         # Exclude the harness's retained latency samples from retained allocations.
@@ -238,7 +245,7 @@ async def test_profile(hass, tmp_path):
     result = {
         "workload": workload,
         "measurement": measure,
-        "trace_enabled": trace,
+        "measurement_boundary": "workload only; final unload save excluded",
         "batches": count,
         "input_events": count
         * (25 if workload == "changed_burst" else 15 if workload == "followers_reports" else 1),
@@ -253,19 +260,23 @@ async def test_profile(hass, tmp_path):
         "task_count_before": tasks_before,
         "task_count_after": tasks_after,
         "worker_count": len(runtime._tasks),
-        "trace_start": trace_start,
-        "trace_after_workload": trace_end,
-        "trace_after_drain": runtime.trace_health(),
-        "trace_drain_wall_seconds": drain_wall,
-        "trace_drain_cpu_seconds": drain_cpu,
         "python": platform.python_version(),
         "ha_version": version("homeassistant"),
         "fixture_version": version("pytest-homeassistant-custom-component"),
         "asyncio_debug": False,
         "scope": "native HA fixtures; live simulated feedback switches for followers, "
         "observe mode for covers; no Recorder, KNX, or full-house load; "
-        "workload timing excludes final trace drain; memory measured after drain",
+        "memory measured after workload and garbage collection",
     }
+
+    # Verify actual writer I/O outside the measured workload. Unload performs
+    # the candidate's ordinary final Store save; it is not part of timing.
+    await hass.config_entries.async_unload(entry.entry_id)
+    native_store = getattr(runtime, "_store", None)
+    snapshot_path = Path(native_store.path if native_store else runtime.store._path)
+    assert await hass.async_add_executor_job(snapshot_path.is_file)
+    result["storage_backend"] = "native Store" if native_store else "baseline snapshot"
+    result["saved_file_verified_after_unload"] = True
 
     # Output and profile serialization are excluded from the measured interval.
     def save():
@@ -276,7 +287,6 @@ async def test_profile(hass, tmp_path):
     await hass.async_add_executor_job(save)
     remove_changed()
     remove_reported()
-    await hass.config_entries.async_unload(entry.entry_id)
     loop.set_debug(previous_debug)
     if workload != "followers_commands":
         assert counts["actuator_commands"] == 0

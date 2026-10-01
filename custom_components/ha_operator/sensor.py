@@ -30,7 +30,7 @@ REQUIREMENT_SENSORS = ("status", "provider")
 if TYPE_CHECKING:
     from .runtime import OperatorRuntime
 
-# The runtime serializes durable admission and owns one worker per resource, owning all its outputs.
+# The runtime updates state on the HA loop and owns one worker per resource and its outputs.
 PARALLEL_UPDATES = 0
 
 
@@ -198,7 +198,7 @@ class ResourceSensor(OperatorEntity, SensorEntity):
 
 
 class PolicyInputSensor(OperatorEntity, SensorEntity):
-    """Read committed input phase and deadline; execution never depends on this entity."""
+    """Read current input phase and deadline; execution never depends on this entity."""
 
     def __init__(self, runtime: OperatorRuntime, identifier: str, key: str) -> None:
         super().__init__(runtime, identifier, key)

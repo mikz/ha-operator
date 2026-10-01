@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import logging
+import shutil
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from homeassistant.config_entries import ConfigEntry
@@ -12,6 +14,7 @@ from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.device_registry import DeviceEntry
+from homeassistant.helpers.storage import Store
 from homeassistant.helpers.typing import ConfigType
 
 from .configuration import ConfigurationError
@@ -111,11 +114,44 @@ async def async_unload_entry(hass: HomeAssistant, entry: OperatorConfigEntry) ->
     return await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
 
 
+async def async_remove_entry(hass: HomeAssistant, entry: OperatorConfigEntry) -> None:
+    """Remove native runtime storage when the user removes the integration."""
+    await Store(hass, 1, f"{DOMAIN}.{entry.entry_id}").async_remove()
+
+
 async def async_migrate_entry(hass: HomeAssistant, entry: OperatorConfigEntry) -> bool:
-    """Admit optional native input settings without rewriting existing subentries."""
-    if entry.version == 1:
-        hass.config_entries.async_update_entry(entry, version=2, minor_version=1)
-    return entry.version == 2
+    """Retain configuration and discard obsolete runtime files without loading them.
+
+    Back up the deployment before upgrading to 0.2.0. Runtime state starts from
+    configured defaults through native Store; subentries and registry IDs remain.
+    """
+    if entry.version not in (1, 2, 3):
+        return False
+    if entry.version == 3:
+        return True
+
+    def remove_obsolete_files() -> None:
+        Path(hass.config.path(f"ha_operator.{entry.entry_id}.json")).unlink(missing_ok=True)
+        trace = Path(hass.config.path(f"ha_operator_trace.{entry.entry_id}"))
+        if trace.is_symlink():
+            trace.unlink()
+        elif trace.exists():
+            shutil.rmtree(trace)
+
+    await hass.async_add_executor_job(remove_obsolete_files)
+    hass.config_entries.async_update_entry(
+        entry,
+        data={key: value for key, value in entry.data.items() if key != "initialized"},
+        options={
+            key: value
+            for key, value in entry.options.items()
+            if key not in {"trace_enabled", "trace_entities"}
+        },
+        version=3,
+        minor_version=1,
+    )
+    _LOGGER.info("Removed obsolete HA Operator runtime files for entry %s", entry.entry_id)
+    return True
 
 
 async def async_remove_config_entry_device(

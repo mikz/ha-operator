@@ -1,17 +1,17 @@
-"""Fan commands compose durable intent while independent feedback remains unchanged."""
+"""Fan commands compose current intent while independent feedback remains unchanged."""
+
+from copy import deepcopy
 
 # ruff: noqa: F811 - pytest fixtures are injected by name
-
-import asyncio
-import threading
-
 import pytest
 
-from custom_components.ha_operator import storage
 from custom_components.ha_operator.fan import OperatorFan
 from custom_components.ha_operator.runtime import OperatorRuntime, _validate_saved_state
 from tests.integration.test_runtime_reconciliation import runtime_factory  # noqa: F401
-from tests.integration.test_runtime_requests import clock, disk_state, wait_thread  # noqa: F401
+from tests.integration.test_runtime_requests import (
+    clock,  # noqa: F401
+    current_state,
+)
 
 
 @pytest.fixture(params=["fan", "relay_fan"])
@@ -73,7 +73,7 @@ async def test_on_and_direction_compose_before_raw_feedback(fan_runtime, directi
     assert target.on is True
     assert target.direction == "reverse"
     assert target.percentage == 100
-    assert disk_state(runtime)["manuals"]["vent"]["target"] == target.to_dict()
+    assert current_state(runtime)["manuals"]["vent"]["target"] == target.to_dict()
     assert fan.is_on is False
     assert runtime.attempts == {}
 
@@ -86,31 +86,6 @@ async def test_off_then_direction_never_restarts_pending_fan(fan_runtime):
     assert runtime.manual("vent").target.on is False
     assert fan.is_on is False
     await fan.async_set_percentage(100)
-    assert runtime.manual("vent").target.on is True
-    assert runtime.manual("vent").target.direction == "reverse"
-
-
-async def test_queued_direction_uses_latest_committed_intent(fan_runtime, monkeypatch):
-    runtime, fan = fan_runtime
-    entered, release = threading.Event(), threading.Event()
-    write = storage._write_snapshot
-
-    def delayed(path, state):
-        entered.set()
-        assert release.wait(5)
-        write(path, state)
-
-    monkeypatch.setattr(storage, "_write_snapshot", delayed)
-    on = asyncio.create_task(fan.async_turn_on())
-    try:
-        await wait_thread(entered)
-        direction = asyncio.create_task(fan.async_set_direction("reverse"))
-        await asyncio.sleep(0)
-        assert not direction.done()
-        assert runtime.manual("vent") is None
-    finally:
-        release.set()
-    await asyncio.gather(on, direction)
     assert runtime.manual("vent").target.on is True
     assert runtime.manual("vent").target.direction == "reverse"
 
@@ -165,26 +140,17 @@ async def test_invalid_fan_command_never_changes_accepted_intent(fan_runtime, ta
 
     runtime, fan = fan_runtime
     await fan.async_turn_off()
-    original = runtime.store.state
+    original = deepcopy(runtime._state)
     with pytest.raises(ServiceValidationError):
         await runtime.async_request("vent", target=target)
-    assert runtime.store.state == original
+    assert deepcopy(runtime._state) == original
 
 
 @pytest.mark.parametrize("settings", [{"profile": "reverse"}, {"direction": "sideways"}])
 async def test_invalid_saved_fan_settings_are_rejected(fan_runtime, settings):
     runtime, fan = fan_runtime
     await fan.async_turn_off()
-    state = disk_state(runtime)
+    state = current_state(runtime)
     state["manuals"]["vent"]["fan_settings"] = settings
     with pytest.raises(ValueError, match="Saved fan"):
-        _validate_saved_state(state)
-
-
-async def test_saved_fingerprint_kind_is_validated(fan_runtime):
-    runtime, fan = fan_runtime
-    await fan.async_turn_on()
-    state = disk_state(runtime)
-    next(iter(state["requests"].values()))["fingerprint_kind"] = "future"
-    with pytest.raises(ValueError, match="fingerprint kind"):
         _validate_saved_state(state)

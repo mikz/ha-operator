@@ -1,18 +1,16 @@
 """Native source events, strict admission, and independently journaled commands."""
 
 # ruff: noqa: F811 - imported fixture intentionally injected by name
-
-import asyncio
 import json
-import threading
+from copy import deepcopy
 from datetime import timedelta
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 from homeassistant.setup import async_setup_component
 from homeassistant.util import dt as dt_util
 
-from custom_components.ha_operator import storage
 from tests.integration.test_runtime_reconciliation import (
     advance,  # noqa: F401
     reported,
@@ -98,11 +96,11 @@ async def test_numeric_edges_unknown_unit_and_unchanged_reports(hass, runtime_fa
     temperature(hass, 15)
     await hass.async_block_till_done()
     due = input_state(runtime, "cold")["due_at"]
-    revision = runtime.store.state["revision"]
+    revision = deepcopy(runtime._state)
     for value in (15, 14, 14):
         temperature(hass, value)
         await hass.async_block_till_done()
-    assert runtime.store.state["revision"] == revision
+    assert deepcopy(runtime._state) == revision
     assert input_state(runtime, "cold")["due_at"] == due
     await advance(hass, freezer, 59)
     temperature(hass, 17)
@@ -164,46 +162,6 @@ async def test_native_timer_restart_pause_resume_cancel_finish_and_change(
     assert input_state(runtime)["phase"] == "suppressed"
 
 
-@pytest.mark.parametrize("service", ["cancel", "pause", "finish", "change"])
-async def test_lifecycle_arriving_during_admission_save_fences_raw_dispatch(
-    hass, runtime_factory, freezer, monkeypatch, service
-):
-    factory, commands = runtime_factory
-    runtime = await setup_timer(hass, factory)
-    await timer_service(hass, "start")
-    await hass.async_block_till_done()
-    entered, release = threading.Event(), threading.Event()
-    real_write = storage._write_snapshot
-
-    def gate(path, state):
-        if state["policy_inputs"]["vent"]["state"]["phase"] == "accepted":
-            accepted = state["policy_inputs"]["vent"]["state"]
-            occurrence = state["occurrences"][json.dumps(["vent", accepted["episode_id"]])]
-            assert occurrence["expires_at"] == accepted["expires_at"]
-            assert occurrence["target"] == {"position": 100.0}
-            entered.set()
-            assert release.wait(5)
-        real_write(path, state)
-
-    monkeypatch.setattr(storage, "_write_snapshot", gate)
-    advancing = asyncio.create_task(advance(hass, freezer, 60))
-    try:
-        assert await asyncio.to_thread(entered.wait, 2)
-        flush = runtime._input_flush
-        await timer_service(
-            hass, service, **({"duration": "-00:00:10"} if service == "change" else {})
-        )
-        assert runtime._input_flush is flush
-        assert commands == []
-    finally:
-        release.set()
-    await advancing
-    await hass.async_block_till_done()
-    assert input_state(runtime)["phase"] == "suppressed"
-    assert commands == []
-    assert all(item["skipped"] for item in runtime.store.state["occurrences"].values())
-
-
 async def test_observe_episode_cannot_activate_after_live(hass, runtime_factory, freezer):
     factory, commands = runtime_factory
     runtime = await setup_timer(hass, factory, live=False)
@@ -212,69 +170,6 @@ async def test_observe_episode_cannot_activate_after_live(hass, runtime_factory,
     assert input_state(runtime)["phase"] == "suppressed"
     await runtime.async_set_mode("roof", "live")
     await advance(hass, freezer, 61)
-    assert commands == []
-
-
-async def test_pending_cancel_is_checked_inside_inflight_adapter(
-    hass, runtime_factory, freezer, monkeypatch
-):
-    """A captured cancellation fences dispatch before its strict save finishes."""
-    factory, commands = runtime_factory
-    runtime = await setup_timer(hass, factory)
-    applying, apply_finished, release_apply = asyncio.Event(), asyncio.Event(), asyncio.Event()
-    entered, release_save = threading.Event(), threading.Event()
-    adapter = runtime.adapter("roof")
-    real_apply = adapter.async_apply
-    real_write = storage._write_snapshot
-
-    async def paused_apply(target, current):
-        applying.set()
-        await release_apply.wait()
-        try:
-            return await real_apply(target, current)
-        finally:
-            apply_finished.set()
-
-    def pending_save(path, state):
-        if state["policy_inputs"]["vent"]["state"]["phase"] == "suppressed":
-            entered.set()
-            assert release_save.wait(5)
-        real_write(path, state)
-
-    monkeypatch.setattr(adapter, "async_apply", paused_apply)
-    monkeypatch.setattr(storage, "_write_snapshot", pending_save)
-    try:
-        await timer_service(hass, "start")
-        await hass.async_block_till_done()
-        await advance(hass, freezer, 60)
-        await asyncio.wait_for(applying.wait(), 2)
-        assert input_state(runtime)["phase"] == "accepted"
-        await timer_service(hass, "cancel")
-        assert await asyncio.to_thread(entered.wait, 2)
-        release_apply.set()
-        await asyncio.wait_for(apply_finished.wait(), 2)
-        assert commands == []
-    finally:
-        release_apply.set()
-        release_save.set()
-    await hass.async_block_till_done()
-    assert input_state(runtime)["phase"] == "suppressed"
-    assert commands == []
-
-
-async def test_failed_numeric_save_inhibits_commands(hass, runtime_factory, monkeypatch):
-    factory, commands = runtime_factory
-    reported(hass)
-    runtime = await factory(policies=numeric_policy())
-    await runtime.async_set_mode("roof", "live")
-
-    def fail(*args):
-        raise OSError("disk unavailable")
-
-    monkeypatch.setattr(storage, "_write_snapshot", fail)
-    temperature(hass, 15)
-    await hass.async_block_till_done()
-    assert runtime.fault == "storage_error"
     assert commands == []
 
 
@@ -289,13 +184,13 @@ async def test_numeric_recovery_requires_fresh_finite_report(
     temperature(hass, 15)
     await hass.async_block_till_done()
     await advance(hass, freezer, 60)
-    saved = runtime.store.state
+    saved = deepcopy(runtime._state)
     await runtime.async_close()
     recovered = await factory(policies=numeric_policy())
     # Factory assigns another entry ID; seed same validated snapshot before restart.
     await recovered.async_close()
-    path = recovered.store._path
-    path.write_text(json.dumps({"version": 3, "data": saved}))
+    path = Path(recovered._store.path)
+    await hass.async_add_executor_job(path.write_text, json.dumps({"version": 1, "data": saved}))
     from custom_components.ha_operator.runtime import OperatorRuntime
 
     fresh = OperatorRuntime(hass, recovered.entry)
@@ -415,55 +310,6 @@ async def test_unchanged_numeric_report_preserves_shared_target_requirement_and_
     assert runtime.requirement_results["air"].status == "satisfied"
 
 
-async def test_numeric_report_during_save_retains_order_and_dispatch_fence(
-    hass, runtime_factory, monkeypatch
-):
-    factory, commands = runtime_factory
-    reported(hass)
-    runtime = await factory(policies=numeric_policy())
-    await runtime.async_set_mode("roof", "live")
-    temperature(hass, 17)
-    await hass.async_block_till_done()
-    entered, release = threading.Event(), threading.Event()
-    real_write = storage._write_snapshot
-    captured = []
-    real_apply = runtime._apply_policy_input
-
-    async def capture(policy_id, event, at, context, admissible):
-        if event is not None:
-            captured.append(event.value)
-        await real_apply(policy_id, event, at, context, admissible)
-
-    def gate(path, state):
-        if state["policy_inputs"]["cold"]["state"]["due_at"] is not None:
-            entered.set()
-            assert release.wait(5)
-        real_write(path, state)
-
-    monkeypatch.setattr(runtime, "_apply_policy_input", capture)
-    monkeypatch.setattr(storage, "_write_snapshot", gate)
-    temperature(hass, 15)
-    try:
-        assert await asyncio.to_thread(entered.wait, 2)
-        flush = runtime._input_flush
-        temperature(hass, 15)
-        temperature(hass, 17)
-        # This report matches the last committed warm record, but the drain owns a cold save.
-        temperature(hass, 17)
-        temperature(hass, 15)
-        await asyncio.sleep(0)
-        assert runtime._input_flush is flush
-        assert runtime._input_ingress != runtime._input_processed
-        assert commands == []
-    finally:
-        release.set()
-    await hass.async_block_till_done()
-    assert captured == [15, 15, 17, 17, 15]
-    assert runtime._input_ingress == runtime._input_processed
-    assert input_state(runtime, "cold")["due_at"] is not None
-    assert commands == []
-
-
 @pytest.mark.parametrize("command", ["observe", "disable"])
 async def test_qualification_dead_ends_through_reenable(hass, runtime_factory, freezer, command):
     factory, commands = runtime_factory
@@ -479,42 +325,6 @@ async def test_qualification_dead_ends_through_reenable(hass, runtime_factory, f
     await advance(hass, freezer, 61)
     assert input_state(runtime)["phase"] == "suppressed"
     assert commands == []
-
-
-async def test_cancelled_input_write_publishes_and_unfences_live_runtime(
-    hass, runtime_factory, freezer, monkeypatch
-):
-    factory, commands = runtime_factory
-    reported(hass)
-    runtime = await factory(policies=numeric_policy())
-    await runtime.async_set_mode("roof", "live")
-    entered, release = threading.Event(), threading.Event()
-    real_write = storage._write_snapshot
-
-    def gate(path, state):
-        entered.set()
-        assert release.wait(5)
-        real_write(path, state)
-
-    monkeypatch.setattr(storage, "_write_snapshot", gate)
-    temperature(hass, 15)
-    try:
-        assert await asyncio.to_thread(entered.wait, 2)
-        flush = runtime._input_flush
-        flush.cancel()
-        temperature(hass, 17)
-        temperature(hass, 15)
-        assert runtime._input_flush is flush
-        assert commands == []
-    finally:
-        release.set()
-    with pytest.raises(asyncio.CancelledError):
-        await flush
-    await hass.async_block_till_done()
-    assert runtime._input_ingress == runtime._input_processed
-    assert not runtime.fault
-    await advance(hass, freezer, 60)
-    assert commands[-1][1]["position"] == 7
 
 
 async def test_nested_native_timer_events_use_ordered_state_facts(hass, runtime_factory):
@@ -538,7 +348,7 @@ async def test_nested_native_timer_events_use_ordered_state_facts(hass, runtime_
         hass.bus.async_fire("test_nested")
         await hass.async_block_till_done()
         assert input_state(runtime)["phase"] == "qualifying"
-        assert len(runtime.store.state["occurrences"]) == 1
+        assert len(deepcopy(runtime._state)["occurrences"]) == 1
         assert commands == []
     finally:
         remove()
@@ -638,7 +448,9 @@ async def test_timer_restart_recovers_only_accepted_intent(
             await advance(hass, freezer, 61)
             assert commands == []
         else:
-            assert not any(item["skipped"] for item in fresh.store.state["occurrences"].values())
+            assert not any(
+                item["skipped"] for item in deepcopy(fresh._state)["occurrences"].values()
+            )
     finally:
         await fresh.async_close()
 
@@ -666,65 +478,6 @@ async def test_changed_numeric_config_does_not_reuse_qualification(hass, runtime
         assert input_state(fresh, "cold")["due_at"] is None
     finally:
         await fresh.async_close()
-
-
-async def test_delayed_start_processing_never_dispatches_expired_request(
-    hass, runtime_factory, freezer, monkeypatch
-):
-    from datetime import timedelta
-
-    from homeassistant.util import dt as dt_util
-    from pytest_homeassistant_custom_component.common import async_fire_time_changed_exact
-
-    factory, commands = runtime_factory
-    runtime = await setup_timer(hass, factory)
-    entered, release = threading.Event(), threading.Event()
-    real_write = storage._write_snapshot
-
-    def gate(path, state):
-        if state["policy_inputs"]["vent"]["state"]["phase"] == "qualifying":
-            entered.set()
-            assert release.wait(5)
-        real_write(path, state)
-
-    monkeypatch.setattr(storage, "_write_snapshot", gate)
-    await timer_service(hass, "start")
-    try:
-        assert await asyncio.to_thread(entered.wait, 2)
-        freezer.move_to(dt_util.utcnow() + timedelta(seconds=1861))
-        async_fire_time_changed_exact(hass, dt_util.utcnow())
-        assert commands == []
-    finally:
-        release.set()
-    await hass.async_block_till_done()
-    assert input_state(runtime)["phase"] in {"expired", "suppressed"}
-    assert commands == []
-
-
-async def test_cancelled_failed_input_write_inhibits_control(hass, runtime_factory, monkeypatch):
-    factory, commands = runtime_factory
-    reported(hass)
-    runtime = await factory(policies=numeric_policy())
-    await runtime.async_set_mode("roof", "live")
-    entered, release = threading.Event(), threading.Event()
-
-    def fail(path, state):
-        entered.set()
-        assert release.wait(5)
-        raise OSError("uncertain write")
-
-    monkeypatch.setattr(storage, "_write_snapshot", fail)
-    temperature(hass, 15)
-    try:
-        assert await asyncio.to_thread(entered.wait, 2)
-        flush = runtime._input_flush
-        flush.cancel()
-    finally:
-        release.set()
-    await flush
-    await hass.async_block_till_done()
-    assert runtime.fault == "storage_error"
-    assert commands == []
 
 
 async def test_nested_unchanged_numeric_report_uses_preceding_snapshot(hass, runtime_factory):
@@ -795,49 +548,6 @@ async def test_direct_reconcile_processes_qualification_deadline(hass, runtime_f
     assert commands[-1][1]["position"] == 100
 
 
-async def test_queued_noop_input_commit_does_not_trace_durable_admission(
-    hass, runtime_factory, freezer, monkeypatch
-):
-    from datetime import timedelta
-
-    from homeassistant.util import dt as dt_util
-    from pytest_homeassistant_custom_component.common import async_fire_time_changed_exact
-
-    factory, commands = runtime_factory
-    runtime = await setup_timer(hass, factory)
-    await timer_service(hass, "start")
-    await hass.async_block_till_done()
-    entered, release = threading.Event(), threading.Event()
-    real_write = storage._write_snapshot
-    trace = []
-    monkeypatch.setattr(runtime._trace, "event", lambda kind, data: trace.append((kind, data)))
-
-    def gate(path, state):
-        if state["modes"].get("roof") == "observe":
-            entered.set()
-            assert release.wait(5)
-        real_write(path, state)
-
-    monkeypatch.setattr(storage, "_write_snapshot", gate)
-    observing = asyncio.create_task(runtime.async_set_mode("roof", "observe"))
-    try:
-        assert await asyncio.to_thread(entered.wait, 2)
-        freezer.move_to(dt_util.utcnow() + timedelta(seconds=60))
-        async_fire_time_changed_exact(hass, dt_util.utcnow())
-        await asyncio.sleep(0)
-        assert runtime._input_flush is not None
-        assert commands == []
-    finally:
-        release.set()
-    await observing
-    await hass.async_block_till_done()
-    assert input_state(runtime)["phase"] == "suppressed"
-    assert commands == []
-    assert not [
-        data for kind, data in trace if kind == "admission" and data["action"] == "policy_input"
-    ]
-
-
 async def test_accepted_timer_source_loss_retains_original_expiry(hass, runtime_factory, freezer):
     factory, _ = runtime_factory
     runtime = await setup_timer(hass, factory)
@@ -849,43 +559,90 @@ async def test_accepted_timer_source_loss_retains_original_expiry(hass, runtime_
     await hass.async_block_till_done()
     assert input_state(runtime)["phase"] == "accepted"
     assert input_state(runtime)["expires_at"] == expiry
-    assert not any(item["skipped"] for item in runtime.store.state["occurrences"].values())
+    assert not any(item["skipped"] for item in deepcopy(runtime._state)["occurrences"].values())
 
 
-async def test_cancelled_final_timer_admission_write_unfences_without_new_events(
+@pytest.mark.parametrize("invalid", ["not numeric", "nan", "inf"])
+async def test_numeric_unusable_report_requires_fresh_recovery(hass, runtime_factory, invalid):
+    factory, commands = runtime_factory
+    reported(hass)
+    temperature(hass, invalid)
+    runtime = await factory(policies=numeric_policy())
+    await runtime.async_set_mode("roof", "live")
+    assert input_state(runtime, "cold")["source_quality"] == "unknown"
+    assert commands == []
+    temperature(hass, 15)
+    await hass.async_block_till_done()
+    assert input_state(runtime, "cold")["due_at"] is not None
+    assert commands == []
+
+
+async def test_timer_unavailable_dynamic_target_is_suppressed(hass, runtime_factory, freezer):
+    factory, commands = runtime_factory
+    assert await async_setup_component(
+        hass, "timer", {"timer": {"ventilation": {"duration": "00:10:00"}}}
+    )
+    reported(hass)
+    policies = timer_policy()
+    policies["vent"].pop("target")
+    policies["vent"]["target_entity"] = "sensor.opening"
+    hass.states.async_set("sensor.opening", "unknown")
+    runtime = await factory(policies=policies)
+    await hass.async_start()
+    await runtime.async_set_mode("roof", "live")
+    await timer_service(hass, "start")
+    await hass.async_block_till_done()
+    await advance(hass, freezer, 60)
+    assert input_state(runtime)["phase"] == "suppressed"
+    assert commands == []
+    hass.states.async_set("sensor.opening", "80")
+    await hass.async_block_till_done()
+    assert commands == []
+
+
+async def test_pending_cancel_is_checked_inside_inflight_adapter(
     hass, runtime_factory, freezer, monkeypatch
 ):
-    from datetime import timedelta
-
-    from homeassistant.util import dt as dt_util
-    from pytest_homeassistant_custom_component.common import async_fire_time_changed_exact
+    """A captured cancellation fences dispatch before queued input processing."""
+    import asyncio
 
     factory, commands = runtime_factory
     runtime = await setup_timer(hass, factory)
-    await timer_service(hass, "start")
-    await hass.async_block_till_done()
-    entered, release = threading.Event(), threading.Event()
-    real_write = storage._write_snapshot
+    applying, apply_finished, release_apply = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    entered, release_inputs = asyncio.Event(), asyncio.Event()
+    adapter = runtime.adapter("roof")
+    real_apply = adapter.async_apply
+    real_flush = runtime._async_flush_inputs
 
-    def gate(path, state):
-        if state["policy_inputs"]["vent"]["state"]["phase"] == "accepted":
-            entered.set()
-            assert release.wait(5)
-        real_write(path, state)
+    async def paused_apply(target, current):
+        applying.set()
+        await release_apply.wait()
+        try:
+            return await real_apply(target, current)
+        finally:
+            apply_finished.set()
 
-    monkeypatch.setattr(storage, "_write_snapshot", gate)
-    freezer.move_to(dt_util.utcnow() + timedelta(seconds=60))
-    async_fire_time_changed_exact(hass, dt_util.utcnow())
+    async def paused_inputs():
+        entered.set()
+        await release_inputs.wait()
+        await real_flush()
+
+    monkeypatch.setattr(adapter, "async_apply", paused_apply)
     try:
-        assert await asyncio.to_thread(entered.wait, 2)
-        flush = runtime._input_flush
-        flush.cancel()
+        await timer_service(hass, "start")
+        await hass.async_block_till_done()
+        await advance(hass, freezer, 60)
+        await asyncio.wait_for(applying.wait(), 2)
+        assert input_state(runtime)["phase"] == "accepted"
+        monkeypatch.setattr(runtime, "_async_flush_inputs", paused_inputs)
+        await timer_service(hass, "cancel")
+        await asyncio.wait_for(entered.wait(), 2)
+        release_apply.set()
+        await asyncio.wait_for(apply_finished.wait(), 2)
         assert commands == []
     finally:
-        release.set()
-    with pytest.raises(asyncio.CancelledError):
-        await flush
+        release_apply.set()
+        release_inputs.set()
     await hass.async_block_till_done()
-    assert runtime._input_ingress == runtime._input_processed
-    assert input_state(runtime)["phase"] == "accepted"
-    assert commands[-1][1]["position"] == 100
+    assert input_state(runtime)["phase"] == "suppressed"
+    assert commands == []

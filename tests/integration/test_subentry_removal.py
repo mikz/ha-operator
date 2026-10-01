@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 import pytest
 from homeassistant.config_entries import ConfigEntryState
 from homeassistant.helpers import issue_registry as ir
@@ -133,10 +136,12 @@ async def test_unreferenced_resource_delete_reloads_to_empty_configuration(hass,
 async def test_restored_valid_snapshot_clears_storage_repair_only_after_good_reload(hass, tmp_path):
     raw = await async_add_physical_cover(hass)
     entry = await async_setup_operator(hass, tmp_path)
-    path = tmp_path / f"ha_operator.{entry.entry_id}.json"
-    snapshot = await hass.async_add_executor_job(path.read_text)
     original = entry.runtime_data
-    await hass.async_add_executor_job(path.write_text, "invalid json")
+    path = Path(original._store.path)
+    assert await hass.config_entries.async_unload(entry.entry_id)
+    snapshot = await hass.async_add_executor_job(path.read_text)
+    invalid = json.dumps({"version": 1, "data": {"modes": []}})
+    await hass.async_add_executor_job(path.write_text, invalid)
     for _ in range(2):
         assert not await hass.config_entries.async_reload(entry.entry_id)
         await hass.async_block_till_done()
@@ -148,7 +153,7 @@ async def test_restored_valid_snapshot_clears_storage_repair_only_after_good_rel
         assert original._closed and all(task.done() for task in original._tasks)
         assert not original._listeners and not original._unsubscribers
         assert ir.async_get(hass).async_get_issue(DOMAIN, f"storage_{entry.entry_id}") is not None
-        assert await hass.async_add_executor_job(path.read_text) == "invalid json"
+        assert await hass.async_add_executor_job(path.read_text) == invalid
         assert raw.commands == []
     await hass.async_add_executor_job(path.write_text, snapshot)
     assert await hass.config_entries.async_reload(entry.entry_id)

@@ -1,5 +1,6 @@
 """Native history distinguishes selection, execution, and trusted observation."""
 
+from copy import deepcopy
 from dataclasses import replace
 from datetime import timedelta
 
@@ -61,10 +62,10 @@ async def test_same_target_changes_reason_without_dispatch_and_rename(hass, tmp_
     assert events[0].data["entity_id"] == managed_id(hass, "cover")
     assert "Evening ventilation" in events[0].data["message"]
     stable = hass.states.get(desired_id)
-    history = len(entry.runtime_data.history)
+    before = deepcopy(entry.runtime_data.explain())
     await entry.runtime_data.async_reconcile()
     assert hass.states.get(desired_id).last_updated == stable.last_updated
-    assert len(entry.runtime_data.history) == history
+    assert entry.runtime_data.explain() == before
     er.async_get(hass).async_update_entity(observed_id, new_entity_id="sensor.renamed_feedback")
     await hass.async_block_till_done()
     assert hass.states.get(desired_id).attributes["observed_entity"] == "sensor.renamed_feedback"

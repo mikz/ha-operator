@@ -28,6 +28,7 @@ from homeassistant.components.automation import EVENT_AUTOMATION_TRIGGERED
 from homeassistant.core import EVENT_CALL_SERVICE, EVENT_STATE_CHANGED, callback
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.event import async_track_state_report_event
+from homeassistant.helpers.storage import Store
 from homeassistant.setup import async_setup_component
 from homeassistant.util import dt as dt_util
 from pytest_homeassistant_custom_component.common import (
@@ -49,6 +50,28 @@ RESOURCES = [f"roof{index}" for index in range(3)]
 WORKLOADS = ("idle", "unchanged", "changing", "timer", "reload")
 
 
+_NATIVE_LOAD = Store._async_load
+_NATIVE_WRITE = Store._async_write_data
+
+
+@pytest.fixture(autouse=True)
+def native_operator_storage(hass_storage):
+    with pytest.MonkeyPatch.context() as patcher:
+        for method, native in (("_async_load", _NATIVE_LOAD), ("_async_write_data", _NATIVE_WRITE)):
+            mocked = getattr(Store, method)
+
+            def route(native=native, mocked=mocked):
+                async def dispatch(store, *args, **kwargs):
+                    return await (native if store.key.startswith("ha_operator.") else mocked)(
+                        store, *args, **kwargs
+                    )
+
+                return dispatch
+
+            patcher.setattr(Store, method, route())
+        yield
+
+
 @pytest.fixture(autouse=True)
 def custom_integrations(enable_custom_integrations):
     """Enable the packaged integration in the disposable working directory."""
@@ -61,7 +84,6 @@ async def test_profile(hass, tmp_path, freezer, monkeypatch):
     measure = os.environ["OPERATOR_PROFILE_MEASURE"]
     count = int(os.environ["OPERATOR_PROFILE_COUNT"])
     warmup = int(os.environ.get("OPERATOR_PROFILE_WARMUP", "10"))
-    trace = os.environ["OPERATOR_PROFILE_TRACE"] == "1"
     # Freezegun freezes perf_counter too. Its preserved clock measures actual
     # elapsed wall time, while only the HA clock advances through virtual UTC.
     wall_clock = freezegun.api.real_perf_counter
@@ -91,19 +113,32 @@ async def test_profile(hass, tmp_path, freezer, monkeypatch):
     assert await async_setup_component(
         hass, "timer", {"timer": {"profile_ventilation": {"duration": "00:01:05"}}}
     )
-    original_write = storage._write_snapshot
     original_recompute = OperatorRuntime._recompute
+    # Baseline uses the removed strict writer; candidate uses native Store. Count
+    # actual writes at each implementation's existing boundary without emulation.
+    if hasattr(storage, "_write_snapshot"):
+        original_write = storage._write_snapshot
 
-    def write_snapshot(*args, **kwargs):
-        counts["operator_snapshot_writes"] += 1
-        return original_write(*args, **kwargs)
+        def write_snapshot(*args, **kwargs):
+            counts["operator_storage_writes"] += 1
+            return original_write(*args, **kwargs)
+
+        monkeypatch.setattr(storage, "_write_snapshot", write_snapshot)
+    else:
+        original_write = Store._async_write_data
+
+        async def write_store(store, data):
+            if store.key.startswith("ha_operator."):
+                counts["operator_storage_writes"] += 1
+            return await original_write(store, data)
+
+        monkeypatch.setattr(Store, "_async_write_data", write_store)
 
     def recompute(self, *args, **kwargs):
         counts["recomputations"] += 1
         return original_recompute(self, *args, **kwargs)
 
     # Patch the class so genuine reloads include replacement runtime instances.
-    monkeypatch.setattr(storage, "_write_snapshot", write_snapshot)
     monkeypatch.setattr(OperatorRuntime, "_recompute", recompute)
     subentries = []
     for resource_id, entity_id in zip(RESOURCES, RAW, strict=True):
@@ -163,7 +198,7 @@ async def test_profile(hass, tmp_path, freezer, monkeypatch):
         title="Native policy profile",
         version=2,
         data={},
-        options={"trace_enabled": trace, "trace_entities": [SENSOR, TIMER]},
+        options={},
         subentries_data=[
             {
                 "subentry_id": key,
@@ -323,9 +358,6 @@ async def test_profile(hass, tmp_path, freezer, monkeypatch):
     await hass.async_block_till_done()
     for index in range(warmup):
         await batch(index)
-    if trace:
-        await runtime._trace.queue.join()
-    trace_start = runtime.trace_health()
     counts.clear()
     gc.collect()
     tasks_before = len(asyncio.all_tasks())
@@ -347,12 +379,6 @@ async def test_profile(hass, tmp_path, freezer, monkeypatch):
     if profiler:
         profiler.disable()
     tasks_after = len(asyncio.all_tasks())
-    trace_end = runtime.trace_health()
-    drain_started_wall, drain_started_cpu = wall_clock(), time.process_time()
-    if trace:
-        await runtime._trace.queue.join()
-    drain_wall = wall_clock() - drain_started_wall
-    drain_cpu = time.process_time() - drain_started_cpu
     memory = None
     if measure == "memory":
         latencies.clear()
@@ -361,13 +387,13 @@ async def test_profile(hass, tmp_path, freezer, monkeypatch):
         memory = {"retained_bytes": allocated - allocated_before, "peak_bytes": peak}
         tracemalloc.stop()
     if workload in {"idle", "unchanged"}:
-        assert counts["operator_snapshot_writes"] == 0
+        assert counts["operator_storage_writes"] == 0
     if workload == "idle":
         assert counts["recomputations"] == 0
         assert counts["automation_runs"] == 0
     metrics = dict.fromkeys(
         (
-            "operator_snapshot_writes",
+            "operator_storage_writes",
             "recomputations",
             "automation_runs",
             "helper_service_calls",
@@ -387,7 +413,7 @@ async def test_profile(hass, tmp_path, freezer, monkeypatch):
     result = {
         "workload": workload,
         "measurement": measure,
-        "trace_enabled": trace,
+        "measurement_boundary": "workload only; final unload save excluded",
         "batches": count,
         "warmup_batches": warmup,
         "configuration": {
@@ -418,11 +444,6 @@ async def test_profile(hass, tmp_path, freezer, monkeypatch):
         "task_count_before": tasks_before,
         "task_count_after": tasks_after,
         "worker_count": len(runtime._tasks),
-        "trace_start": trace_start,
-        "trace_after_workload": trace_end,
-        "trace_after_drain": runtime.trace_health(),
-        "trace_drain_wall_seconds": drain_wall,
-        "trace_drain_cpu_seconds": drain_cpu,
         "virtual_start": virtual_start,
         "virtual_end": dt_util.utcnow().isoformat(),
         "wall_clock": "freezegun.api.real_perf_counter",
@@ -437,8 +458,17 @@ async def test_profile(hass, tmp_path, freezer, monkeypatch):
         "60s timer qualification, 1800s request and cold qualification, 300s warning; "
         "no Recorder, KNX, full-house load or physical oracle; no production-duration soak; "
         "snapshot counts cover Operator storage; "
-        "workload timing excludes final trace drain; memory measured after drain",
+        "memory measured after workload and garbage collection",
     }
+
+    # Verify actual writer I/O outside the measured workload. Unload performs
+    # the candidate's ordinary final Store save; it is not part of timing.
+    await hass.config_entries.async_unload(entry.entry_id)
+    native_store = getattr(runtime, "_store", None)
+    snapshot_path = Path(native_store.path if native_store else runtime.store._path)
+    assert await hass.async_add_executor_job(snapshot_path.is_file)
+    result["storage_backend"] = "native Store" if native_store else "baseline snapshot"
+    result["saved_file_verified_after_unload"] = True
 
     def save():
         output.with_suffix(".json").write_text(json.dumps(result, indent=2) + "\n")
@@ -455,7 +485,6 @@ async def test_profile(hass, tmp_path, freezer, monkeypatch):
             "automation", "turn_off", {"entity_id": list(automations)}, blocking=True
         )
     await timer("cancel")
-    await hass.config_entries.async_unload(entry.entry_id)
     loop.set_debug(previous_debug)
     ha_logger.setLevel(previous_log_level)
     assert elapsed_wall > 0 and elapsed_cpu > 0

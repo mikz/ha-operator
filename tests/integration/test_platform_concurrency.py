@@ -1,10 +1,8 @@
-"""Native concurrent calls use durable admission and independent output workers."""
+"""Native concurrent calls use runtime admission and independent output workers."""
 
 from __future__ import annotations
 
 import asyncio
-import json
-import threading
 
 from custom_components.ha_operator import (
     binary_sensor,
@@ -13,7 +11,6 @@ from custom_components.ha_operator import (
     fan,
     select,
     sensor,
-    storage,
     switch,
 )
 
@@ -109,27 +106,12 @@ async def test_native_independent_resource_progress_and_stop_bypass(hass, tmp_pa
         assert await hass.config_entries.async_unload(entry.entry_id)
 
 
-async def test_native_same_resource_requests_acknowledge_in_durable_order(
-    hass, tmp_path, monkeypatch
-):
+async def test_native_same_resource_requests_keep_event_loop_order(hass, tmp_path):
     raw = await async_add_physical_cover(hass)
     raw.refuse = True
     entry = await async_setup_operator(hass, tmp_path)
     runtime = entry.runtime_data
     await async_activate(hass)
-    entered, release = threading.Event(), threading.Event()
-    original = storage._write_snapshot
-    writes = []
-
-    def delayed_write(path, state):
-        position = state["manuals"]["roof"]["target"]["position"]
-        if not writes:
-            entered.set()
-            assert release.wait(5)
-        original(path, state)
-        writes.append((state["revision"], position))
-
-    monkeypatch.setattr(storage, "_write_snapshot", delayed_write)
     identifier = managed_id(hass, "cover")
 
     async def command(position):
@@ -140,24 +122,10 @@ async def test_native_same_resource_requests_acknowledge_in_durable_order(
             blocking=True,
         )
 
-    first = asyncio.create_task(command(25))
-    second = None
-    try:
-        assert await asyncio.to_thread(entered.wait, 1)
-        second = asyncio.create_task(command(75))
-        await asyncio.sleep(0)
-        assert not first.done() and not second.done()
-        assert runtime.manual("roof") is None
-        release.set()
-        await asyncio.gather(first, second)
-        await hass.async_block_till_done()
-        assert [position for _, position in writes] == [25, 75]
-        assert writes[1][0] == writes[0][0] + 1
-        state = await hass.async_add_executor_job(runtime.store._path.read_text)
-        assert json.loads(state)["data"]["manuals"]["roof"]["target"] == {"position": 75}
-        assert runtime.manual("roof").target.position == 75
-        assert len(runtime._tasks) == 1 and not runtime._tasks[0].done()
-    finally:
-        release.set()
-        await asyncio.gather(first, *([second] if second else []), return_exceptions=True)
-        assert await hass.config_entries.async_unload(entry.entry_id)
+    await asyncio.gather(command(25), command(75))
+    await hass.async_block_till_done()
+    assert runtime.manual("roof").target.position == 75
+    assert len(runtime._tasks) == 1 and not runtime._tasks[0].done()
+    assert await hass.config_entries.async_reload(entry.entry_id)
+    assert entry.runtime_data.manual("roof").target.position == 75
+    assert await hass.config_entries.async_unload(entry.entry_id)

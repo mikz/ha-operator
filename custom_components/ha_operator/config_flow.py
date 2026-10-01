@@ -45,19 +45,13 @@ def _number(minimum: float = 0.001, maximum: float | None = None) -> selector.Nu
 
 
 def _options_schema(options: dict[str, Any] | None = None) -> vol.Schema:
-    """Use explicit opt-in defaults for both tracing and the global observe lock."""
+    """Expose the global observe lock."""
     current = options or {}
     return vol.Schema(
         {
             vol.Optional(
-                "trace_enabled", default=current.get("trace_enabled", False)
-            ): selector.BooleanSelector(),
-            vol.Optional(
                 "shadow_lock", default=current.get("shadow_lock", False)
-            ): selector.BooleanSelector(),
-            vol.Optional("trace_entities", default=current.get("trace_entities", [])): _entity(
-                multiple=True
-            ),
+            ): selector.BooleanSelector()
         }
     )
 
@@ -65,7 +59,7 @@ def _options_schema(options: dict[str, Any] | None = None) -> vol.Schema:
 class OperatorConfigFlow(ConfigFlow, domain=DOMAIN):
     """Create the single integration; resources are native subentries."""
 
-    VERSION = 2
+    VERSION = 3
 
     @staticmethod
     @callback
@@ -109,7 +103,7 @@ class OperatorOptionsFlow(OptionsFlow):
                     try:
                         await runtime.async_prepare_unlock()
                     except HomeAssistantError:
-                        errors["base"] = "unlock_persistence_failed"
+                        errors["base"] = "unlock_unavailable"
                     else:
                         if (
                             self.config_entry.state is not ConfigEntryState.LOADED
