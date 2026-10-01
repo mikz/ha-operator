@@ -195,7 +195,8 @@ try:
         record = state['policy_inputs'].get(expected['key'], {}).get('state', {})
         identity = record.get('episode_id')
     if expected['kind'] != 'sleep_pair':
-        ready = identity == expected['identity'] and record.get('expires_at') == expected['expires_at']
+        ready = (identity == expected['identity']
+                 and record.get('expires_at') == expected['expires_at'])
     if expected['kind'] == 'timer':
         ready = ready and record.get('phase') == 'accepted'
 except (OSError, ValueError, KeyError):
