@@ -123,9 +123,8 @@ for the same archive.
 | CELLAR-FALLBACK-KEEP-EXTRACTING | HA, Lab | A failing cellar provider causes alternative selection and an unmet report when appropriate. Extraction continues. | Acquisition and alternative confirmation evidence with extractor state and command journal. |
 | CELLAR-MANUAL-SCOPE-EXPIRY | HA, Lab | An explicit hands-off lease blocks automatic commands, then expiry resumes the currently eligible target. An unrelated legacy manual boolean does not create an operator lease. | Active lease, absolute expiry, current target, and independently observed command ordering. |
 
-Shadow recording is passive. Recorded observations describe the inputs received
-while the existing controller owned the actuators. A simulated alternative run
-must label its inputs, faults, and physical outcomes as simulator-generated.
+Observe mode leaves actuator ownership with the existing controller. Lab evidence
+must identify simulator-generated inputs, faults, and physical outcomes.
 
 Every full run must preserve `observe-lock-effects.json` and
 `cellar-evidence.json`. All release runs, including

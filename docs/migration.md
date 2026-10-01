@@ -6,7 +6,7 @@ acceptance testing use an isolated lab; the production inventory is read-only
 until a deployment is explicitly authorized.
 
 The [shadow deployment guide](shadow-deployment.md) describes a private inventory,
-passive observation, isolated replay, and later live canary. Installing an observer does not transfer actuator ownership.
+passive observation, isolated simulation, and later live canary. Installing an observer does not transfer actuator ownership.
 
 For boolean mode synchronization, use the [desired-control migration](desired-controls.md#migrate-existing-controls).
 It preserves independent mode values and public controls while retiring the old
@@ -107,15 +107,15 @@ Before deleting a resource subentry, reconfigure or remove the policies and
 requirements that reference it. Native HA deletion does not enforce this graph.
 If a dangling reference prevents setup, preserve the remaining configuration,
 correct the affected dependents, and use the integration's native Reload to
-resume. Do not delete the intent store or cascade-delete unrelated subentries.
+resume. Do not remove runtime storage or cascade-delete unrelated subentries.
 
 Observe mode must produce no actuator effects. Keep the existing owner running
 while comparing decisions, but account for its effects when interpreting
 observations. A matching target at one instant is not evidence of retry,
 supersession, manual, or restart behavior.
 
-Observe mode rejects new manual requests and occurrence submissions. Use recorded
-schedule inputs for isolated occurrence replay; do not redirect the existing
+Observe mode rejects new manual requests and occurrence submissions. Test
+schedule inputs in isolated simulations; do not redirect the existing
 morning automation into an observe-only resource and expect it to operate the
 house. A recorded legacy command or movement never proves HA Operator actuation.
 
