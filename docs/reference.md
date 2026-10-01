@@ -131,9 +131,9 @@ native subentry IDs, not user labels or raw physical source entities.
 | Action | Inputs | Response and acceptance |
 | --- | --- | --- |
 | `ha_operator.request` | Resource selector; `mode` (default `target`); `target` for target mode; optional expiry and `request_id` | Optional response: `accepted`, `request_id`, `resource_id`, `expires_at`. Accepts a manual lease for a live resource with manual control. `hands_off` forbids a target. |
-| `ha_operator.release` | Resource selector | No response. Durably releases the manual lease; valid automatic intent can resume. |
+| `ha_operator.release` | Resource selector | No response. Releases the manual lease; eligible automatic requests can resume. |
 | `ha_operator.submit_occurrence` | `policy_id`, `occurrence_id`, `expires_at` | Optional occurrence response. Requires an enabled occurrence policy on a live resource. |
-| `ha_operator.skip_occurrence` | `policy_id`, `occurrence_id`, `expires_at` | No response. Durably suppresses that identity, including before submission. |
+| `ha_operator.skip_occurrence` | `policy_id`, `occurrence_id`, `expires_at` | No response. Suppresses that identity, including before submission. |
 | `ha_operator.reconcile` | Optional resource selector | No response. Reevaluate one resource or all resources; respects mode, deadlines, restrictions, faults, and pacing. |
 | `ha_operator.explain` | Optional resource selector | Required response: fault, current decisions/observations, manual leases, last commands, attempts, and requirements. Read-only explanation is not authoritative device feedback. |
 

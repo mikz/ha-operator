@@ -627,7 +627,7 @@ def validate_static(directory: Path, manifest: dict, root: Path) -> str:
     return version
 
 
-def validate_lab(directory: Path, manifest: dict) -> tuple[str, str]:
+def validate_lab(directory: Path, manifest: dict, manifest_sha256: str) -> tuple[str, str]:
     summary = read_json(directory / "summary.json")
     prepared = read_json(directory / "prepared.json")
     sanitized = read_json(directory / "sanitized.json")
@@ -637,7 +637,9 @@ def validate_lab(directory: Path, manifest: dict) -> tuple[str, str]:
         "Lab integration version differs from the release",
     )
     require(
-        summary.get("release_manifest_sha256") == prepared.get("release_manifest_sha256")
+        summary.get("release_manifest_sha256")
+        == prepared.get("release_manifest_sha256")
+        == manifest_sha256
         and isinstance(summary.get("release_manifest_sha256"), str)
         and re.fullmatch(r"[0-9a-f]{64}", summary["release_manifest_sha256"]),
         "Lab must carry its prepared release manifest hash",
@@ -890,7 +892,12 @@ def build_evidence(
 ) -> dict:
     manifest = release_manifest(root)
     require(bool(manifest.get("source_commit")), "Release must identify its source commit")
-    selected = [validate_lab(directory, manifest) for directory in labs]
+    selected = [
+        validate_lab(
+            directory, manifest, digest((root / "dist/ha_operator.manifest.json").read_bytes())
+        )
+        for directory in labs
+    ]
     require(
         len(selected) == len(LAB_CASES) and set(selected) == LAB_CASES,
         "Need both HA all/windows/observability/sleep runs and the HA 2026.9.3 soak (nine runs)",
@@ -918,7 +925,7 @@ def build_evidence(
             item.get("status") == "killed" and item.get("assertion_failures", 0) > 0
             for item in mutants
         ),
-        "All nine guards must be killed by assertions",
+        "All seven guards must be killed by assertions",
     )
     source_hashes = {
         f"custom_components/ha_operator/{name}": data["sha256"]
@@ -1026,7 +1033,12 @@ def build_evidence(
         for directory, case in zip(labs, selected, strict=True):
             run_name = read_json(directory / "summary.json")["run_id"]
             require(
-                validate_lab(evidence / "lab" / run_name, manifest) == case,
+                validate_lab(
+                    evidence / "lab" / run_name,
+                    manifest,
+                    digest((root / "dist/ha_operator.manifest.json").read_bytes()),
+                )
+                == case,
                 "Sanitization changed a lab identity",
             )
         sanitize_artifacts(evidence, [], check=True)

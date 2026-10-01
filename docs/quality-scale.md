@@ -13,7 +13,7 @@ for any future Core submission; it is not a fabricated exemption. Native subentr
 changes add devices through automatic reload. Formal applicability of this
 mechanism to the dynamic-devices rule remains under review.
 
-The checklist supplements the integration's safety and release gates. Durable
+The checklist supplements the integration's safety and release gates. Runtime
 acceptance, separate physical observation, restart deadlines, one worker per resource owning all its outputs,
 STOP behavior, relay reversal, airflow confirmation, and zero-output observe mode
 remain required. See [architecture](architecture.md),

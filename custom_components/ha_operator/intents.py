@@ -1,4 +1,4 @@
-"""Durable boolean intent rules, independent of HA and observed device state."""
+"""Boolean intent rules, independent of HA and observed device state."""
 
 from __future__ import annotations
 

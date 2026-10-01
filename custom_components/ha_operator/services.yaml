@@ -1,6 +1,6 @@
 request:
   name: Request control
-  description: Durably accept a manual target or hands-off lease for one live resource.
+  description: Accept a manual target or hands-off lease for one live resource.
   fields:
     resource_id:
       name: Resource ID

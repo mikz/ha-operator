@@ -29,7 +29,7 @@ def dispatcher(windows, group, *, duration=1800):
     entities = list(mapping)
     return {
         "alias": "Open Roof Windows",
-        "description": "Durable per-window requests. No delayed closing callback. New calls supersede unfinished dispatch.",
+        "description": "Expiring per-window requests. No delayed closing callback. New calls supersede unfinished dispatch.",
         "mode": "restart",
         "fields": {
             "windows": {"name": "Windows", "selector": {"target": {"entity": {"domain": "cover"}}}},

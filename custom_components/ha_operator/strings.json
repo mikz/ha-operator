@@ -4,7 +4,7 @@
     "step": {
       "user": {
         "title": "HA Operator",
-        "description": "Create HA Operator, then add resources, policies, and airflow requirements. New resources start in observe mode. Trace recording and the global shadow lock are optional and default to off.",
+        "description": "Create HA Operator, then add resources, policies, and airflow requirements. New resources start in observe mode. The global shadow lock is optional and defaults to off.",
         "data": {
           "shadow_lock": "Lock all resources in observe mode"
         },
@@ -1260,7 +1260,7 @@
   "services": {
     "request": {
       "name": "Request control",
-      "description": "Durably accept a manual target or hands-off lease for one live resource.",
+      "description": "Accept a manual target or hands-off lease for one live resource.",
       "fields": {
         "resource_id": {
           "name": "Resource ID",

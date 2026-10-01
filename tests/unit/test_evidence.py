@@ -392,7 +392,11 @@ def test_rejects_shortened_soak(complete_evidence):
         (complete_evidence["root"] / "dist/ha_operator.manifest.json").read_text()
     )
     with pytest.raises(ValueError, match="two default retry intervals"):
-        validate_lab(run, manifest)
+        validate_lab(
+            run,
+            manifest,
+            digest((complete_evidence["root"] / "dist/ha_operator.manifest.json").read_bytes()),
+        )
 
 
 def test_rejects_modified_test_evidence(complete_evidence):
@@ -839,3 +843,14 @@ def test_static_runner_retains_actual_checker_failure(complete_evidence, tmp_pat
     assert result["status"] == "failed"
     assert result["exit_codes"] == {"mypy": 1}
     assert "no-untyped-def" in (directory / "static.log").read_text()
+
+
+def test_lab_rejects_matching_stale_manifest_hashes(complete_evidence):
+    root = complete_evidence["root"]
+    run = complete_evidence["labs"][0]
+    manifest_path = root / "dist/ha_operator.manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    for name in ("summary.json", "prepared.json"):
+        change(run / name, release_manifest_sha256="0" * 64)
+    with pytest.raises(ValueError, match="prepared release manifest hash"):
+        validate_lab(run, manifest, digest(manifest_path.read_bytes()))

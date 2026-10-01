@@ -115,13 +115,13 @@ for the same archive.
 | ID | Required layers | Expected outcome | Evidence requirement |
 | --- | --- | --- | --- |
 | SHADOW-LOCK-ZERO-COMMANDS | HA, Lab | With the integration lock enabled, every resource stays in observe mode. Attempts to select live mode fail, and policy and input changes cause zero HA Operator actuator commands. | Independent simulator command counts for the bounded lock window in `observe-lock-effects.json`. |
-| SHADOW-LOCK-RELOAD-RESTART | HA, Lab | The lock survives native reload and process restart, including resources with stored live modes and valid intent. | Restart records, exported session transitions, and the independent zero-command journal. |
+| SHADOW-LOCK-RELOAD-RESTART | HA, Lab | The lock survives native reload and process restart, including resources with stored live modes and valid intent. | `observe-lock-effects.json`, simulator effects, and actual crash receipts. |
 | CELLAR-CONFIGURATION | HA, Lab | Native resource, policy, and airflow configuration binds the simulated cellar devices to explicit raw feedback and alternative providers. | Successful setup and configured resource identities in `cellar-evidence.json`. |
 | CELLAR-REFUSED-POWER-DIRECTION | HA, Lab | Refused power or direction changes remain pending or unconfirmed. A successful service response cannot establish fan movement or airflow. | `cellar-evidence.json` records simulator-generated faults and correlated commands, effects, and feedback. |
 | CELLAR-OFF-FEEDBACK-REVERSAL | HA, Lab | A direction reversal waits for confirmed conflicting outputs off and the configured dead time. Unknown or missing off feedback blocks progression. | Independent relay ordering and feedback sequence numbers. |
 | CELLAR-STALE-VIRTUAL-AVAILABILITY | HA, Lab | A virtual optimistic target or unavailable raw feedback cannot confirm an airflow provider. | Separate desired, raw, availability, and physical feedback evidence. |
 | CELLAR-FALLBACK-KEEP-EXTRACTING | HA, Lab | A failing cellar provider causes alternative selection and an unmet report when appropriate. Extraction continues. | Acquisition and alternative confirmation evidence with extractor state and command journal. |
-| CELLAR-MANUAL-SCOPE-EXPIRY | HA, Lab | An explicit hands-off lease blocks automatic commands, then expiry resumes the currently eligible target. An unrelated legacy manual boolean does not create an operator lease. | Durable lease, absolute expiry, current target, and independently observed command ordering. |
+| CELLAR-MANUAL-SCOPE-EXPIRY | HA, Lab | An explicit hands-off lease blocks automatic commands, then expiry resumes the currently eligible target. An unrelated legacy manual boolean does not create an operator lease. | Active lease, absolute expiry, current target, and independently observed command ordering. |
 
 Shadow recording is passive. Recorded observations describe the inputs received
 while the existing controller owned the actuators. A simulated alternative run

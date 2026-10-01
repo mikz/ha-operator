@@ -33,7 +33,7 @@ async def async_setup_entry(
 
 
 class ModeSelect(OperatorEntity, SelectEntity):
-    """Observe/live control that persists before publishing its selection."""
+    """Observe/live control backed by current runtime state."""
 
     _attr_options = ["observe", "live"]
     _attr_entity_category = EntityCategory.CONFIG
