@@ -179,7 +179,7 @@ def wait_saved_request(container, entry_id, expected, *, timeout=15):
     """Wait for this lab request's ordinary Store save before SIGKILL."""
     if not entry_id.isalnum() or expected["kind"] not in {"manual", "timer", "sleep_pair"}:
         raise RuntimeError("Invalid lab Store precondition")
-    probe = """import json, sys
+    probe = """import hashlib, json, sys
 from pathlib import Path
 path = Path('/config/.storage') / ('ha_operator.' + sys.argv[1])
 expected = json.loads(sys.argv[2])
@@ -194,11 +194,13 @@ try:
     else:
         record = state['policy_inputs'].get(expected['key'], {}).get('state', {})
         identity = record.get('episode_id')
-    if expected['kind'] != 'sleep_pair':
+        identity_hash = hashlib.sha256(str(identity).encode()).hexdigest()[:12]
+        ready = (identity_hash == expected['identity_hash']
+                 and record.get('expires_at') == expected['expires_at']
+                 and record.get('phase') == 'accepted')
+    if expected['kind'] == 'manual':
         ready = (identity == expected['identity']
                  and record.get('expires_at') == expected['expires_at'])
-    if expected['kind'] == 'timer':
-        ready = ready and record.get('phase') == 'accepted'
 except (OSError, ValueError, KeyError):
     ready = False
 print(json.dumps(ready))

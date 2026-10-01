@@ -79,10 +79,11 @@ def test_kill_precondition_waits_for_matching_normal_store_save(monkeypatch, kin
 
     monkeypatch.setattr(lab, "json_output", inspect)
     monkeypatch.setattr(lab.time, "sleep", lambda _: None)
-    expected = {"kind": kind, "key": "synthetic", "identity": "episode", "expires_at": 100}
+    identity_key = "identity_hash" if kind == "timer" else "identity"
+    expected = {"kind": kind, "key": "synthetic", identity_key: "episode", "expires_at": 100}
     result = lab.wait_saved_request("owned-lab-ha", "SyntheticEntry", expected)
     assert len(probes) == 2 and all(p[:3] == ["docker", "exec", "owned-lab-ha"] for p in probes)
-    assert result["identity"] == "episode" and result["expires_at"] == 100
+    assert result[identity_key] == "episode" and result["expires_at"] == 100
     assert result["verified_at"] > 0
 
 
@@ -95,10 +96,16 @@ def test_kill_precondition_timeout_does_not_claim_saved_state(monkeypatch):
 
 
 def test_timer_kill_requires_saved_accepted_phase(monkeypatch, tmp_path):
+    import hashlib
     import subprocess
     import sys
 
-    expected = {"kind": "timer", "key": "timer", "identity": "episode", "expires_at": 100}
+    expected = {
+        "kind": "timer",
+        "key": "timer",
+        "identity_hash": hashlib.sha256(b"episode").hexdigest()[:12],
+        "expires_at": 100,
+    }
     state = {
         "policy_inputs": {
             "timer": {"state": {"episode_id": "episode", "expires_at": 100, "phase": "qualifying"}}
@@ -115,14 +122,16 @@ def test_timer_kill_requires_saved_accepted_phase(monkeypatch, tmp_path):
         return result
 
     def ordinary_save(_):
-        state["policy_inputs"]["timer"]["state"]["phase"] = "accepted"
+        record = state["policy_inputs"]["timer"]["state"]
+        record["phase"] = "accepted"
+        record["episode_id"] = "different" if len(probes) == 1 else "episode"
         path.write_text(json.dumps({"data": state}))
 
     monkeypatch.setattr(lab, "json_output", inspect)
     monkeypatch.setattr(lab.time, "sleep", ordinary_save)
     result = lab.wait_saved_request("owned-lab-ha", "SyntheticEntry", expected)
-    assert probes == [False, True]
-    assert result["identity"] == "episode" and result["expires_at"] == 100
+    assert probes == [False, False, True]
+    assert result["identity_hash"] == expected["identity_hash"] and result["expires_at"] == 100
 
 
 def test_sleep_kill_requires_saved_detached_pair(monkeypatch, tmp_path):

@@ -1083,7 +1083,7 @@ async def run_native_windows(lab, resources, entities, modes):
             saved_request = {
                 "kind": "timer",
                 "key": timed,
-                "identity": original["episode_id"],
+                "identity_hash": original["episode_id"],
                 "expires_at": original["expires_at"],
             }
             await lab.crash(action, saved_request=saved_request)
