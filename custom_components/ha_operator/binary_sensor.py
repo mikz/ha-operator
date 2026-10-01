@@ -2,19 +2,32 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING
 
 from homeassistant.components.binary_sensor import BinarySensorDeviceClass, BinarySensorEntity
-from homeassistant.helpers.entity import EntityCategory
+from homeassistant.const import EntityCategory
+from homeassistant.core import HomeAssistant
+from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
+from . import OperatorConfigEntry
 from .entity import OperatorEntity
 from .policy_inputs import NumericState
 
+if TYPE_CHECKING:
+    from .runtime import OperatorRuntime
 
-async def async_setup_entry(hass: Any, entry: Any, async_add_entities: Any) -> None:
+# The runtime serializes durable admission and owns one worker per resource, owning all its outputs.
+PARALLEL_UPDATES = 0
+
+
+async def async_setup_entry(
+    hass: HomeAssistant,
+    entry: OperatorConfigEntry,
+    async_add_entities: AddConfigEntryEntitiesCallback,
+) -> None:
     runtime = entry.runtime_data
     for identifier in runtime.resources:
-        entities = []
+        entities: list[BinarySensorEntity] = []
         if runtime.manual_control(identifier):
             entities.append(ManualSensor(runtime, identifier))
         if "return_monitor" in runtime.resources[identifier]:
@@ -24,7 +37,7 @@ async def async_setup_entry(hass: Any, entry: Any, async_add_entities: Any) -> N
     for identifier in runtime.requirements:
         async_add_entities([UnmetSensor(runtime, identifier)], config_subentry_id=identifier)
     for identifier, policy in runtime.policies.items():
-        if policy.get("input", {}).get("type") == "qualified_numeric":
+        if (source := policy.get("input")) is not None and source["type"] == "qualified_numeric":
             async_add_entities(
                 [QualifiedSensor(runtime, identifier)], config_subentry_id=identifier
             )
@@ -33,8 +46,8 @@ async def async_setup_entry(hass: Any, entry: Any, async_add_entities: Any) -> N
 class QualifiedSensor(OperatorEntity, BinarySensorEntity):
     """Expose qualification without becoming a policy source or scheduling owner."""
 
-    def __init__(self, runtime: Any, identifier: str) -> None:
-        super().__init__(runtime, identifier, "qualified", "Qualified")
+    def __init__(self, runtime: OperatorRuntime, identifier: str) -> None:
+        super().__init__(runtime, identifier, "qualified")
         self._attr_entity_category = EntityCategory.DIAGNOSTIC
         self._attr_entity_registry_enabled_default = False
 
@@ -51,8 +64,8 @@ class ReturnOverdueSensor(OperatorEntity, BinarySensorEntity):
 
     _attr_device_class = BinarySensorDeviceClass.PROBLEM
 
-    def __init__(self, runtime: Any, identifier: str) -> None:
-        super().__init__(runtime, identifier, "return_overdue", "Return overdue")
+    def __init__(self, runtime: OperatorRuntime, identifier: str) -> None:
+        super().__init__(runtime, identifier, "return_overdue")
 
     @property
     def is_on(self) -> bool:
@@ -62,8 +75,8 @@ class ReturnOverdueSensor(OperatorEntity, BinarySensorEntity):
 class ManualSensor(OperatorEntity, BinarySensorEntity):
     """Telemetry does not create or extend a manual lease."""
 
-    def __init__(self, runtime: Any, identifier: str) -> None:
-        super().__init__(runtime, identifier, "manual", "Manual active")
+    def __init__(self, runtime: OperatorRuntime, identifier: str) -> None:
+        super().__init__(runtime, identifier, "manual")
 
     @property
     def is_on(self) -> bool:
@@ -73,8 +86,10 @@ class ManualSensor(OperatorEntity, BinarySensorEntity):
 class UnmetSensor(OperatorEntity, BinarySensorEntity):
     """Unknown evidence remains unknown instead of asserting adequate airflow."""
 
-    def __init__(self, runtime: Any, identifier: str) -> None:
-        super().__init__(runtime, identifier, "unmet", "Airflow unmet")
+    _attr_device_class = BinarySensorDeviceClass.PROBLEM
+
+    def __init__(self, runtime: OperatorRuntime, identifier: str) -> None:
+        super().__init__(runtime, identifier, "unmet")
 
     @property
     def is_on(self) -> bool | None:

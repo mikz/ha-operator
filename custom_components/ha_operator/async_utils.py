@@ -10,7 +10,7 @@ async def async_settle[T](future: asyncio.Future[T]) -> tuple[T, bool]:
     consumes the same future. Shield a completion signal that cannot fail, and
     retrieve the actual result after it settles instead.
     """
-    completion = asyncio.get_running_loop().create_future()
+    completion: asyncio.Future[None] = asyncio.get_running_loop().create_future()
 
     def completed(_future: asyncio.Future[T]) -> None:
         completion.set_result(None)

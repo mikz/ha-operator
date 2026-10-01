@@ -773,11 +773,14 @@ async def test_dispatch_audit_matches_native_service_context_and_keeps_feedback_
         assert audit[0]["data"] == {"entity_id": "cover.raw", "position": 72}
         assert audit[2]["data"] == {"entity_id": "cover.raw"}
         assert len({event["context_id"] for event in audit}) == 2
-        assert (
-            [audit[0]["context_id"], audit[2]["context_id"]]
-            == [call.context.id for call in received]
-            == [event.context.id for event in service_events]
-        )
+        assert [audit[0]["context_id"], audit[2]["context_id"]] == [
+            call.context.id for call in received
+        ]
+        # Bus callbacks may be delivered after either awaited service returns.
+        # Match both exact service/context pairs without imposing callback order.
+        assert sorted(
+            (event.data["service"], event.context.id) for event in service_events
+        ) == sorted((call.service, call.context.id) for call in received)
         assert all(
             call.context.user_id is None and call.context.parent_id is None for call in received
         )

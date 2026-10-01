@@ -7,7 +7,7 @@ Observed and Reason are new entities; their history starts when HA creates them.
 | Entity | Meaning |
 | --- | --- |
 | Desired target | Current effective target after arbitration. Its `target` attribute contains the full structured target. |
-| Observed | Adapter-validated feedback. Missing, unavailable, restored, assumed, or optimistic feedback produces `unknown`. |
+| Observed | Adapter-validated feedback. A missing source or a source reporting `unavailable` makes this entity `unavailable`. A reachable source with unknown, invalid, restored, assumed, optimistic, or missing value feedback produces `unknown`. |
 | Reason | Readable selection cause: a configured policy name, manual ownership, or an airflow requirement and its active inputs. |
 | Control status | Execution outcome, such as satisfied, waiting, hands-off, or observe. |
 | Manual expiry | Absolute deadline for the current manual lease. |
@@ -121,3 +121,26 @@ docker compose -p <run-id> -f artifacts/lab/<run-id>/compose.json down --volumes
 
 Delete the private preview login file after cleanup. Use the same scenario without
 `--keep` for automatic cleanup in compatibility tests.
+
+## Interpret source outages
+
+Managed observation entities and **Observed** distinguish source availability
+from usable physical feedback. Missing sources and sources reporting
+`unavailable` make these entities unavailable. A present source with an unknown
+or unusable value keeps them available with an unknown state. **Desired target**,
+**Reason**, and durable intent remain available during an outage. The execution
+status can still report unavailable when feedback is unusable; source presence
+alone does not permit a command or confirm airflow.
+
+Operator logs one INFO message when a resource's source becomes unavailable and
+one when the source returns. For a relay resource, every owned output must be
+present and not report unavailable. Returning as unknown restores source
+availability only. Repeated source reports and reconciliations do not log another
+transition or extend accepted deadlines. The distinction can affect dashboards,
+automations, and History that previously treated all unusable values as unknown.
+
+Native entity calls have no platform-wide concurrency semaphore. The runtime
+serializes durable admission and owns one worker per resource, including every
+output of a relay fan. Independent resources can make progress while another
+physical command waits. Same-resource supersession and physical STOP retain the
+runtime's generation fences, transport settlement, and pacing rules.

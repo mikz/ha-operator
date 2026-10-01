@@ -30,7 +30,7 @@ logger:
     custom_components.ha_operator: debug
 ha_operator_sim:
   url: http://simulator:8099
-  poll_interval: 0.25
+  poll_interval: 1
 homekit:
   - name: HA Operator Lab
     port: 21063

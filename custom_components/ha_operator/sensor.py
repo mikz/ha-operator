@@ -3,28 +3,52 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from typing import Any
+from typing import TYPE_CHECKING
 
 from homeassistant.components.sensor import SensorDeviceClass, SensorEntity, SensorStateClass
-from homeassistant.const import PERCENTAGE
-from homeassistant.helpers.entity import EntityCategory
+from homeassistant.const import PERCENTAGE, EntityCategory
+from homeassistant.core import HomeAssistant
+from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
+from . import OperatorConfigEntry
+from .core import Target
 from .entity import OperatorEntity
 
-RESOURCE_SENSORS = {
-    "desired": "Desired target",
-    "observed": "Observed",
-    "reason": "Reason",
-    "status": "Control status",
-    "expiry": "Manual expiry",
-    "effective_expiry": "Effective expiry",
-    "next_attempt": "Next attempt",
-    "attempts": "Command attempts",
-}
-REQUIREMENT_SENSORS = {"status": "Requirement status", "provider": "Selected provider"}
+RESOURCE_SENSORS = (
+    "desired",
+    "observed",
+    "reason",
+    "status",
+    "expiry",
+    "effective_expiry",
+    "next_attempt",
+    "attempts",
+)
+REQUIREMENT_SENSORS = ("status", "provider")
 
 
-async def async_setup_entry(hass: Any, entry: Any, async_add_entities: Any) -> None:
+if TYPE_CHECKING:
+    from .runtime import OperatorRuntime
+
+# The runtime serializes durable admission and owns one worker per resource, owning all its outputs.
+PARALLEL_UPDATES = 0
+
+
+def _timestamp(stamp: float | None) -> datetime | None:
+    """Project an accepted numeric deadline only when HA can represent its date."""
+    if stamp is None:
+        return None
+    try:
+        return datetime.fromtimestamp(stamp, UTC)
+    except OverflowError, ValueError, OSError:
+        return None
+
+
+async def async_setup_entry(
+    hass: HomeAssistant,
+    entry: OperatorConfigEntry,
+    async_add_entities: AddConfigEntryEntitiesCallback,
+) -> None:
     runtime = entry.runtime_data
     for identifier in runtime.resources:
         async_add_entities(
@@ -51,7 +75,7 @@ async def async_setup_entry(hass: Any, entry: Any, async_add_entities: Any) -> N
             )
 
 
-def target_value(target: Any) -> float | str | None:
+def target_value(target: Target | None) -> float | str | None:
     """Compact scalar state; exact structured desired values remain attributes."""
     if target is None:
         return None
@@ -71,9 +95,25 @@ def target_value(target: Any) -> float | str | None:
 class ResourceSensor(OperatorEntity, SensorEntity):
     """Resource state keeps desired values distinct from observed entities."""
 
-    def __init__(self, runtime: Any, identifier: str, key: str) -> None:
-        super().__init__(runtime, identifier, key, RESOURCE_SENSORS[key])
+    def __init__(self, runtime: OperatorRuntime, identifier: str, key: str) -> None:
+        super().__init__(runtime, identifier, key)
         self.key = key
+        if key == "status":
+            self._attr_translation_key = "control_status"
+            self._attr_device_class = SensorDeviceClass.ENUM
+            self._attr_options = [
+                "initializing",
+                "fault",
+                "hands_off",
+                "idle",
+                "observe",
+                "unavailable",
+                "restricted",
+                "satisfied",
+                "pending",
+                "applying",
+                "waiting",
+            ]
         if key in {"desired", "observed"} and runtime.resources[identifier]["kind"] == "cover":
             self._attr_native_unit_of_measurement = PERCENTAGE
             self._attr_suggested_display_precision = 0
@@ -84,6 +124,12 @@ class ResourceSensor(OperatorEntity, SensorEntity):
         if key in {"next_attempt", "attempts"}:
             self._attr_entity_category = EntityCategory.DIAGNOSTIC
             self._attr_entity_registry_enabled_default = False
+
+    @property
+    def available(self) -> bool:
+        if self.key == "observed":
+            return self.runtime.source_available(self.identifier)
+        return True
 
     @property
     def native_value(self) -> float | str | datetime | None:
@@ -100,14 +146,14 @@ class ResourceSensor(OperatorEntity, SensorEntity):
         if self.key == "expiry":
             lease = self.runtime.manual(self.identifier)
             stamp = lease.expires_at if lease else None
-            return datetime.fromtimestamp(stamp, UTC) if stamp is not None else None
+            return _timestamp(stamp)
         if self.key == "effective_expiry":
             selection = self.runtime.selections.get(self.identifier)
             stamp = selection.expires_at if selection else None
-            return datetime.fromtimestamp(stamp, UTC) if stamp is not None else None
+            return _timestamp(stamp)
         if self.key == "next_attempt":
             stamp = self.runtime.next_attempts.get(self.identifier)
-            return datetime.fromtimestamp(stamp, UTC) if stamp is not None else None
+            return _timestamp(stamp)
         if self.key == "attempts":
             return self.runtime.attempts.get(self.identifier, 0)
         decision = self.runtime.decisions.get(self.identifier)
@@ -118,7 +164,7 @@ class ResourceSensor(OperatorEntity, SensorEntity):
         return target_value(decision.target) if decision else None
 
     @property
-    def extra_state_attributes(self) -> dict[str, Any] | None:
+    def extra_state_attributes(self) -> dict[str, object] | None:
         if self.key in {"desired", "reason"}:
             decision = self.runtime.decisions.get(self.identifier)
             selection = self.runtime.selections.get(self.identifier)
@@ -154,10 +200,8 @@ class ResourceSensor(OperatorEntity, SensorEntity):
 class PolicyInputSensor(OperatorEntity, SensorEntity):
     """Read committed input phase and deadline; execution never depends on this entity."""
 
-    def __init__(self, runtime: Any, identifier: str, key: str) -> None:
-        super().__init__(
-            runtime, identifier, key, "Input phase" if key == "input_phase" else "Qualification due"
-        )
+    def __init__(self, runtime: OperatorRuntime, identifier: str, key: str) -> None:
+        super().__init__(runtime, identifier, key)
         self.key = key
         self._attr_entity_category = EntityCategory.DIAGNOSTIC
         self._attr_entity_registry_enabled_default = False
@@ -178,15 +222,19 @@ class PolicyInputSensor(OperatorEntity, SensorEntity):
             return None
         if self.key == "input_phase":
             return state.phase
-        return datetime.fromtimestamp(state.due_at, UTC) if state.due_at is not None else None
+        return _timestamp(state.due_at)
 
 
 class RequirementSensor(OperatorEntity, SensorEntity):
     """Confirmation status and selected source, without optimistic satisfaction."""
 
-    def __init__(self, runtime: Any, identifier: str, key: str) -> None:
-        super().__init__(runtime, identifier, key, REQUIREMENT_SENSORS[key])
+    def __init__(self, runtime: OperatorRuntime, identifier: str, key: str) -> None:
+        super().__init__(runtime, identifier, key)
         self.key = key
+        if key == "status":
+            self._attr_translation_key = "requirement_status"
+            self._attr_device_class = SensorDeviceClass.ENUM
+            self._attr_options = ["inactive", "unknown", "satisfied", "acquiring", "unmet"]
 
     @property
     def native_value(self) -> str | None:
@@ -196,7 +244,7 @@ class RequirementSensor(OperatorEntity, SensorEntity):
         return result.status if self.key == "status" else result.selected_provider
 
     @property
-    def extra_state_attributes(self) -> dict[str, Any] | None:
+    def extra_state_attributes(self) -> dict[str, object] | None:
         result = self.runtime.requirement_results.get(self.identifier)
         if self.key == "status" and result is not None:
             return {"reason": result.reason, "acquiring_provider": result.acquiring_provider}

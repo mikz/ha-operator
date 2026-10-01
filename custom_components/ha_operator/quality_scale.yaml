@@ -1,0 +1,245 @@
+rules:
+  action-setup:
+    status: done
+    comment: 'Actions register in async_setup and handlers resolve a loaded entry. `custom_components/ha_operator/__init__.py`;
+      `custom_components/ha_operator/services.py`. Source: https://developers.home-assistant.io/docs/core/integration-quality-scale/rules/action-setup/'
+  appropriate-polling:
+    status: done
+    comment: 'Entities are event driven. Retries reconcile accepted intent; they do not poll a vendor
+      API. `custom_components/ha_operator/entity.py`; `custom_components/ha_operator/runtime.py`. Source:
+      https://developers.home-assistant.io/docs/core/integration-quality-scale/rules/appropriate-polling/'
+  brands:
+    status: todo
+    comment: 'Packaged local brand assets support custom integrations. Literal central brands acceptance
+      is a future Core requirement and remains pending; no formal exemption is claimed. Source: https://developers.home-assistant.io/docs/core/integration-quality-scale/rules/brands/'
+  common-modules:
+    status: done
+    comment: 'Common entity behavior is in entity.py; constants in const.py. There is no DataUpdateCoordinator.
+      `custom_components/ha_operator/entity.py`. Source: https://developers.home-assistant.io/docs/core/integration-quality-scale/rules/common-modules/'
+  config-flow-test-coverage:
+    status: done
+    comment: 'Current source config flow covers every statement and branch on both supported HA versions,
+      including reconfiguration and unlock errors. Final packaged validation remains required. Source: https://developers.home-assistant.io/docs/core/integration-quality-scale/rules/config-flow-test-coverage/'
+  config-flow:
+    status: done
+    comment: 'Complex resource, policy, requirement, and desired-control fields have inline help in strings.json
+      and translations/en.json. Native selectors and validation remain unchanged. Source: https://developers.home-assistant.io/docs/core/integration-quality-scale/rules/config-flow/'
+  dependency-transparency:
+    status: done
+    comment: 'The manifest declares no external runtime dependencies. Device communication uses existing
+      HA integrations. `custom_components/ha_operator/manifest.json`. Source: https://developers.home-assistant.io/docs/core/integration-quality-scale/rules/dependency-transparency/'
+  docs-actions:
+    status: done
+    comment: 'docs/reference.md documents all eight actions, response contracts, administrator restrictions,
+      and durable acceptance versus physical convergence. README.md links the reference. Source: https://developers.home-assistant.io/docs/core/integration-quality-scale/rules/docs-actions/'
+  docs-triggers:
+    status: done
+    comment: 'No custom automation trigger platform is exposed. Listening to native timer events does
+      not create an Operator trigger API. Source: https://developers.home-assistant.io/docs/core/integration-quality-scale/rules/docs-triggers/'
+  docs-conditions:
+    status: done
+    comment: 'No custom automation condition platform is exposed. Conditions use existing native entities.
+      Source: https://developers.home-assistant.io/docs/core/integration-quality-scale/rules/docs-conditions/'
+  docs-high-level-description:
+    status: done
+    comment: 'README explains reconciliation, arbitration and the supported resource types. `README.md`.
+      Source: https://developers.home-assistant.io/docs/core/integration-quality-scale/rules/docs-high-level-description/'
+  docs-installation-instructions:
+    status: done
+    comment: 'The release installation procedure covers archive placement, restart, native setup and observe-first
+      configuration. `README.md`. Source: https://developers.home-assistant.io/docs/core/integration-quality-scale/rules/docs-installation-instructions/'
+  docs-removal-instructions:
+    status: done
+    comment: 'docs/removal.md documents ownership transfer, dependency order, package removal, and retained
+      snapshots/traces. Source: https://developers.home-assistant.io/docs/core/integration-quality-scale/rules/docs-removal-instructions/'
+  entity-event-setup:
+    status: done
+    comment: 'Entity subscriptions start in async_added_to_hass and register async_on_remove cleanup.
+      `custom_components/ha_operator/entity.py`. Source: https://developers.home-assistant.io/docs/core/integration-quality-scale/rules/entity-event-setup/'
+  entity-unique-id:
+    status: done
+    comment: 'Entity identity uses stable subentry ID plus a fixed entity key. `custom_components/ha_operator/entity.py`.
+      Source: https://developers.home-assistant.io/docs/core/integration-quality-scale/rules/entity-unique-id/'
+  has-entity-name:
+    status: done
+    comment: 'Base entity sets has_entity_name; primary managed entities use name=None. `custom_components/ha_operator/entity.py`;
+      `custom_components/ha_operator/cover.py`. Source: https://developers.home-assistant.io/docs/core/integration-quality-scale/rules/has-entity-name/'
+  runtime-data:
+    status: done
+    comment: 'Runtime is owned by entry.runtime_data. `custom_components/ha_operator/__init__.py`. Source:
+      https://developers.home-assistant.io/docs/core/integration-quality-scale/rules/runtime-data/'
+  test-before-configure:
+    status: exempt
+    comment: 'The official rule explicitly exempts helpers without a device/service connection. Operator
+      has no separate login or network session. Source: https://developers.home-assistant.io/docs/core/integration-quality-scale/rules/test-before-configure/'
+  test-before-setup:
+    status: done
+    comment: 'Authoritative startup load/validation/persistence failures raise translated ConfigEntryError
+      with a retained Repair and clean abort. Runtime feedback unavailability remains recoverable; tests/integration/test_lifecycle.py
+      covers the boundary. Source: https://developers.home-assistant.io/docs/core/integration-quality-scale/rules/test-before-setup/'
+  unique-config-entry:
+    status: done
+    comment: 'The manifest and config flow enforce a single entry; duplicate setup is tested. `custom_components/ha_operator/config_flow.py`.
+      Source: https://developers.home-assistant.io/docs/core/integration-quality-scale/rules/unique-config-entry/'
+  action-exceptions:
+    status: done
+    comment: 'Validation uses ServiceValidationError; durable-write/runtime failure reaches callers as
+      HomeAssistantError. Native entity commands share that boundary. `custom_components/ha_operator/services.py`;
+      `custom_components/ha_operator/runtime.py`. Source: https://developers.home-assistant.io/docs/core/integration-quality-scale/rules/action-exceptions/'
+  config-entry-unloading:
+    status: done
+    comment: 'Unload fences generations, cancels timers, drains workers/writes and removes subscriptions
+      before replacement. Failure to persist a timer interruption can refuse unload. `custom_components/ha_operator/runtime.py`.
+      Source: https://developers.home-assistant.io/docs/core/integration-quality-scale/rules/config-entry-unloading/'
+  docs-configuration-parameters:
+    status: done
+    comment: 'docs/reference.md and native field descriptions cover options, all four subentries, defaults,
+      units, constraints, and reload effects. Source: https://developers.home-assistant.io/docs/core/integration-quality-scale/rules/docs-configuration-parameters/'
+  docs-installation-parameters:
+    status: done
+    comment: 'docs/reference.md covers all setup and subentry fields, defaults, units, constraints, and
+      adapter examples. Source: https://developers.home-assistant.io/docs/core/integration-quality-scale/rules/docs-installation-parameters/'
+  entity-unavailable:
+    status: done
+    comment: 'Adapter source availability distinguishes absent/unavailable sources from reachable unknown
+      or unusable values. Managed and Observed entities use it; durable intent and physical confirmation
+      guards remain separate. Tests: tests/integration/test_source_availability.py and tests/integration/test_provenance.py.
+      Source: https://developers.home-assistant.io/docs/core/integration-quality-scale/rules/entity-unavailable/'
+  integration-owner:
+    status: done
+    comment: 'Manifest names an active code owner. `custom_components/ha_operator/manifest.json`. Source:
+      https://developers.home-assistant.io/docs/core/integration-quality-scale/rules/integration-owner/'
+  log-when-unavailable:
+    status: done
+    comment: 'Runtime logs one INFO loss/recovery per source outage, including initially missing sources;
+      repeated unknown/invalid feedback does not invent another outage. Tests: tests/integration/test_source_availability.py.
+      Source: https://developers.home-assistant.io/docs/core/integration-quality-scale/rules/log-when-unavailable/'
+  parallel-updates:
+    status: done
+    comment: 'All seven event-driven platforms declare PARALLEL_UPDATES = 0. Existing durable admission
+      and one worker per resource own ordering. Native services prove independent progress, same-resource
+      durable order, and STOP bypass. Tests: tests/integration/test_platform_concurrency.py, test_runtime_requests.py,
+      and test_runtime_boundaries.py. Source: https://developers.home-assistant.io/docs/core/integration-quality-scale/rules/parallel-updates/'
+  reauthentication-flow:
+    status: exempt
+    comment: 'Operator has no credentials or external authentication. The official exemption applies.
+      Source: https://developers.home-assistant.io/docs/core/integration-quality-scale/rules/reauthentication-flow/'
+  test-coverage:
+    status: done
+    comment: 'scripts/coverage_gate.py requires branch metadata/counts for every production module, more
+      than 95% lines and combined statements/branches, and 100% config flow. It rejects executable exclusions
+      and missing modules. Tests: tests/unit/test_coverage_gate.py; candidate full source coverage runs
+      on both supported HA versions. Source: https://developers.home-assistant.io/docs/core/integration-quality-scale/rules/test-coverage/'
+  devices:
+    status: done
+    comment: 'Each logical resource/policy/requirement/intent has a SERVICE device identified in the Operator
+      domain. It does not claim the physical source device. `custom_components/ha_operator/entity.py`.
+      Source: https://developers.home-assistant.io/docs/core/integration-quality-scale/rules/devices/'
+  diagnostics:
+    status: done
+    comment: 'Native downloadable diagnostics use allowlists, pseudonyms and bounded history. Redaction
+      has source tests and packaged-lab evidence. `custom_components/ha_operator/diagnostics.py`. Source:
+      https://developers.home-assistant.io/docs/core/integration-quality-scale/rules/diagnostics/'
+  discovery-update-info:
+    status: exempt
+    comment: 'Operator has no discovered endpoint/address to update; existing integrations own physical
+      connections. Source: https://developers.home-assistant.io/docs/core/integration-quality-scale/rules/discovery-update-info/'
+  discovery:
+    status: exempt
+    comment: 'The user defines a logical control graph; there is no network advertisement for an Operator
+      installation to discover. Source: https://developers.home-assistant.io/docs/core/integration-quality-scale/rules/discovery/'
+  docs-data-update:
+    status: done
+    comment: 'Event-driven raw source reports, retry/motion guards, availability transitions, and reload
+      timer interruption are documented in docs/observability.md and docs/reference.md. Source: https://developers.home-assistant.io/docs/core/integration-quality-scale/rules/docs-data-update/'
+  docs-examples:
+    status: done
+    comment: 'Sanitized examples, timed windows, source followers and native History/dashboard demonstrations
+      exist. `examples/README.md`; `docs/window-control.md`; `docs/desired-controls.md`. Source: https://developers.home-assistant.io/docs/core/integration-quality-scale/rules/docs-examples/'
+  docs-known-limitations:
+    status: done
+    comment: 'Docs distinguish accepted intent from effects, physical feedback from virtual state, STOP
+      persistence limits, scene limitations and timer reload behavior. `docs/window-control.md`; `docs/architecture.md`.
+      Source: https://developers.home-assistant.io/docs/core/integration-quality-scale/rules/docs-known-limitations/'
+  docs-supported-devices:
+    status: exempt
+    comment: 'The official exemption fits a helper with no direct physical-device protocol. Existing HA
+      integrations own device support. Source: https://developers.home-assistant.io/docs/core/integration-quality-scale/rules/docs-supported-devices/'
+  docs-supported-functions:
+    status: done
+    comment: 'docs/reference.md documents seven platforms, four subentries, eight actions, use cases,
+      capabilities, and limitations. Source: https://developers.home-assistant.io/docs/core/integration-quality-scale/rules/docs-supported-functions/'
+  docs-troubleshooting:
+    status: done
+    comment: 'docs/troubleshooting.md covers setup/storage Repairs, availability, feedback, pacing, observe/shadow
+      lock, airflow, timer reload, diagnostics, and recovery. Source: https://developers.home-assistant.io/docs/core/integration-quality-scale/rules/docs-troubleshooting/'
+  docs-use-cases:
+    status: done
+    comment: 'Reconciliation, timed ventilation, airflow alternatives and source-following modes are explained
+      with concrete examples. `README.md`; `docs/desired-controls.md`. Source: https://developers.home-assistant.io/docs/core/integration-quality-scale/rules/docs-use-cases/'
+  dynamic-devices:
+    status: todo
+    comment: 'Native subentry changes automatically reload and add devices. Formal in-place addition applicability
+      remains under review; document timer interruption and prove registry CRUD without a new lifecycle
+      framework. Source: https://developers.home-assistant.io/docs/core/integration-quality-scale/rules/dynamic-devices/'
+  entity-category:
+    status: done
+    comment: 'Modes/policy enablement use CONFIG. Timing and qualification internals use DIAGNOSTIC. Desired/Observed/Reason
+      remain operational. `docs/observability.md`. Source: https://developers.home-assistant.io/docs/core/integration-quality-scale/rules/entity-category/'
+  entity-device-class:
+    status: done
+    comment: 'Existing native cover/fan/switch and timestamp classes are retained. Airflow unmet and return
+      overdue use PROBLEM; fixed status and input phase use ENUM. tests/integration/test_gold_presentation.py.
+      Source: https://developers.home-assistant.io/docs/core/integration-quality-scale/rules/entity-device-class/'
+  entity-disabled-by-default:
+    status: done
+    comment: 'Attempt/next-attempt and native input diagnostics start disabled. Their entity lifecycle
+      does not own policy execution. `custom_components/ha_operator/sensor.py`; `custom_components/ha_operator/binary_sensor.py`.
+      Source: https://developers.home-assistant.io/docs/core/integration-quality-scale/rules/entity-disabled-by-default/'
+  entity-translations:
+    status: done
+    comment: 'Secondary labels and fixed ENUM/select presentation use native translation keys. Primary
+      managed name remains None; user names, Reason/provider values, and reserved HA unknown/unavailable
+      codes are unchanged. tests/integration/test_gold_presentation.py. Source: https://developers.home-assistant.io/docs/core/integration-quality-scale/rules/entity-translations/'
+  exception-translations:
+    status: done
+    comment: 'Expected request, target, capability, and configuration errors carry semantic keys and actual
+      field/value placeholders. Existing pure target/intent errors expose metadata; unexpected programming
+      errors stay unwrapped. tests/integration/test_gold_presentation.py and tests/integration/test_config_flow.py.
+      Source: https://developers.home-assistant.io/docs/core/integration-quality-scale/rules/exception-translations/'
+  icon-translations:
+    status: done
+    comment: 'icons.json supplies justified secondary semantics. Native PROBLEM, timestamp, and primary
+      device icons are retained; user icon overrides survive reload. tests/integration/test_gold_presentation.py.
+      Source: https://developers.home-assistant.io/docs/core/integration-quality-scale/rules/icon-translations/'
+  reconfiguration-flow:
+    status: done
+    comment: 'All four subentry types support native reconfiguration; entry-wide behavior uses OptionsFlow.
+      IDs remain stable. `custom_components/ha_operator/config_flow.py`; `tests/integration/test_subentry_registry.py`.
+      Source: https://developers.home-assistant.io/docs/core/integration-quality-scale/rules/reconfiguration-flow/'
+  repair-issues:
+    status: done
+    comment: 'Configuration and storage Repairs name the problem, preserve evidence and explain corrective
+      action and reload. Tests verify clearing after valid recovery. `custom_components/ha_operator/strings.json`;
+      `tests/integration/test_subentry_removal.py`. Source: https://developers.home-assistant.io/docs/core/integration-quality-scale/rules/repair-issues/'
+  stale-devices:
+    status: done
+    comment: 'Actual native CRUD links devices/entities to subentries, preserves registry customization/intent
+      on reconfiguration, and removes deleted logical entries without deleting unavailable physical sources.
+      tests/integration/test_subentry_registry.py and tests/integration/test_subentry_removal.py. Source:
+      https://developers.home-assistant.io/docs/core/integration-quality-scale/rules/stale-devices/'
+  async-dependency:
+    status: done
+    comment: 'No external client dependency exists. HA calls are async; snapshot reads/writes and trace
+      disk work run in the executor. `custom_components/ha_operator/storage.py`; `custom_components/ha_operator/shadow.py`.
+      Source: https://developers.home-assistant.io/docs/core/integration-quality-scale/rules/async-dependency/'
+  inject-websession:
+    status: exempt
+    comment: 'Operator makes no direct HTTP requests. The official no-HTTP exemption applies. Source:
+      https://developers.home-assistant.io/docs/core/integration-quality-scale/rules/inject-websession/'
+  strict-typing:
+    status: done
+    comment: 'All production modules use strict mypy with native HA entry/callback APIs and concrete
+      validated configuration/snapshot records. Both native CI environments require pinned strict, lint,
+      and format checks; release evidence binds archive/source/configuration/locks and complete scope.
+      scripts/evidence.py; .github/workflows/validate.yml; tests/unit/test_evidence.py. Source: https://developers.home-assistant.io/docs/core/integration-quality-scale/rules/strict-typing/'

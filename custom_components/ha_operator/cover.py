@@ -2,14 +2,27 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from homeassistant.components.cover import ATTR_POSITION, CoverEntity, CoverEntityFeature
+from homeassistant.core import HomeAssistant
+from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
+from . import OperatorConfigEntry
 from .entity import ResourceEntity
 
+if TYPE_CHECKING:
+    from .runtime import OperatorRuntime
 
-async def async_setup_entry(hass: Any, entry: Any, async_add_entities: Any) -> None:
+# The runtime serializes durable admission and owns one worker per resource, owning all its outputs.
+PARALLEL_UPDATES = 0
+
+
+async def async_setup_entry(
+    hass: HomeAssistant,
+    entry: OperatorConfigEntry,
+    async_add_entities: AddConfigEntryEntitiesCallback,
+) -> None:
     runtime = entry.runtime_data
     for identifier, data in runtime.resources.items():
         if data["kind"] == "cover" and runtime.manual_control(identifier):
@@ -19,8 +32,8 @@ async def async_setup_entry(hass: Any, entry: Any, async_add_entities: Any) -> N
 class OperatorCover(ResourceEntity, CoverEntity):
     """Cover reporting raw position rather than accepted intent."""
 
-    def __init__(self, runtime: Any, identifier: str) -> None:
-        super().__init__(runtime, identifier, "managed", None)
+    def __init__(self, runtime: OperatorRuntime, identifier: str) -> None:
+        super().__init__(runtime, identifier, "managed")
 
     @property
     def supported_features(self) -> CoverEntityFeature:

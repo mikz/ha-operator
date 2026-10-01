@@ -64,6 +64,31 @@ async def run_observability(lab):
             lambda: ha.state(entities["status"]), lambda state: state["state"] == "waiting"
         )
         assert (await lab.physical())["position"] == 0
+        http_explain = await ha.service(
+            "ha_operator", "explain", {"resource_id": lab.resource}, response=True
+        )
+        websocket_explain = await ha.ws(
+            "call_service",
+            domain="ha_operator",
+            service="explain",
+            service_data={"resource_id": lab.resource},
+            return_response=True,
+        )
+        responses = {
+            "http": http_explain["service_response"],
+            "websocket": websocket_explain["response"],
+        }
+        (ARTIFACTS / "observability-explain-responses.json").write_text(
+            json.dumps(responses, indent=2)
+        )
+        for response in responses.values():
+            candidates = response["resources"][lab.resource]["decision"]["candidates"]
+            assert isinstance(candidates, list) and candidates
+            assert any(
+                candidate["source"] == f"policy:{baseline}"
+                and candidate["target"]["position"] == 40
+                for candidate in candidates
+            )
 
     async with lab.scenario("OBS-REASON-CHANGE-NO-DISPATCH"):
         await lab.sim("POST", "/admin/devices/skylight", {"hidden_rain": False})
@@ -224,7 +249,7 @@ async def run_observability(lab):
                             "content": (
                                 "# HA Operator · simulated home\n"
                                 "Native entities from the installed release ZIP.\n\n"
-                                "Desired is accepted intent. "
+                                "Desired target is the effective target. "
                                 "Observed is validated device feedback. "
                                 "Reason records why the target was selected."
                             ),
@@ -283,6 +308,13 @@ async def run_observability(lab):
                 }
             ],
         }
+        dashboard["views"][0]["cards"].append(
+            {
+                "type": "entities",
+                "title": "Native Operator presentation",
+                "entities": [entities["status"], entities["desired"], lab.mode],
+            }
+        )
         await ha.ws("lovelace/config/save", url_path="operator-demo", config=dashboard)
         await lab.request(80, duration=600, request_id="browser-demo-refusal")
         await lab.page.goto(ha.base + "/operator-demo/status", wait_until="domcontentloaded")
@@ -291,3 +323,30 @@ async def run_observability(lab):
             path=str(ARTIFACTS / "observability-dashboard.png"), full_page=True
         )
         (ARTIFACTS / "observability-dashboard.json").write_text(json.dumps(dashboard, indent=2))
+
+    async with lab.scenario("OBS-NATIVE-TRANSLATED-PRESENTATION"):
+        await lab.page.get_by_text("Native Operator presentation", exact=True).wait_for()
+        status_state = await ha.state(entities["status"])
+        status_label = lab.page.get_by_text(status_state["attributes"]["friendly_name"], exact=True)
+        await status_label.wait_for()
+        row_dom = await status_label.evaluate("""(label) => {
+            const host = label.getRootNode().host;
+            return { label: label.textContent.trim(), host: host.localName,
+                     rendered: host.textContent.trim(), markup: host.outerHTML };
+        }""")
+        row_dom["counts"] = {
+            "cards": await lab.page.locator("hui-entities-card").count(),
+            "title": await lab.page.get_by_text("Native Operator presentation", exact=True).count(),
+            "card_filter": await lab.page.locator("hui-entities-card")
+            .filter(has_text="Native Operator presentation")
+            .count(),
+            "native_status_label": await status_label.count(),
+        }
+        (ARTIFACTS / "gold-native-dom.json").write_text(json.dumps(row_dom, indent=2))
+        assert row_dom["host"] == "hui-generic-entity-row"
+        assert row_dom["rendered"] == "Waiting"
+        mode_state = await ha.state(lab.mode)
+        await lab.page.get_by_text(mode_state["attributes"]["friendly_name"], exact=True).click()
+        await lab.page.get_by_role("menuitem", name="Observe", exact=True).wait_for()
+        await lab.page.get_by_role("menuitem", name="Live", exact=True).wait_for()
+        await lab.page.screenshot(path=str(ARTIFACTS / "gold-native-mode.png"), full_page=True)

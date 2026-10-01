@@ -29,11 +29,14 @@ overhead is included in the reported unprofiled timing comparison. Asyncio debug
 is disabled to match ordinary HA scheduling.
 
 Home Assistant's [profiler integration](https://www.home-assistant.io/integrations/profiler/)
-uses cProfile on the event-loop thread. This harness uses the same profiler and
-retains the native `.cprof` files plus cumulative-call reports. Executor thread
-stacks are outside that profile. Process CPU timing includes their CPU use;
-file-system waits also contribute to wall time. A live profile is not needed to
-run this isolated comparison.
+uses cProfile on the event-loop thread. This harness retains native `.cprof`
+files plus cumulative-call reports. The current Python 3.14 fixture captures
+include executor and file-write stacks. These saved profiles describe the
+bounded fixture workloads; they do not establish all-thread coverage or
+production event-loop latency. Process CPU timing includes executor CPU use,
+and file-system waits contribute to wall time. End-to-end batch latency is also
+a fixture measurement. A live profile is not needed to run this isolated
+comparison.
 
 Use `--suite trace-disk` for the separate blocking-writer benchmark. It appends
 64 complete rows per batch to real local files, counts actual `fsync` calls,
@@ -47,8 +50,8 @@ The common workload uses four cover resources and their enabled native entities:
 - 100 bursts of 25 changing raw positions: 2,500 input changes total.
 - 100 unrelated trace-only input changes.
 
-Each runs with integration tracing disabled and enabled. Additional candidate-only
-workloads use two desired controls and 15 live simulated switch followers:
+Each runs with integration tracing disabled and enabled. Both archives also run
+workloads with two desired controls and 15 live simulated switch followers:
 100 alternating central commands, or 100 batches of 15 unchanged follower reports.
 These are load measurements; their immediate simulated feedback does not represent
 KNX protocol, Adaptive Lighting, or physical lamp behavior.
@@ -92,7 +95,11 @@ Performance measurements do not replace the packaged safety scenarios.
 Raw profiles can contain local filesystem paths. Keep them private or sanitize
 them before publication; do not add production exports to this repository.
 
-## Measured candidate: 0.1.4
+## Historical measured candidate: 0.1.4
+
+The follower measurements below ran only on the candidate because that historical
+baseline did not support followers. The current harness compares followers on
+both archives and requires both releases to support that workload.
 
 Measured on Python 3.14.7, HA 2026.9.3 and fixture 0.13.366. Baseline source
 was commit `bfc729d`; its ZIP hash is
@@ -166,16 +173,16 @@ at arbitrary rates, or measure flash storage on a production HA host.
 
 ## Native policy comparison
 
-Use `--suite native-policies` to compare the five writers from
-`tests/lab/window_recipe.py` with two native policy inputs and three return
-monitors. The baseline runs the unchanged timer, temperature, and three return
-automation factories with eight real HA helpers. Both archives use the same
+Use `--suite native-policies` to compare two releases that both support native
+policy inputs. Both archives use the same two native inputs, three return monitors,
 three live cover resources, baseline policies, synthetic temperature sensor,
-public timer, targets, priorities, and raw feedback. Cover service calls do
-not change raw feedback or establish physical confirmation.
+public timer, targets, priorities, and raw feedback. No helper automation topology
+is installed. Cover service calls do not change raw feedback or establish physical
+confirmation.
 
-The runner copies the probe and recipe into each disposable subprocess and
-records both hashes with the ZIP hashes. Use the frozen release archive for
+The runner copies the same probe into each disposable subprocess and records its
+hash with both ZIP hashes. Native receipts include the actual subentry and options
+configuration, initial feedback, workload, batch count, and warm-up count. Use the frozen release archive for
 acceptance measurements. A development archive only verifies probe mechanics.
 Keep the host free of other tests, builds, and lab workloads during timing.
 
@@ -201,14 +208,14 @@ The workloads exercise these boundaries:
 
 | Workload | One batch |
 | --- | --- |
-| `idle` | Advance five seconds with a warm sensor, inactive timer, and confirmed 7% positions. The baseline's five writers wake; no qualification or warning deadline is pending. |
+| `idle` | Advance five seconds with a warm sensor, inactive timer, and confirmed 7% positions. Neither release has a pending qualification or warning deadline. |
 | `unchanged` | Report the unchanged temperature, three raw positions, and timer state through native HA state plumbing. |
 | `changing` | Report 15, 14, 17, then 15 °C in one loop turn, alternate all three raw positions between 7% and 100%, and advance five seconds. |
 | `timer` | Start, restart, pause, resume, cancel, qualify two fresh episodes, complete the timer naturally, and cancel a final fresh start. |
 | `reload` | Reload the actual config entry with an inactive timer and no active timer request. Check that old workers stop before the three replacement workers run. |
 
 The fixed simulation starts at `2026-09-30T08:00:00.500000+00:00`. Five-second
-ticks include HA's time-pattern scheduling spread within the first half-second.
+ticks allow native scheduled handles to settle within the first half-second.
 Only simulation time advances. Wall timing uses freezegun's preserved real
 `perf_counter`, and CPU timing uses `process_time`. Each receipt includes its
 virtual start and end. This avoids counting virtual time as elapsed host time.
@@ -232,21 +239,26 @@ separate from workload timing. Reload timing includes native unload cleanup and
 its trace drain. Inspect trace health before, after, and after final drain before
 making a complete-trace claim.
 
-The native snapshot writer commits transitions durably. The baseline stores
-helper state through HA's debounced helper persistence, whose storage writes
-are outside the Operator write counter. Higher Operator write counts can reflect
-this stronger contract; they do not by themselves establish a regression.
-Legacy queued temperature actions read the final current source state and can
-miss an intermediate warm transition. The input sequence is identical, but
-the old and native qualification semantics are not equivalent for those bursts.
-Report these differences with the measurements.
+Both releases commit native input and return-monitor transitions through the
+Operator snapshot writer. The workload and configuration are identical; compare
+actual commands, writes, input events, and trace health alongside timing.
 
-## Measured native policy candidate: 0.1.5
+## Historical helper-versus-native comparison: 0.1.5
+
+These retained measurements used the former probe at source commit `68a7139`,
+not the identical-native method above. The 0.1.4 baseline installed five recipe
+writers with eight HA helpers; the 0.1.5 candidate installed two native policy
+inputs and three return monitors. The former runner copied and hashed
+`tests/lab/window_recipe.py` as well as the probe. Idle woke the baseline writers.
+Legacy queued actions could miss intermediate warm transitions and persisted
+helpers through HA's debounced storage outside the Operator write counter. The
+current probe removes that topology branch and cannot reproduce these historical
+numbers.
 
 Measured on Python 3.14.7, HA 2026.9.3, and fixture 0.13.366. The baseline is
 the 0.1.4 ZIP above. The candidate, from source commit `68a7139`, has SHA-256
 `9e3558ca811a124751f81bc9b36385acfb30523ae37888eaf6b03771ad0dcee7`.
-All 100 subprocesses completed with the method described above. Unrelated work
+All 100 subprocesses completed with that historical helper-versus-native method. Unrelated work
 continued on the shared host; no project tests, builds, or labs ran during timing.
 These results do not establish production latency or the cause of an OOM.
 

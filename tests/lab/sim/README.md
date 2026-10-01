@@ -82,8 +82,11 @@ The test-only HA bridge is configured as:
 ```yaml
 ha_operator_sim:
   url: http://simulator:8099
-  poll_interval: 0.25
+  poll_interval: 1
 ```
+
+Use a polling interval of at least one second. Native HA coordinator scheduling can
+repeatedly poll for intervals below one second.
 
 It creates native raw entities as `<domain>.sim_<id>`. Use `/admin/reset` with the
 same descriptors after HA setup, or restart HA when changing the device inventory.

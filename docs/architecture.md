@@ -157,10 +157,15 @@ service paths have different capability gates. See the
 
 A native fan requires a configured default target. Its bare turn-on needs a
 speed in that default or a usable observed speed when speed control is supported.
-For relay fans, bare turn-on uses the configured default profile. A direction-only
-command while a relay fan is physically off leaves every output off and does not
-store a preferred direction. Native fans can accept direction changes while off
-when their adapter supports that behavior.
+For relay fans, bare turn-on uses the configured default profile unless a valid
+manual lease retains selected fan settings. A direction-only command while the
+committed fan target is off leaves every output off and durably retains the
+selected direction in that lease's `fan_settings`. A later ON or speed command
+can use it, including after restart. Expiry or release ends that preference.
+These saved settings are intent, not observed direction or airflow. Native fans
+can accept direction changes while off when their adapter supports that behavior.
+The [fan intent tests](../tests/integration/test_fan_intent.py) cover command
+composition, off-state selection, release, expiry, and restart.
 
 Relay reversal uses break-before-make: command off, confirm every required output
 off, wait the configured dead time, then apply the new profile. Unknown,

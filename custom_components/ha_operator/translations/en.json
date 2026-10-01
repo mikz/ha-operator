@@ -51,7 +51,20 @@
           },
           "data_description": {
             "manual_control": "Turn off for a follower controlled by a source. Removes managed command entities, manual status, expiry, and resume controls; manual request actions are rejected.",
-            "return_monitor": "For covers, warn when raw position has not reached the effective return target. Uses the configured position tolerance."
+            "return_monitor": "For covers, warn when raw position has not reached the effective return target. Uses the configured position tolerance.",
+            "kind": "Choose the source integration adapter. A relay fan owns every listed switch output exclusively.",
+            "entity_id": "Use the raw cover, switch, or fan from its source integration. Covers need non-optimistic position feedback and position control.",
+            "outputs": "For relay fans only. Every profile must specify true or false for every listed switch. No other resource can own these outputs.",
+            "profiles": "Map profile names to an outputs object containing switch entity IDs and boolean states. Include an all-off profile and an on profile.",
+            "default_target": "Native fans require an on target, optionally with a percentage. Relay fans require an on profile target. This is the fan ON command default, not an automatic baseline policy.",
+            "reversal_dead_time": "Relay fans require 0.001 to 3600 seconds with every output off before changing direction. Choose a value permitted by the motor and relay hardware.",
+            "restriction_entity": "Only the on state blocks the restricted target. Missing or unknown restriction feedback also prevents unsafe dispatch; it does not erase accepted intent.",
+            "fault_entity": "On inhibits dispatch. Missing, unknown, restored, or optimistic feedback also inhibits commands.",
+            "retry_interval": "Positive seconds between retries when the device does not reach the target. Defaults to 300. Source updates do not renew an accepted expiry.",
+            "command_interval": "Positive seconds between normal commands for one resource. Defaults to 30. A supported STOP invalidates pending commands and bypasses this interval.",
+            "movement_timeout": "Positive seconds to defer another command while raw feedback reports movement. Defaults to 120. A target-not-reached decision can already exist; this guard bounds the wait before retry.",
+            "manual_duration": "Positive seconds for a manual lease when no duration or absolute expiry is supplied. Defaults to 1800. Expiry withdraws the override; a policy must supply any return target.",
+            "tolerance": "Allowed cover-position difference from the target, from 0 to 100 percentage points. Defaults to 2. Independent physical feedback remains required."
           }
         },
         "reconfigure": {
@@ -77,19 +90,96 @@
           },
           "data_description": {
             "manual_control": "Turn off for a follower controlled by a source. Removes managed command entities, manual status, expiry, and resume controls; manual request actions are rejected.",
-            "return_monitor": "For covers, warn when raw position has not reached the effective return target. Uses the configured position tolerance."
+            "return_monitor": "For covers, warn when raw position has not reached the effective return target. Uses the configured position tolerance.",
+            "kind": "Choose the source integration adapter. A relay fan owns every listed switch output exclusively.",
+            "entity_id": "Use the raw cover, switch, or fan from its source integration. Covers need non-optimistic position feedback and position control.",
+            "outputs": "For relay fans only. Every profile must specify true or false for every listed switch. No other resource can own these outputs.",
+            "profiles": "Map profile names to an outputs object containing switch entity IDs and boolean states. Include an all-off profile and an on profile.",
+            "default_target": "Native fans require an on target, optionally with a percentage. Relay fans require an on profile target. This is the fan ON command default, not an automatic baseline policy.",
+            "reversal_dead_time": "Relay fans require 0.001 to 3600 seconds with every output off before changing direction. Choose a value permitted by the motor and relay hardware.",
+            "restriction_entity": "Only the on state blocks the restricted target. Missing or unknown restriction feedback also prevents unsafe dispatch; it does not erase accepted intent.",
+            "fault_entity": "On inhibits dispatch. Missing, unknown, restored, or optimistic feedback also inhibits commands.",
+            "retry_interval": "Positive seconds between retries when the device does not reach the target. Defaults to 300. Source updates do not renew an accepted expiry.",
+            "command_interval": "Positive seconds between normal commands for one resource. Defaults to 30. A supported STOP invalidates pending commands and bypasses this interval.",
+            "movement_timeout": "Positive seconds to defer another command while raw feedback reports movement. Defaults to 120. A target-not-reached decision can already exist; this guard bounds the wait before retry.",
+            "manual_duration": "Positive seconds for a manual lease when no duration or absolute expiry is supplied. Defaults to 1800. Expiry withdraws the override; a policy must supply any return target.",
+            "tolerance": "Allowed cover-position difference from the target, from 0 to 100 percentage points. Defaults to 2. Independent physical feedback remains required."
           }
         }
       },
       "error": {
-        "invalid_configuration": "Invalid configuration: {detail}",
-        "managed_entity": "Choose a physical source entity instead of an HA Operator entity. {detail}",
-        "entity_not_found": "The source entity does not exist. {detail}",
-        "unsupported_capability": "The source cannot provide the required control or feedback. {detail}",
-        "duplicate_output": "Another resource already owns this output. {detail}",
-        "resource_not_found": "Select an existing resource. {detail}",
-        "overlapping_requirement": "Each controlled resource can belong to only one airflow requirement. {detail}",
-        "invalid_return_monitor": "Invalid return confirmation settings: {detail}"
+        "config_object_expected": "{field} must be an object",
+        "config_text_keys": "{field} keys must be text",
+        "config_unknown_fields": "{field} has unknown fields: {value}",
+        "config_text_required": "{field} must be nonempty text",
+        "config_text_length": "{field} must contain at most {maximum} characters",
+        "config_number_required": "{field} must be a number",
+        "config_number_bounds": "{field} must be a finite number between {minimum} and {maximum}",
+        "config_entity_expected": "{field} must name a valid entity",
+        "config_must_contain_at_least_one_entity": "{field} must contain at least one entity",
+        "config_contains_duplicates": "{field} contains duplicates",
+        "config_target_must_contain_non_null_fields": "target must contain non-null fields",
+        "config_target_fields_are_not_supported_by": "target fields are not supported by {kind}",
+        "config_on_must_be_true_or_false": "on must be true or false",
+        "config_direction_must_be_forward_or_reverse": "direction must be forward or reverse",
+        "config_must_be_positive": "{field} must be positive",
+        "config_kind_must_be_cover_switch_fan_or_relay_fan": "kind must be cover, switch, fan, or relay_fan",
+        "config_manual_control_must_be_true_or_false": "manual_control must be true or false",
+        "config_policy_must_reference_an_existing_resource": "policy must reference an existing resource",
+        "config_policy_kind_must_be_state_or_occurrence": "policy kind must be state or occurrence",
+        "config_priority_must_be_an_integer": "priority must be an integer",
+        "config_initial_value_must_explicitly_be_true_or_false": "initial_value must explicitly be true or false",
+        "config_on_targets_must_be_a_list_of_desired_control_ids": "on_targets must be a list of desired control IDs",
+        "config_on_targets_must_not_contain_duplicates": "on_targets must not contain duplicates",
+        "config_providers_must_be_a_nonempty_ordered_list": "providers must be a nonempty ordered list",
+        "config_must_reference_a_source_entity_not_a_managed_operator_entity": "{field} must reference a source entity, not a managed operator entity",
+        "config_entity_not_found": "{field}: {value} does not exist",
+        "config_target_names_an_unknown_relay_profile": "target names an unknown relay profile",
+        "config_fan_target_uses_unsupported_capabilities": "fan target uses unsupported capabilities",
+        "config_input_type_must_be_qualified_numeric_or_timer_episode": "input.type must be qualified_numeric or timer_episode",
+        "config_input_policy_kind": "{input_type} input requires a {expected_kind} policy",
+        "config_return_monitor_requires_a_cover_resource": "return_monitor requires a cover resource",
+        "config_relay_fan_owns_outputs_remove_entity_id": "relay_fan owns outputs; remove entity_id",
+        "config_profiles_must_include_an_all_off_profile_and_an_on_profile": "profiles must include an all-off profile and an on profile",
+        "config_an_all_off_profile_is_required": "an all-off profile is required",
+        "config_default_target_must_name_an_on_profile": "default_target must name an on profile",
+        "config_relay_settings_are_only_valid_for_relay_fan": "relay settings are only valid for relay_fan",
+        "config_an_output_is_already_owned_by_another_resource": "an output is already owned by another resource",
+        "config_input_replaces_eligibility_entity_and_eligibility_state": "input replaces eligibility_entity and eligibility_state",
+        "config_eligibility_state_requires_eligibility_entity": "eligibility_state requires eligibility_entity",
+        "config_a_desired_control_supplies_the_complete_target_of_a_state_backed_switch_policy": "A desired control supplies the complete target of a state-backed switch policy",
+        "config_intent_id_must_reference_a_configured_desired_control": "intent_id must reference a configured desired control",
+        "config_provider_ids_must_be_unique": "provider ids must be unique",
+        "config_provider_requires_independent_confirmation_evidence": "provider requires independent confirmation evidence",
+        "config_unsupported_subentry_type": "unsupported subentry type",
+        "config_timer_episode_input_cannot_contain_numeric_comparison_settings": "timer_episode input cannot contain numeric comparison settings",
+        "config_qualified_numeric_input_cannot_contain_request_seconds": "qualified_numeric input cannot contain request_seconds",
+        "config_input_comparison_must_be_below": "input.comparison must be below",
+        "config_every_profile_must_specify_every_owned_output": "every profile must specify every owned output",
+        "config_profile_output_values_must_be_true_or_false": "profile output values must be true or false",
+        "config_profile_direction_must_be_forward_or_reverse": "profile direction must be forward or reverse",
+        "config_native_fan_requires_a_configured_default_target": "native fan requires a configured default_target",
+        "config_cover_requires_non_optimistic_position_control": "cover requires non-optimistic position control",
+        "config_target_field_must_be_position_on_percentage_or_direction": "target_field must be position, on, percentage, or direction",
+        "config_provide_target_or_target_entity_target_attributes_require_target_entity": "provide target or target_entity; target attributes require target_entity",
+        "config_provider_must_reference_an_existing_resource": "provider must reference an existing resource",
+        "config_passive_providers_cannot_have_actuator_targets": "passive providers cannot have actuator targets",
+        "config_evidence_kind_must_be_position_contact_relay_or_airflow": "evidence kind must be position, contact, relay, or airflow",
+        "config_evidence_operator_must_be_eq_gte_or_lte": "evidence operator must be eq, gte, or lte",
+        "config_evidence_value_must_be_a_scalar": "evidence value must be a scalar",
+        "config_evidence_values_must_be_finite": "evidence values must be finite",
+        "config_position_evidence_must_use_a_raw_cover_current_position_attribute": "position evidence must use a raw cover current_position attribute",
+        "config_position_evidence_cannot_use_optimistic_state": "position evidence cannot use optimistic state",
+        "config_input_unit_must_match_the_sensor_unit": "input.unit must match the sensor unit",
+        "config_a_resource_cannot_belong_to_multiple_airflow_control_groups": "a resource cannot belong to multiple airflow control groups",
+        "config_input_source_must_report_a_finite_number": "input source must report a finite number",
+        "config_intent_reference": "On targets must reference configured desired controls",
+        "config_intent_cycle": "Desired control on-targets must not contain a cycle",
+        "config_input_eligibility_conflict": "Remove helper eligibility fields for a native input",
+        "config_number_minimum": "{field} must be a finite number greater than or equal to {minimum}",
+        "config_entity_domain": "{field} must name an entity in the {domain} domain",
+        "config_relay_profile_signatures": "Relay profiles must have distinct output combinations",
+        "config_relay_profile_speed": "Relay profile speed must agree with its on/off outputs"
       },
       "abort": {
         "no_resources": "Add a resource before creating a policy.",
@@ -120,7 +210,17 @@
             "input_type": "Policy input"
           },
           "data_description": {
-            "input_type": "Keep the existing input, or configure a qualified sensor or timer. Remove helper eligibility fields when switching to a native input."
+            "input_type": "Keep the existing input, or configure a qualified sensor or timer. Remove helper eligibility fields when switching to a native input.",
+            "resource_id": "Subentry ID of the existing resource that owns this output.",
+            "kind": "State policies remain eligible while their source qualifies. Occurrence policies need a distinct, bounded event submitted by an action or native timer input.",
+            "priority": "Integer from -1000000 to 1000000; larger values win among eligible policies. Defaults to 0. Manual leases and airflow requirements have separate precedence.",
+            "target": "Target object for the resource, such as position set to 0 or on set to true. A target source or desired control can supply a dynamic target instead.",
+            "eligibility_entity": "Optional source entity that must match Eligibility state. A native input replaces these eligibility fields.",
+            "eligibility_state": "Exact source state required for eligibility. Defaults to on when an eligibility entity is supplied. Missing or unknown feedback does not qualify.",
+            "target_entity": "Read the target from this source entity state or its configured attribute. Telemetry does not create manual ownership.",
+            "target_attribute": "Optional source attribute. Omit to read the source state; requires a target entity.",
+            "target_field": "Target field to populate: position, on, percentage, or direction. Defaults to position; requires a target entity and matching resource capability.",
+            "intent_id": "Desired control subentry ID for a state policy controlling a switch. Replaces all other target fields; uses the durably saved Boolean value."
           }
         },
         "reconfigure": {
@@ -141,7 +241,17 @@
             "input_type": "Policy input"
           },
           "data_description": {
-            "input_type": "Keep the existing input, or configure a qualified sensor or timer. Remove helper eligibility fields when switching to a native input."
+            "input_type": "Keep the existing input, or configure a qualified sensor or timer. Remove helper eligibility fields when switching to a native input.",
+            "resource_id": "Subentry ID of the existing resource that owns this output.",
+            "kind": "State policies remain eligible while their source qualifies. Occurrence policies need a distinct, bounded event submitted by an action or native timer input.",
+            "priority": "Integer from -1000000 to 1000000; larger values win among eligible policies. Defaults to 0. Manual leases and airflow requirements have separate precedence.",
+            "target": "Target object for the resource, such as position set to 0 or on set to true. A target source or desired control can supply a dynamic target instead.",
+            "eligibility_entity": "Optional source entity that must match Eligibility state. A native input replaces these eligibility fields.",
+            "eligibility_state": "Exact source state required for eligibility. Defaults to on when an eligibility entity is supplied. Missing or unknown feedback does not qualify.",
+            "target_entity": "Read the target from this source entity state or its configured attribute. Telemetry does not create manual ownership.",
+            "target_attribute": "Optional source attribute. Omit to read the source state; requires a target entity.",
+            "target_field": "Target field to populate: position, on, percentage, or direction. Defaults to position; requires a target entity and matching resource capability.",
+            "intent_id": "Desired control subentry ID for a state policy controlling a switch. Replaces all other target fields; uses the durably saved Boolean value."
           }
         },
         "qualified_numeric": {
@@ -165,18 +275,78 @@
         }
       },
       "error": {
-        "invalid_configuration": "Invalid configuration: {detail}",
-        "managed_entity": "Choose a physical source entity instead of an HA Operator entity. {detail}",
-        "entity_not_found": "The source entity does not exist. {detail}",
-        "unsupported_capability": "The source cannot provide the required control or feedback. {detail}",
-        "duplicate_output": "Another resource already owns this output. {detail}",
-        "resource_not_found": "Select an existing resource. {detail}",
-        "overlapping_requirement": "Each controlled resource can belong to only one airflow requirement. {detail}",
-        "invalid_policy_input": "Invalid native policy input: {detail}",
-        "invalid_input_source": "Choose the required sensor or timer source: {detail}",
-        "input_unit_mismatch": "The configured unit must match the sensor unit: {detail}",
-        "invalid_input_value": "The available sensor must report a finite number: {detail}",
-        "input_eligibility_conflict": "Remove helper eligibility fields before using a native policy input: {detail}"
+        "config_object_expected": "{field} must be an object",
+        "config_text_keys": "{field} keys must be text",
+        "config_unknown_fields": "{field} has unknown fields: {value}",
+        "config_text_required": "{field} must be nonempty text",
+        "config_text_length": "{field} must contain at most {maximum} characters",
+        "config_number_required": "{field} must be a number",
+        "config_number_bounds": "{field} must be a finite number between {minimum} and {maximum}",
+        "config_entity_expected": "{field} must name a valid entity",
+        "config_must_contain_at_least_one_entity": "{field} must contain at least one entity",
+        "config_contains_duplicates": "{field} contains duplicates",
+        "config_target_must_contain_non_null_fields": "target must contain non-null fields",
+        "config_target_fields_are_not_supported_by": "target fields are not supported by {kind}",
+        "config_on_must_be_true_or_false": "on must be true or false",
+        "config_direction_must_be_forward_or_reverse": "direction must be forward or reverse",
+        "config_must_be_positive": "{field} must be positive",
+        "config_kind_must_be_cover_switch_fan_or_relay_fan": "kind must be cover, switch, fan, or relay_fan",
+        "config_manual_control_must_be_true_or_false": "manual_control must be true or false",
+        "config_policy_must_reference_an_existing_resource": "policy must reference an existing resource",
+        "config_policy_kind_must_be_state_or_occurrence": "policy kind must be state or occurrence",
+        "config_priority_must_be_an_integer": "priority must be an integer",
+        "config_initial_value_must_explicitly_be_true_or_false": "initial_value must explicitly be true or false",
+        "config_on_targets_must_be_a_list_of_desired_control_ids": "on_targets must be a list of desired control IDs",
+        "config_on_targets_must_not_contain_duplicates": "on_targets must not contain duplicates",
+        "config_providers_must_be_a_nonempty_ordered_list": "providers must be a nonempty ordered list",
+        "config_must_reference_a_source_entity_not_a_managed_operator_entity": "{field} must reference a source entity, not a managed operator entity",
+        "config_entity_not_found": "{field}: {value} does not exist",
+        "config_target_names_an_unknown_relay_profile": "target names an unknown relay profile",
+        "config_fan_target_uses_unsupported_capabilities": "fan target uses unsupported capabilities",
+        "config_input_type_must_be_qualified_numeric_or_timer_episode": "input.type must be qualified_numeric or timer_episode",
+        "config_input_policy_kind": "{input_type} input requires a {expected_kind} policy",
+        "config_return_monitor_requires_a_cover_resource": "return_monitor requires a cover resource",
+        "config_relay_fan_owns_outputs_remove_entity_id": "relay_fan owns outputs; remove entity_id",
+        "config_profiles_must_include_an_all_off_profile_and_an_on_profile": "profiles must include an all-off profile and an on profile",
+        "config_an_all_off_profile_is_required": "an all-off profile is required",
+        "config_default_target_must_name_an_on_profile": "default_target must name an on profile",
+        "config_relay_settings_are_only_valid_for_relay_fan": "relay settings are only valid for relay_fan",
+        "config_an_output_is_already_owned_by_another_resource": "an output is already owned by another resource",
+        "config_input_replaces_eligibility_entity_and_eligibility_state": "input replaces eligibility_entity and eligibility_state",
+        "config_eligibility_state_requires_eligibility_entity": "eligibility_state requires eligibility_entity",
+        "config_a_desired_control_supplies_the_complete_target_of_a_state_backed_switch_policy": "A desired control supplies the complete target of a state-backed switch policy",
+        "config_intent_id_must_reference_a_configured_desired_control": "intent_id must reference a configured desired control",
+        "config_provider_ids_must_be_unique": "provider ids must be unique",
+        "config_provider_requires_independent_confirmation_evidence": "provider requires independent confirmation evidence",
+        "config_unsupported_subentry_type": "unsupported subentry type",
+        "config_timer_episode_input_cannot_contain_numeric_comparison_settings": "timer_episode input cannot contain numeric comparison settings",
+        "config_qualified_numeric_input_cannot_contain_request_seconds": "qualified_numeric input cannot contain request_seconds",
+        "config_input_comparison_must_be_below": "input.comparison must be below",
+        "config_every_profile_must_specify_every_owned_output": "every profile must specify every owned output",
+        "config_profile_output_values_must_be_true_or_false": "profile output values must be true or false",
+        "config_profile_direction_must_be_forward_or_reverse": "profile direction must be forward or reverse",
+        "config_native_fan_requires_a_configured_default_target": "native fan requires a configured default_target",
+        "config_cover_requires_non_optimistic_position_control": "cover requires non-optimistic position control",
+        "config_target_field_must_be_position_on_percentage_or_direction": "target_field must be position, on, percentage, or direction",
+        "config_provide_target_or_target_entity_target_attributes_require_target_entity": "provide target or target_entity; target attributes require target_entity",
+        "config_provider_must_reference_an_existing_resource": "provider must reference an existing resource",
+        "config_passive_providers_cannot_have_actuator_targets": "passive providers cannot have actuator targets",
+        "config_evidence_kind_must_be_position_contact_relay_or_airflow": "evidence kind must be position, contact, relay, or airflow",
+        "config_evidence_operator_must_be_eq_gte_or_lte": "evidence operator must be eq, gte, or lte",
+        "config_evidence_value_must_be_a_scalar": "evidence value must be a scalar",
+        "config_evidence_values_must_be_finite": "evidence values must be finite",
+        "config_position_evidence_must_use_a_raw_cover_current_position_attribute": "position evidence must use a raw cover current_position attribute",
+        "config_position_evidence_cannot_use_optimistic_state": "position evidence cannot use optimistic state",
+        "config_input_unit_must_match_the_sensor_unit": "input.unit must match the sensor unit",
+        "config_a_resource_cannot_belong_to_multiple_airflow_control_groups": "a resource cannot belong to multiple airflow control groups",
+        "config_input_source_must_report_a_finite_number": "input source must report a finite number",
+        "config_intent_reference": "On targets must reference configured desired controls",
+        "config_intent_cycle": "Desired control on-targets must not contain a cycle",
+        "config_input_eligibility_conflict": "Remove helper eligibility fields for a native input",
+        "config_number_minimum": "{field} must be a finite number greater than or equal to {minimum}",
+        "config_entity_domain": "{field} must name an entity in the {domain} domain",
+        "config_relay_profile_signatures": "Relay profiles must have distinct output combinations",
+        "config_relay_profile_speed": "Relay profile speed must agree with its on/off outputs"
       },
       "abort": {
         "no_resources": "Add a resource before creating a policy.",
@@ -197,6 +367,11 @@
             "activation_entities": "Activation entities (all must be on)",
             "providers": "Ordered providers and confirmation evidence",
             "acquisition_timeout": "Provider acquisition timeout (seconds)"
+          },
+          "data_description": {
+            "activation_entities": "The requirement activates only when all listed sources are on. Unknown activation remains unknown. This requirement never turns extraction off.",
+            "providers": "Ordered list of providers with unique id and independent evidence predicates. An active provider also needs resource_id and target. A passive provider has evidence only. Every predicate must match before airflow is confirmed.",
+            "acquisition_timeout": "Positive seconds allowed to confirm a provider before considering alternatives. Defaults to 120. Commands alone do not confirm airflow."
           }
         },
         "reconfigure": {
@@ -207,17 +382,87 @@
             "activation_entities": "Activation entities (all must be on)",
             "providers": "Ordered providers and confirmation evidence",
             "acquisition_timeout": "Provider acquisition timeout (seconds)"
+          },
+          "data_description": {
+            "activation_entities": "The requirement activates only when all listed sources are on. Unknown activation remains unknown. This requirement never turns extraction off.",
+            "providers": "Ordered list of providers with unique id and independent evidence predicates. An active provider also needs resource_id and target. A passive provider has evidence only. Every predicate must match before airflow is confirmed.",
+            "acquisition_timeout": "Positive seconds allowed to confirm a provider before considering alternatives. Defaults to 120. Commands alone do not confirm airflow."
           }
         }
       },
       "error": {
-        "invalid_configuration": "Invalid configuration: {detail}",
-        "managed_entity": "Choose a physical source entity instead of an HA Operator entity. {detail}",
-        "entity_not_found": "The source entity does not exist. {detail}",
-        "unsupported_capability": "The source cannot provide the required control or feedback. {detail}",
-        "duplicate_output": "Another resource already owns this output. {detail}",
-        "resource_not_found": "Select an existing resource. {detail}",
-        "overlapping_requirement": "Each controlled resource can belong to only one airflow requirement. {detail}"
+        "config_object_expected": "{field} must be an object",
+        "config_text_keys": "{field} keys must be text",
+        "config_unknown_fields": "{field} has unknown fields: {value}",
+        "config_text_required": "{field} must be nonempty text",
+        "config_text_length": "{field} must contain at most {maximum} characters",
+        "config_number_required": "{field} must be a number",
+        "config_number_bounds": "{field} must be a finite number between {minimum} and {maximum}",
+        "config_entity_expected": "{field} must name a valid entity",
+        "config_must_contain_at_least_one_entity": "{field} must contain at least one entity",
+        "config_contains_duplicates": "{field} contains duplicates",
+        "config_target_must_contain_non_null_fields": "target must contain non-null fields",
+        "config_target_fields_are_not_supported_by": "target fields are not supported by {kind}",
+        "config_on_must_be_true_or_false": "on must be true or false",
+        "config_direction_must_be_forward_or_reverse": "direction must be forward or reverse",
+        "config_must_be_positive": "{field} must be positive",
+        "config_kind_must_be_cover_switch_fan_or_relay_fan": "kind must be cover, switch, fan, or relay_fan",
+        "config_manual_control_must_be_true_or_false": "manual_control must be true or false",
+        "config_policy_must_reference_an_existing_resource": "policy must reference an existing resource",
+        "config_policy_kind_must_be_state_or_occurrence": "policy kind must be state or occurrence",
+        "config_priority_must_be_an_integer": "priority must be an integer",
+        "config_initial_value_must_explicitly_be_true_or_false": "initial_value must explicitly be true or false",
+        "config_on_targets_must_be_a_list_of_desired_control_ids": "on_targets must be a list of desired control IDs",
+        "config_on_targets_must_not_contain_duplicates": "on_targets must not contain duplicates",
+        "config_providers_must_be_a_nonempty_ordered_list": "providers must be a nonempty ordered list",
+        "config_must_reference_a_source_entity_not_a_managed_operator_entity": "{field} must reference a source entity, not a managed operator entity",
+        "config_entity_not_found": "{field}: {value} does not exist",
+        "config_target_names_an_unknown_relay_profile": "target names an unknown relay profile",
+        "config_fan_target_uses_unsupported_capabilities": "fan target uses unsupported capabilities",
+        "config_input_type_must_be_qualified_numeric_or_timer_episode": "input.type must be qualified_numeric or timer_episode",
+        "config_input_policy_kind": "{input_type} input requires a {expected_kind} policy",
+        "config_return_monitor_requires_a_cover_resource": "return_monitor requires a cover resource",
+        "config_relay_fan_owns_outputs_remove_entity_id": "relay_fan owns outputs; remove entity_id",
+        "config_profiles_must_include_an_all_off_profile_and_an_on_profile": "profiles must include an all-off profile and an on profile",
+        "config_an_all_off_profile_is_required": "an all-off profile is required",
+        "config_default_target_must_name_an_on_profile": "default_target must name an on profile",
+        "config_relay_settings_are_only_valid_for_relay_fan": "relay settings are only valid for relay_fan",
+        "config_an_output_is_already_owned_by_another_resource": "an output is already owned by another resource",
+        "config_input_replaces_eligibility_entity_and_eligibility_state": "input replaces eligibility_entity and eligibility_state",
+        "config_eligibility_state_requires_eligibility_entity": "eligibility_state requires eligibility_entity",
+        "config_a_desired_control_supplies_the_complete_target_of_a_state_backed_switch_policy": "A desired control supplies the complete target of a state-backed switch policy",
+        "config_intent_id_must_reference_a_configured_desired_control": "intent_id must reference a configured desired control",
+        "config_provider_ids_must_be_unique": "provider ids must be unique",
+        "config_provider_requires_independent_confirmation_evidence": "provider requires independent confirmation evidence",
+        "config_unsupported_subentry_type": "unsupported subentry type",
+        "config_timer_episode_input_cannot_contain_numeric_comparison_settings": "timer_episode input cannot contain numeric comparison settings",
+        "config_qualified_numeric_input_cannot_contain_request_seconds": "qualified_numeric input cannot contain request_seconds",
+        "config_input_comparison_must_be_below": "input.comparison must be below",
+        "config_every_profile_must_specify_every_owned_output": "every profile must specify every owned output",
+        "config_profile_output_values_must_be_true_or_false": "profile output values must be true or false",
+        "config_profile_direction_must_be_forward_or_reverse": "profile direction must be forward or reverse",
+        "config_native_fan_requires_a_configured_default_target": "native fan requires a configured default_target",
+        "config_cover_requires_non_optimistic_position_control": "cover requires non-optimistic position control",
+        "config_target_field_must_be_position_on_percentage_or_direction": "target_field must be position, on, percentage, or direction",
+        "config_provide_target_or_target_entity_target_attributes_require_target_entity": "provide target or target_entity; target attributes require target_entity",
+        "config_provider_must_reference_an_existing_resource": "provider must reference an existing resource",
+        "config_passive_providers_cannot_have_actuator_targets": "passive providers cannot have actuator targets",
+        "config_evidence_kind_must_be_position_contact_relay_or_airflow": "evidence kind must be position, contact, relay, or airflow",
+        "config_evidence_operator_must_be_eq_gte_or_lte": "evidence operator must be eq, gte, or lte",
+        "config_evidence_value_must_be_a_scalar": "evidence value must be a scalar",
+        "config_evidence_values_must_be_finite": "evidence values must be finite",
+        "config_position_evidence_must_use_a_raw_cover_current_position_attribute": "position evidence must use a raw cover current_position attribute",
+        "config_position_evidence_cannot_use_optimistic_state": "position evidence cannot use optimistic state",
+        "config_input_unit_must_match_the_sensor_unit": "input.unit must match the sensor unit",
+        "config_a_resource_cannot_belong_to_multiple_airflow_control_groups": "a resource cannot belong to multiple airflow control groups",
+        "config_input_source_must_report_a_finite_number": "input source must report a finite number",
+        "config_intent_reference": "On targets must reference configured desired controls",
+        "config_intent_cycle": "Desired control on-targets must not contain a cycle",
+        "config_input_eligibility_conflict": "Remove helper eligibility fields for a native input",
+        "config_number_minimum": "{field} must be a finite number greater than or equal to {minimum}",
+        "config_entity_domain": "{field} must name an entity in the {domain} domain",
+        "config_relay_profile_signatures": "Relay profiles must have distinct output combinations",
+        "config_relay_profile_speed": "Relay profile speed must agree with its on/off outputs"
       },
       "abort": {
         "no_resources": "Add a resource before creating a policy.",
@@ -237,6 +482,10 @@
             "name": "Name",
             "initial_value": "Initial desired value",
             "on_targets": "Also turn on these desired controls"
+          },
+          "data_description": {
+            "initial_value": "Required explicit true or false. Used only when no saved value exists; changing it does not overwrite committed intent.",
+            "on_targets": "Optional desired control IDs set on in the same durable transaction when this control changes from off to on. Repeated on and switching off do not change dependents. References must exist and remain acyclic."
           }
         },
         "reconfigure": {
@@ -246,17 +495,86 @@
             "name": "Name",
             "initial_value": "Initial desired value",
             "on_targets": "Also turn on these desired controls"
+          },
+          "data_description": {
+            "initial_value": "Required explicit true or false. Used only when no saved value exists; changing it does not overwrite committed intent.",
+            "on_targets": "Optional desired control IDs set on in the same durable transaction when this control changes from off to on. Repeated on and switching off do not change dependents. References must exist and remain acyclic."
           }
         }
       },
       "error": {
-        "invalid_configuration": "Invalid configuration: {detail}",
-        "managed_entity": "Choose a physical source entity instead of an HA Operator entity. {detail}",
-        "entity_not_found": "The source entity does not exist. {detail}",
-        "unsupported_capability": "The source cannot provide the required control or feedback. {detail}",
-        "duplicate_output": "Another resource already owns this output. {detail}",
-        "resource_not_found": "Select an existing resource. {detail}",
-        "overlapping_requirement": "Each controlled resource can belong to only one airflow requirement. {detail}"
+        "config_object_expected": "{field} must be an object",
+        "config_text_keys": "{field} keys must be text",
+        "config_unknown_fields": "{field} has unknown fields: {value}",
+        "config_text_required": "{field} must be nonempty text",
+        "config_text_length": "{field} must contain at most {maximum} characters",
+        "config_number_required": "{field} must be a number",
+        "config_number_bounds": "{field} must be a finite number between {minimum} and {maximum}",
+        "config_entity_expected": "{field} must name a valid entity",
+        "config_must_contain_at_least_one_entity": "{field} must contain at least one entity",
+        "config_contains_duplicates": "{field} contains duplicates",
+        "config_target_must_contain_non_null_fields": "target must contain non-null fields",
+        "config_target_fields_are_not_supported_by": "target fields are not supported by {kind}",
+        "config_on_must_be_true_or_false": "on must be true or false",
+        "config_direction_must_be_forward_or_reverse": "direction must be forward or reverse",
+        "config_must_be_positive": "{field} must be positive",
+        "config_kind_must_be_cover_switch_fan_or_relay_fan": "kind must be cover, switch, fan, or relay_fan",
+        "config_manual_control_must_be_true_or_false": "manual_control must be true or false",
+        "config_policy_must_reference_an_existing_resource": "policy must reference an existing resource",
+        "config_policy_kind_must_be_state_or_occurrence": "policy kind must be state or occurrence",
+        "config_priority_must_be_an_integer": "priority must be an integer",
+        "config_initial_value_must_explicitly_be_true_or_false": "initial_value must explicitly be true or false",
+        "config_on_targets_must_be_a_list_of_desired_control_ids": "on_targets must be a list of desired control IDs",
+        "config_on_targets_must_not_contain_duplicates": "on_targets must not contain duplicates",
+        "config_providers_must_be_a_nonempty_ordered_list": "providers must be a nonempty ordered list",
+        "config_must_reference_a_source_entity_not_a_managed_operator_entity": "{field} must reference a source entity, not a managed operator entity",
+        "config_entity_not_found": "{field}: {value} does not exist",
+        "config_target_names_an_unknown_relay_profile": "target names an unknown relay profile",
+        "config_fan_target_uses_unsupported_capabilities": "fan target uses unsupported capabilities",
+        "config_input_type_must_be_qualified_numeric_or_timer_episode": "input.type must be qualified_numeric or timer_episode",
+        "config_input_policy_kind": "{input_type} input requires a {expected_kind} policy",
+        "config_return_monitor_requires_a_cover_resource": "return_monitor requires a cover resource",
+        "config_relay_fan_owns_outputs_remove_entity_id": "relay_fan owns outputs; remove entity_id",
+        "config_profiles_must_include_an_all_off_profile_and_an_on_profile": "profiles must include an all-off profile and an on profile",
+        "config_an_all_off_profile_is_required": "an all-off profile is required",
+        "config_default_target_must_name_an_on_profile": "default_target must name an on profile",
+        "config_relay_settings_are_only_valid_for_relay_fan": "relay settings are only valid for relay_fan",
+        "config_an_output_is_already_owned_by_another_resource": "an output is already owned by another resource",
+        "config_input_replaces_eligibility_entity_and_eligibility_state": "input replaces eligibility_entity and eligibility_state",
+        "config_eligibility_state_requires_eligibility_entity": "eligibility_state requires eligibility_entity",
+        "config_a_desired_control_supplies_the_complete_target_of_a_state_backed_switch_policy": "A desired control supplies the complete target of a state-backed switch policy",
+        "config_intent_id_must_reference_a_configured_desired_control": "intent_id must reference a configured desired control",
+        "config_provider_ids_must_be_unique": "provider ids must be unique",
+        "config_provider_requires_independent_confirmation_evidence": "provider requires independent confirmation evidence",
+        "config_unsupported_subentry_type": "unsupported subentry type",
+        "config_timer_episode_input_cannot_contain_numeric_comparison_settings": "timer_episode input cannot contain numeric comparison settings",
+        "config_qualified_numeric_input_cannot_contain_request_seconds": "qualified_numeric input cannot contain request_seconds",
+        "config_input_comparison_must_be_below": "input.comparison must be below",
+        "config_every_profile_must_specify_every_owned_output": "every profile must specify every owned output",
+        "config_profile_output_values_must_be_true_or_false": "profile output values must be true or false",
+        "config_profile_direction_must_be_forward_or_reverse": "profile direction must be forward or reverse",
+        "config_native_fan_requires_a_configured_default_target": "native fan requires a configured default_target",
+        "config_cover_requires_non_optimistic_position_control": "cover requires non-optimistic position control",
+        "config_target_field_must_be_position_on_percentage_or_direction": "target_field must be position, on, percentage, or direction",
+        "config_provide_target_or_target_entity_target_attributes_require_target_entity": "provide target or target_entity; target attributes require target_entity",
+        "config_provider_must_reference_an_existing_resource": "provider must reference an existing resource",
+        "config_passive_providers_cannot_have_actuator_targets": "passive providers cannot have actuator targets",
+        "config_evidence_kind_must_be_position_contact_relay_or_airflow": "evidence kind must be position, contact, relay, or airflow",
+        "config_evidence_operator_must_be_eq_gte_or_lte": "evidence operator must be eq, gte, or lte",
+        "config_evidence_value_must_be_a_scalar": "evidence value must be a scalar",
+        "config_evidence_values_must_be_finite": "evidence values must be finite",
+        "config_position_evidence_must_use_a_raw_cover_current_position_attribute": "position evidence must use a raw cover current_position attribute",
+        "config_position_evidence_cannot_use_optimistic_state": "position evidence cannot use optimistic state",
+        "config_input_unit_must_match_the_sensor_unit": "input.unit must match the sensor unit",
+        "config_a_resource_cannot_belong_to_multiple_airflow_control_groups": "a resource cannot belong to multiple airflow control groups",
+        "config_input_source_must_report_a_finite_number": "input source must report a finite number",
+        "config_intent_reference": "On targets must reference configured desired controls",
+        "config_intent_cycle": "Desired control on-targets must not contain a cycle",
+        "config_input_eligibility_conflict": "Remove helper eligibility fields for a native input",
+        "config_number_minimum": "{field} must be a finite number greater than or equal to {minimum}",
+        "config_entity_domain": "{field} must name an entity in the {domain} domain",
+        "config_relay_profile_signatures": "Relay profiles must have distinct output combinations",
+        "config_relay_profile_speed": "Relay profile speed must agree with its on/off outputs"
       },
       "abort": {
         "reconfigure_successful": "Configuration updated."
@@ -268,14 +586,688 @@
       "title": "HA Operator cannot trust saved intent",
       "description": "Actuation is inhibited because saved intent could not be read, validated, or saved reliably. Preserve a copy of the ha_operator.*.json snapshot in your Home Assistant configuration directory before making changes. Check disk space, file permissions, and the Home Assistant logs. Restore a known-good snapshot if the file is corrupt; do not discard accepted intent to hide the fault. After resolving the storage problem, select Reload from the HA Operator integration menu. The repair clears only after saved intent loads successfully."
     },
-    "configuration_error": {
-      "title": "HA Operator configuration needs repair",
-      "description": "Control is stopped because the configuration is invalid: {detail}. Reconfigure or remove the policies and airflow requirements that reference a deleted resource; do not delete unrelated configuration. Then select Reload from the HA Operator integration menu. Native deletion remains available while setup is stopped. Existing accepted intent is preserved, and this repair clears once the configuration validates."
+    "config_object_expected": {
+      "title": "Invalid HA Operator configuration",
+      "description": "{field} must be an object. Correct the configuration, then reload the integration. No actuator worker runs until setup succeeds."
+    },
+    "config_text_keys": {
+      "title": "Invalid HA Operator configuration",
+      "description": "{field} keys must be text. Correct the configuration, then reload the integration. No actuator worker runs until setup succeeds."
+    },
+    "config_unknown_fields": {
+      "title": "Invalid HA Operator configuration",
+      "description": "{field} has unknown fields: {value}. Correct the configuration, then reload the integration. No actuator worker runs until setup succeeds."
+    },
+    "config_text_required": {
+      "title": "Invalid HA Operator configuration",
+      "description": "{field} must be nonempty text. Correct the configuration, then reload the integration. No actuator worker runs until setup succeeds."
+    },
+    "config_text_length": {
+      "title": "Invalid HA Operator configuration",
+      "description": "{field} must contain at most {maximum} characters. Correct the configuration, then reload the integration. No actuator worker runs until setup succeeds."
+    },
+    "config_number_required": {
+      "title": "Invalid HA Operator configuration",
+      "description": "{field} must be a number. Correct the configuration, then reload the integration. No actuator worker runs until setup succeeds."
+    },
+    "config_number_bounds": {
+      "title": "Invalid HA Operator configuration",
+      "description": "{field} must be a finite number between {minimum} and {maximum}. Correct the configuration, then reload the integration. No actuator worker runs until setup succeeds."
+    },
+    "config_entity_expected": {
+      "title": "Invalid HA Operator configuration",
+      "description": "{field} must name a valid entity. Correct the configuration, then reload the integration. No actuator worker runs until setup succeeds."
+    },
+    "config_must_contain_at_least_one_entity": {
+      "title": "Invalid HA Operator configuration",
+      "description": "{field} must contain at least one entity. Correct the configuration, then reload the integration. No actuator worker runs until setup succeeds."
+    },
+    "config_contains_duplicates": {
+      "title": "Invalid HA Operator configuration",
+      "description": "{field} contains duplicates. Correct the configuration, then reload the integration. No actuator worker runs until setup succeeds."
+    },
+    "config_target_must_contain_non_null_fields": {
+      "title": "Invalid HA Operator configuration",
+      "description": "target must contain non-null fields. Correct the configuration, then reload the integration. No actuator worker runs until setup succeeds."
+    },
+    "config_target_fields_are_not_supported_by": {
+      "title": "Invalid HA Operator configuration",
+      "description": "target fields are not supported by {kind}. Correct the configuration, then reload the integration. No actuator worker runs until setup succeeds."
+    },
+    "config_on_must_be_true_or_false": {
+      "title": "Invalid HA Operator configuration",
+      "description": "on must be true or false. Correct the configuration, then reload the integration. No actuator worker runs until setup succeeds."
+    },
+    "config_direction_must_be_forward_or_reverse": {
+      "title": "Invalid HA Operator configuration",
+      "description": "direction must be forward or reverse. Correct the configuration, then reload the integration. No actuator worker runs until setup succeeds."
+    },
+    "config_must_be_positive": {
+      "title": "Invalid HA Operator configuration",
+      "description": "{field} must be positive. Correct the configuration, then reload the integration. No actuator worker runs until setup succeeds."
+    },
+    "config_kind_must_be_cover_switch_fan_or_relay_fan": {
+      "title": "Invalid HA Operator configuration",
+      "description": "kind must be cover, switch, fan, or relay_fan. Correct the configuration, then reload the integration. No actuator worker runs until setup succeeds."
+    },
+    "config_manual_control_must_be_true_or_false": {
+      "title": "Invalid HA Operator configuration",
+      "description": "manual_control must be true or false. Correct the configuration, then reload the integration. No actuator worker runs until setup succeeds."
+    },
+    "config_policy_must_reference_an_existing_resource": {
+      "title": "Invalid HA Operator configuration",
+      "description": "policy must reference an existing resource. Correct the configuration, then reload the integration. No actuator worker runs until setup succeeds."
+    },
+    "config_policy_kind_must_be_state_or_occurrence": {
+      "title": "Invalid HA Operator configuration",
+      "description": "policy kind must be state or occurrence. Correct the configuration, then reload the integration. No actuator worker runs until setup succeeds."
+    },
+    "config_priority_must_be_an_integer": {
+      "title": "Invalid HA Operator configuration",
+      "description": "priority must be an integer. Correct the configuration, then reload the integration. No actuator worker runs until setup succeeds."
+    },
+    "config_initial_value_must_explicitly_be_true_or_false": {
+      "title": "Invalid HA Operator configuration",
+      "description": "initial_value must explicitly be true or false. Correct the configuration, then reload the integration. No actuator worker runs until setup succeeds."
+    },
+    "config_on_targets_must_be_a_list_of_desired_control_ids": {
+      "title": "Invalid HA Operator configuration",
+      "description": "on_targets must be a list of desired control IDs. Correct the configuration, then reload the integration. No actuator worker runs until setup succeeds."
+    },
+    "config_on_targets_must_not_contain_duplicates": {
+      "title": "Invalid HA Operator configuration",
+      "description": "on_targets must not contain duplicates. Correct the configuration, then reload the integration. No actuator worker runs until setup succeeds."
+    },
+    "config_providers_must_be_a_nonempty_ordered_list": {
+      "title": "Invalid HA Operator configuration",
+      "description": "providers must be a nonempty ordered list. Correct the configuration, then reload the integration. No actuator worker runs until setup succeeds."
+    },
+    "config_must_reference_a_source_entity_not_a_managed_operator_entity": {
+      "title": "Invalid HA Operator configuration",
+      "description": "{field} must reference a source entity, not a managed operator entity. Correct the configuration, then reload the integration. No actuator worker runs until setup succeeds."
+    },
+    "config_entity_not_found": {
+      "title": "Invalid HA Operator configuration",
+      "description": "{field}: {value} does not exist. Correct the configuration, then reload the integration. No actuator worker runs until setup succeeds."
+    },
+    "config_target_names_an_unknown_relay_profile": {
+      "title": "Invalid HA Operator configuration",
+      "description": "target names an unknown relay profile. Correct the configuration, then reload the integration. No actuator worker runs until setup succeeds."
+    },
+    "config_fan_target_uses_unsupported_capabilities": {
+      "title": "Invalid HA Operator configuration",
+      "description": "fan target uses unsupported capabilities. Correct the configuration, then reload the integration. No actuator worker runs until setup succeeds."
+    },
+    "config_input_type_must_be_qualified_numeric_or_timer_episode": {
+      "title": "Invalid HA Operator configuration",
+      "description": "input.type must be qualified_numeric or timer_episode. Correct the configuration, then reload the integration. No actuator worker runs until setup succeeds."
+    },
+    "config_input_policy_kind": {
+      "title": "Invalid HA Operator configuration",
+      "description": "{input_type} input requires a {expected_kind} policy. Correct the configuration, then reload the integration. No actuator worker runs until setup succeeds."
+    },
+    "config_return_monitor_requires_a_cover_resource": {
+      "title": "Invalid HA Operator configuration",
+      "description": "return_monitor requires a cover resource. Correct the configuration, then reload the integration. No actuator worker runs until setup succeeds."
+    },
+    "config_relay_fan_owns_outputs_remove_entity_id": {
+      "title": "Invalid HA Operator configuration",
+      "description": "relay_fan owns outputs; remove entity_id. Correct the configuration, then reload the integration. No actuator worker runs until setup succeeds."
+    },
+    "config_profiles_must_include_an_all_off_profile_and_an_on_profile": {
+      "title": "Invalid HA Operator configuration",
+      "description": "profiles must include an all-off profile and an on profile. Correct the configuration, then reload the integration. No actuator worker runs until setup succeeds."
+    },
+    "config_an_all_off_profile_is_required": {
+      "title": "Invalid HA Operator configuration",
+      "description": "an all-off profile is required. Correct the configuration, then reload the integration. No actuator worker runs until setup succeeds."
+    },
+    "config_default_target_must_name_an_on_profile": {
+      "title": "Invalid HA Operator configuration",
+      "description": "default_target must name an on profile. Correct the configuration, then reload the integration. No actuator worker runs until setup succeeds."
+    },
+    "config_relay_settings_are_only_valid_for_relay_fan": {
+      "title": "Invalid HA Operator configuration",
+      "description": "relay settings are only valid for relay_fan. Correct the configuration, then reload the integration. No actuator worker runs until setup succeeds."
+    },
+    "config_an_output_is_already_owned_by_another_resource": {
+      "title": "Invalid HA Operator configuration",
+      "description": "an output is already owned by another resource. Correct the configuration, then reload the integration. No actuator worker runs until setup succeeds."
+    },
+    "config_input_replaces_eligibility_entity_and_eligibility_state": {
+      "title": "Invalid HA Operator configuration",
+      "description": "input replaces eligibility_entity and eligibility_state. Correct the configuration, then reload the integration. No actuator worker runs until setup succeeds."
+    },
+    "config_eligibility_state_requires_eligibility_entity": {
+      "title": "Invalid HA Operator configuration",
+      "description": "eligibility_state requires eligibility_entity. Correct the configuration, then reload the integration. No actuator worker runs until setup succeeds."
+    },
+    "config_a_desired_control_supplies_the_complete_target_of_a_state_backed_switch_policy": {
+      "title": "Invalid HA Operator configuration",
+      "description": "A desired control supplies the complete target of a state-backed switch policy. Correct the configuration, then reload the integration. No actuator worker runs until setup succeeds."
+    },
+    "config_intent_id_must_reference_a_configured_desired_control": {
+      "title": "Invalid HA Operator configuration",
+      "description": "intent_id must reference a configured desired control. Correct the configuration, then reload the integration. No actuator worker runs until setup succeeds."
+    },
+    "config_provider_ids_must_be_unique": {
+      "title": "Invalid HA Operator configuration",
+      "description": "provider ids must be unique. Correct the configuration, then reload the integration. No actuator worker runs until setup succeeds."
+    },
+    "config_provider_requires_independent_confirmation_evidence": {
+      "title": "Invalid HA Operator configuration",
+      "description": "provider requires independent confirmation evidence. Correct the configuration, then reload the integration. No actuator worker runs until setup succeeds."
+    },
+    "config_unsupported_subentry_type": {
+      "title": "Invalid HA Operator configuration",
+      "description": "unsupported subentry type. Correct the configuration, then reload the integration. No actuator worker runs until setup succeeds."
+    },
+    "config_timer_episode_input_cannot_contain_numeric_comparison_settings": {
+      "title": "Invalid HA Operator configuration",
+      "description": "timer_episode input cannot contain numeric comparison settings. Correct the configuration, then reload the integration. No actuator worker runs until setup succeeds."
+    },
+    "config_qualified_numeric_input_cannot_contain_request_seconds": {
+      "title": "Invalid HA Operator configuration",
+      "description": "qualified_numeric input cannot contain request_seconds. Correct the configuration, then reload the integration. No actuator worker runs until setup succeeds."
+    },
+    "config_input_comparison_must_be_below": {
+      "title": "Invalid HA Operator configuration",
+      "description": "input.comparison must be below. Correct the configuration, then reload the integration. No actuator worker runs until setup succeeds."
+    },
+    "config_every_profile_must_specify_every_owned_output": {
+      "title": "Invalid HA Operator configuration",
+      "description": "every profile must specify every owned output. Correct the configuration, then reload the integration. No actuator worker runs until setup succeeds."
+    },
+    "config_profile_output_values_must_be_true_or_false": {
+      "title": "Invalid HA Operator configuration",
+      "description": "profile output values must be true or false. Correct the configuration, then reload the integration. No actuator worker runs until setup succeeds."
+    },
+    "config_profile_direction_must_be_forward_or_reverse": {
+      "title": "Invalid HA Operator configuration",
+      "description": "profile direction must be forward or reverse. Correct the configuration, then reload the integration. No actuator worker runs until setup succeeds."
+    },
+    "config_native_fan_requires_a_configured_default_target": {
+      "title": "Invalid HA Operator configuration",
+      "description": "native fan requires a configured default_target. Correct the configuration, then reload the integration. No actuator worker runs until setup succeeds."
+    },
+    "config_cover_requires_non_optimistic_position_control": {
+      "title": "Invalid HA Operator configuration",
+      "description": "cover requires non-optimistic position control. Correct the configuration, then reload the integration. No actuator worker runs until setup succeeds."
+    },
+    "config_target_field_must_be_position_on_percentage_or_direction": {
+      "title": "Invalid HA Operator configuration",
+      "description": "target_field must be position, on, percentage, or direction. Correct the configuration, then reload the integration. No actuator worker runs until setup succeeds."
+    },
+    "config_provide_target_or_target_entity_target_attributes_require_target_entity": {
+      "title": "Invalid HA Operator configuration",
+      "description": "provide target or target_entity; target attributes require target_entity. Correct the configuration, then reload the integration. No actuator worker runs until setup succeeds."
+    },
+    "config_provider_must_reference_an_existing_resource": {
+      "title": "Invalid HA Operator configuration",
+      "description": "provider must reference an existing resource. Correct the configuration, then reload the integration. No actuator worker runs until setup succeeds."
+    },
+    "config_passive_providers_cannot_have_actuator_targets": {
+      "title": "Invalid HA Operator configuration",
+      "description": "passive providers cannot have actuator targets. Correct the configuration, then reload the integration. No actuator worker runs until setup succeeds."
+    },
+    "config_evidence_kind_must_be_position_contact_relay_or_airflow": {
+      "title": "Invalid HA Operator configuration",
+      "description": "evidence kind must be position, contact, relay, or airflow. Correct the configuration, then reload the integration. No actuator worker runs until setup succeeds."
+    },
+    "config_evidence_operator_must_be_eq_gte_or_lte": {
+      "title": "Invalid HA Operator configuration",
+      "description": "evidence operator must be eq, gte, or lte. Correct the configuration, then reload the integration. No actuator worker runs until setup succeeds."
+    },
+    "config_evidence_value_must_be_a_scalar": {
+      "title": "Invalid HA Operator configuration",
+      "description": "evidence value must be a scalar. Correct the configuration, then reload the integration. No actuator worker runs until setup succeeds."
+    },
+    "config_evidence_values_must_be_finite": {
+      "title": "Invalid HA Operator configuration",
+      "description": "evidence values must be finite. Correct the configuration, then reload the integration. No actuator worker runs until setup succeeds."
+    },
+    "config_position_evidence_must_use_a_raw_cover_current_position_attribute": {
+      "title": "Invalid HA Operator configuration",
+      "description": "position evidence must use a raw cover current_position attribute. Correct the configuration, then reload the integration. No actuator worker runs until setup succeeds."
+    },
+    "config_position_evidence_cannot_use_optimistic_state": {
+      "title": "Invalid HA Operator configuration",
+      "description": "position evidence cannot use optimistic state. Correct the configuration, then reload the integration. No actuator worker runs until setup succeeds."
+    },
+    "config_input_unit_must_match_the_sensor_unit": {
+      "title": "Invalid HA Operator configuration",
+      "description": "input.unit must match the sensor unit. Correct the configuration, then reload the integration. No actuator worker runs until setup succeeds."
+    },
+    "config_a_resource_cannot_belong_to_multiple_airflow_control_groups": {
+      "title": "Invalid HA Operator configuration",
+      "description": "a resource cannot belong to multiple airflow control groups. Correct the configuration, then reload the integration. No actuator worker runs until setup succeeds."
+    },
+    "config_input_source_must_report_a_finite_number": {
+      "title": "Invalid HA Operator configuration",
+      "description": "input source must report a finite number. Correct the configuration, then reload the integration. No actuator worker runs until setup succeeds."
+    },
+    "config_intent_reference": {
+      "title": "Invalid HA Operator configuration",
+      "description": "On targets must reference configured desired controls. Correct the configuration, then reload the integration. No actuator worker runs until setup succeeds."
+    },
+    "config_intent_cycle": {
+      "title": "Invalid HA Operator configuration",
+      "description": "Desired control on-targets must not contain a cycle. Correct the configuration, then reload the integration. No actuator worker runs until setup succeeds."
+    },
+    "config_input_eligibility_conflict": {
+      "title": "Invalid HA Operator configuration",
+      "description": "Remove helper eligibility fields for a native input. Correct the configuration, then reload the integration. No actuator worker runs until setup succeeds."
+    },
+    "config_number_minimum": {
+      "title": "Invalid HA Operator configuration",
+      "description": "{field} must be a finite number greater than or equal to {minimum}. Correct the configuration, then reload the integration. No actuator worker runs until setup succeeds."
+    },
+    "config_entity_domain": {
+      "title": "Invalid HA Operator configuration",
+      "description": "{field} must name an entity in the {domain} domain. Correct the configuration, then reload the integration. No actuator worker runs until setup succeeds."
+    },
+    "config_relay_profile_signatures": {
+      "title": "Invalid HA Operator configuration",
+      "description": "Relay profiles must have distinct output combinations. Correct the configuration, then reload the integration. No actuator worker runs until setup succeeds."
+    },
+    "config_relay_profile_speed": {
+      "title": "Invalid HA Operator configuration",
+      "description": "Relay profile speed must agree with its on/off outputs. Correct the configuration, then reload the integration. No actuator worker runs until setup succeeds."
     }
   },
   "exceptions": {
-    "configuration_error": {
-      "message": "Invalid HA Operator configuration: {detail}. Correct the configuration and reload the integration."
+    "storage_error": {
+      "message": "HA Operator cannot load authoritative saved intent. Preserve the snapshot, correct the storage problem, and reload the integration. See the Repair for recovery steps."
+    },
+    "configure_first": {
+      "message": "Configure HA Operator before calling actions"
+    },
+    "ambiguous_resource": {
+      "message": "Choose resource_id or entity_id"
+    },
+    "one_managed_entity": {
+      "message": "Target exactly one managed entity"
+    },
+    "not_managed_entity": {
+      "message": "Target is not a managed HA Operator entity"
+    },
+    "resource_required": {
+      "message": "Target a resource_id or managed entity_id"
+    },
+    "unknown_resource": {
+      "message": "Unknown resource"
+    },
+    "unloaded": {
+      "message": "HA Operator is unloaded"
+    },
+    "storage_inhibited": {
+      "message": "HA Operator storage is inhibited; inspect Repairs"
+    },
+    "observe_request": {
+      "message": "Resource is in observe mode; request not accepted"
+    },
+    "manual_disabled": {
+      "message": "This resource follows its source; manual control is disabled"
+    },
+    "invalid_seed": {
+      "message": "Seed configured desired controls with boolean values"
+    },
+    "seed_requires_observe": {
+      "message": "Seed only while all affected followers are in observe mode"
+    },
+    "persistence_failed": {
+      "message": "Request persistence failed; actuation inhibited"
+    },
+    "invalid_request_mode": {
+      "message": "mode must be target or hands_off"
+    },
+    "ambiguous_expiry": {
+      "message": "Choose duration, expires_at, or indefinite"
+    },
+    "hands_off_target": {
+      "message": "hands_off cannot carry a target"
+    },
+    "positive_duration": {
+      "message": "duration must be positive"
+    },
+    "invalid_request_id": {
+      "message": "request_id must contain 1 to 128 characters"
+    },
+    "request_id_conflict": {
+      "message": "request_id was already used for different intent"
+    },
+    "future_expiry": {
+      "message": "expires_at must be in the future"
+    },
+    "observe_stop": {
+      "message": "Resource is in observe mode; no STOP dispatched"
+    },
+    "invalid_control_mode": {
+      "message": "mode must be observe or live"
+    },
+    "shadow_locked": {
+      "message": "Shadow lock prohibits live control"
+    },
+    "invalid_policy_enabled": {
+      "message": "Unknown policy or invalid enabled value"
+    },
+    "unknown_occurrence_policy": {
+      "message": "Unknown occurrence policy"
+    },
+    "invalid_occurrence_id": {
+      "message": "occurrence_id must contain 1 to 128 characters"
+    },
+    "occurrence_target_unavailable": {
+      "message": "Occurrence target is unavailable"
+    },
+    "invalid_select_option": {
+      "message": "Choose observe or live"
+    },
+    "preset_unsupported": {
+      "message": "Preset modes are not supported"
+    },
+    "stop_unsupported": {
+      "message": "This device does not support physical STOP"
+    },
+    "device_restricted": {
+      "message": "Device is restricted"
+    },
+    "relay_interlock_timeout": {
+      "message": "Relay interlock timed out waiting for confirmed off"
+    },
+    "relay_feedback_changed": {
+      "message": "Relay feedback changed during reversal dead time"
+    },
+    "relay_conflict": {
+      "message": "Conflicting relay output is not confirmed off"
+    },
+    "empty_fan_target": {
+      "message": "Fan target must not be empty"
+    },
+    "cover_position_unsupported": {
+      "message": "Cover does not support percentage position"
+    },
+    "switch_boolean_required": {
+      "message": "Switch target requires a boolean on value"
+    },
+    "fan_speed_unsupported": {
+      "message": "Fan does not support percentage speed"
+    },
+    "fan_direction_unsupported": {
+      "message": "Fan does not support this direction"
+    },
+    "fan_power_conflict": {
+      "message": "Fan on and percentage targets conflict"
+    },
+    "direction_requires_feedback": {
+      "message": "Direction-only command requires known on/off feedback"
+    },
+    "fan_on_unsupported": {
+      "message": "Fan does not support turning on"
+    },
+    "fan_off_unsupported": {
+      "message": "Fan does not support turning off"
+    },
+    "fan_default_speed_required": {
+      "message": "Bare turn_on requires a configured default speed"
+    },
+    "fan_default_direction_unsupported": {
+      "message": "Fan default direction is unsupported"
+    },
+    "relay_direction_invalid": {
+      "message": "Relay direction must be forward or reverse"
+    },
+    "unknown_relay_profile": {
+      "message": "Unknown relay profile"
+    },
+    "relay_profile_conflict": {
+      "message": "Relay profile conflicts with other target fields"
+    },
+    "relay_direction_unsupported": {
+      "message": "No relay profile supports this direction"
+    },
+    "numeric_target": {
+      "message": "{field} must be numeric"
+    },
+    "target_range": {
+      "message": "{field} must be between 0 and {maximum}"
+    },
+    "unsupported_target_fields": {
+      "message": "Unsupported target fields: {fields}"
+    },
+    "finite_number": {
+      "message": "{field} must be a finite number"
+    },
+    "target_object": {
+      "message": "Target must be an object"
+    },
+    "boolean_target": {
+      "message": "{field} must be a boolean"
+    },
+    "string_target": {
+      "message": "{field} must be a nonempty string"
+    },
+    "invalid_desired_control": {
+      "message": "Unknown desired control or invalid boolean value"
+    },
+    "invalid_percentage_step": {
+      "message": "Fan reports invalid percentage_step"
+    },
+    "config_object_expected": {
+      "message": "{field} must be an object"
+    },
+    "config_text_keys": {
+      "message": "{field} keys must be text"
+    },
+    "config_unknown_fields": {
+      "message": "{field} has unknown fields: {value}"
+    },
+    "config_text_required": {
+      "message": "{field} must be nonempty text"
+    },
+    "config_text_length": {
+      "message": "{field} must contain at most {maximum} characters"
+    },
+    "config_number_required": {
+      "message": "{field} must be a number"
+    },
+    "config_number_bounds": {
+      "message": "{field} must be a finite number between {minimum} and {maximum}"
+    },
+    "config_entity_expected": {
+      "message": "{field} must name a valid entity"
+    },
+    "config_must_contain_at_least_one_entity": {
+      "message": "{field} must contain at least one entity"
+    },
+    "config_contains_duplicates": {
+      "message": "{field} contains duplicates"
+    },
+    "config_target_must_contain_non_null_fields": {
+      "message": "target must contain non-null fields"
+    },
+    "config_target_fields_are_not_supported_by": {
+      "message": "target fields are not supported by {kind}"
+    },
+    "config_on_must_be_true_or_false": {
+      "message": "on must be true or false"
+    },
+    "config_direction_must_be_forward_or_reverse": {
+      "message": "direction must be forward or reverse"
+    },
+    "config_must_be_positive": {
+      "message": "{field} must be positive"
+    },
+    "config_kind_must_be_cover_switch_fan_or_relay_fan": {
+      "message": "kind must be cover, switch, fan, or relay_fan"
+    },
+    "config_manual_control_must_be_true_or_false": {
+      "message": "manual_control must be true or false"
+    },
+    "config_policy_must_reference_an_existing_resource": {
+      "message": "policy must reference an existing resource"
+    },
+    "config_policy_kind_must_be_state_or_occurrence": {
+      "message": "policy kind must be state or occurrence"
+    },
+    "config_priority_must_be_an_integer": {
+      "message": "priority must be an integer"
+    },
+    "config_initial_value_must_explicitly_be_true_or_false": {
+      "message": "initial_value must explicitly be true or false"
+    },
+    "config_on_targets_must_be_a_list_of_desired_control_ids": {
+      "message": "on_targets must be a list of desired control IDs"
+    },
+    "config_on_targets_must_not_contain_duplicates": {
+      "message": "on_targets must not contain duplicates"
+    },
+    "config_providers_must_be_a_nonempty_ordered_list": {
+      "message": "providers must be a nonempty ordered list"
+    },
+    "config_must_reference_a_source_entity_not_a_managed_operator_entity": {
+      "message": "{field} must reference a source entity, not a managed operator entity"
+    },
+    "config_entity_not_found": {
+      "message": "{field}: {value} does not exist"
+    },
+    "config_target_names_an_unknown_relay_profile": {
+      "message": "target names an unknown relay profile"
+    },
+    "config_fan_target_uses_unsupported_capabilities": {
+      "message": "fan target uses unsupported capabilities"
+    },
+    "config_input_type_must_be_qualified_numeric_or_timer_episode": {
+      "message": "input.type must be qualified_numeric or timer_episode"
+    },
+    "config_input_policy_kind": {
+      "message": "{input_type} input requires a {expected_kind} policy"
+    },
+    "config_return_monitor_requires_a_cover_resource": {
+      "message": "return_monitor requires a cover resource"
+    },
+    "config_relay_fan_owns_outputs_remove_entity_id": {
+      "message": "relay_fan owns outputs; remove entity_id"
+    },
+    "config_profiles_must_include_an_all_off_profile_and_an_on_profile": {
+      "message": "profiles must include an all-off profile and an on profile"
+    },
+    "config_an_all_off_profile_is_required": {
+      "message": "an all-off profile is required"
+    },
+    "config_default_target_must_name_an_on_profile": {
+      "message": "default_target must name an on profile"
+    },
+    "config_relay_settings_are_only_valid_for_relay_fan": {
+      "message": "relay settings are only valid for relay_fan"
+    },
+    "config_an_output_is_already_owned_by_another_resource": {
+      "message": "an output is already owned by another resource"
+    },
+    "config_input_replaces_eligibility_entity_and_eligibility_state": {
+      "message": "input replaces eligibility_entity and eligibility_state"
+    },
+    "config_eligibility_state_requires_eligibility_entity": {
+      "message": "eligibility_state requires eligibility_entity"
+    },
+    "config_a_desired_control_supplies_the_complete_target_of_a_state_backed_switch_policy": {
+      "message": "A desired control supplies the complete target of a state-backed switch policy"
+    },
+    "config_intent_id_must_reference_a_configured_desired_control": {
+      "message": "intent_id must reference a configured desired control"
+    },
+    "config_provider_ids_must_be_unique": {
+      "message": "provider ids must be unique"
+    },
+    "config_provider_requires_independent_confirmation_evidence": {
+      "message": "provider requires independent confirmation evidence"
+    },
+    "config_unsupported_subentry_type": {
+      "message": "unsupported subentry type"
+    },
+    "config_timer_episode_input_cannot_contain_numeric_comparison_settings": {
+      "message": "timer_episode input cannot contain numeric comparison settings"
+    },
+    "config_qualified_numeric_input_cannot_contain_request_seconds": {
+      "message": "qualified_numeric input cannot contain request_seconds"
+    },
+    "config_input_comparison_must_be_below": {
+      "message": "input.comparison must be below"
+    },
+    "config_every_profile_must_specify_every_owned_output": {
+      "message": "every profile must specify every owned output"
+    },
+    "config_profile_output_values_must_be_true_or_false": {
+      "message": "profile output values must be true or false"
+    },
+    "config_profile_direction_must_be_forward_or_reverse": {
+      "message": "profile direction must be forward or reverse"
+    },
+    "config_native_fan_requires_a_configured_default_target": {
+      "message": "native fan requires a configured default_target"
+    },
+    "config_cover_requires_non_optimistic_position_control": {
+      "message": "cover requires non-optimistic position control"
+    },
+    "config_target_field_must_be_position_on_percentage_or_direction": {
+      "message": "target_field must be position, on, percentage, or direction"
+    },
+    "config_provide_target_or_target_entity_target_attributes_require_target_entity": {
+      "message": "provide target or target_entity; target attributes require target_entity"
+    },
+    "config_provider_must_reference_an_existing_resource": {
+      "message": "provider must reference an existing resource"
+    },
+    "config_passive_providers_cannot_have_actuator_targets": {
+      "message": "passive providers cannot have actuator targets"
+    },
+    "config_evidence_kind_must_be_position_contact_relay_or_airflow": {
+      "message": "evidence kind must be position, contact, relay, or airflow"
+    },
+    "config_evidence_operator_must_be_eq_gte_or_lte": {
+      "message": "evidence operator must be eq, gte, or lte"
+    },
+    "config_evidence_value_must_be_a_scalar": {
+      "message": "evidence value must be a scalar"
+    },
+    "config_evidence_values_must_be_finite": {
+      "message": "evidence values must be finite"
+    },
+    "config_position_evidence_must_use_a_raw_cover_current_position_attribute": {
+      "message": "position evidence must use a raw cover current_position attribute"
+    },
+    "config_position_evidence_cannot_use_optimistic_state": {
+      "message": "position evidence cannot use optimistic state"
+    },
+    "config_input_unit_must_match_the_sensor_unit": {
+      "message": "input.unit must match the sensor unit"
+    },
+    "config_a_resource_cannot_belong_to_multiple_airflow_control_groups": {
+      "message": "a resource cannot belong to multiple airflow control groups"
+    },
+    "config_input_source_must_report_a_finite_number": {
+      "message": "input source must report a finite number"
+    },
+    "config_intent_reference": {
+      "message": "On targets must reference configured desired controls"
+    },
+    "config_intent_cycle": {
+      "message": "Desired control on-targets must not contain a cycle"
+    },
+    "config_input_eligibility_conflict": {
+      "message": "Remove helper eligibility fields for a native input"
+    },
+    "config_number_minimum": {
+      "message": "{field} must be a finite number greater than or equal to {minimum}"
+    },
+    "config_entity_domain": {
+      "message": "{field} must name an entity in the {domain} domain"
+    },
+    "config_relay_profile_signatures": {
+      "message": "Relay profiles must have distinct output combinations"
+    },
+    "config_relay_profile_speed": {
+      "message": "Relay profile speed must agree with its on/off outputs"
     }
   },
   "services": {
@@ -488,6 +1480,114 @@
         "warning_after_seconds": {
           "name": "Warn after (seconds)"
         }
+      }
+    }
+  },
+  "entity": {
+    "sensor": {
+      "desired": {
+        "name": "Desired target"
+      },
+      "observed": {
+        "name": "Observed"
+      },
+      "reason": {
+        "name": "Reason"
+      },
+      "control_status": {
+        "name": "Control status",
+        "state": {
+          "initializing": "Initializing",
+          "fault": "Fault",
+          "hands_off": "Hands off",
+          "idle": "Idle",
+          "observe": "Observe",
+          "unavailable": "Unavailable",
+          "restricted": "Restricted",
+          "satisfied": "Satisfied",
+          "pending": "Pending",
+          "applying": "Applying",
+          "waiting": "Waiting"
+        }
+      },
+      "expiry": {
+        "name": "Manual expiry"
+      },
+      "effective_expiry": {
+        "name": "Effective expiry"
+      },
+      "next_attempt": {
+        "name": "Next attempt"
+      },
+      "attempts": {
+        "name": "Command attempts"
+      },
+      "requirement_status": {
+        "name": "Requirement status",
+        "state": {
+          "inactive": "Inactive",
+          "unknown": "Unknown",
+          "satisfied": "Satisfied",
+          "acquiring": "Acquiring",
+          "unmet": "Unmet"
+        }
+      },
+      "provider": {
+        "name": "Selected provider"
+      },
+      "input_phase": {
+        "name": "Input phase",
+        "state": {
+          "idle": "Idle",
+          "qualifying": "Qualifying",
+          "qualified": "Qualified",
+          "recovering": "Recovering",
+          "accepted": "Accepted",
+          "suppressed": "Suppressed",
+          "expired": "Expired"
+        }
+      },
+      "qualification_due": {
+        "name": "Qualification due"
+      }
+    },
+    "binary_sensor": {
+      "manual": {
+        "name": "Manual active"
+      },
+      "qualified": {
+        "name": "Qualified"
+      },
+      "return_overdue": {
+        "name": "Return overdue"
+      },
+      "unmet": {
+        "name": "Airflow unmet"
+      }
+    },
+    "select": {
+      "mode": {
+        "name": "Control mode",
+        "state": {
+          "observe": "Observe",
+          "live": "Live"
+        }
+      }
+    },
+    "button": {
+      "release": {
+        "name": "Resume automatic"
+      },
+      "reconcile": {
+        "name": "Reconcile"
+      }
+    },
+    "switch": {
+      "enabled": {
+        "name": "Enabled"
+      },
+      "desired": {
+        "name": "Desired"
       }
     }
   }

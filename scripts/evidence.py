@@ -9,6 +9,7 @@ import shutil
 import subprocess
 import sys
 import time
+import tomllib
 import xml.etree.ElementTree as ET
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -97,6 +98,7 @@ WINDOW_FILES = {
 }
 OBSERVABILITY_SCENARIOS = INITIAL_SCENARIOS | {
     "OBS-NATIVE-ENTITIES",
+    "OBS-NATIVE-TRANSLATED-PRESENTATION",
     "OBS-REASON-CHANGE-NO-DISPATCH",
     "OBS-EXPIRY-AND-RECORDER",
     "OBS-FAN-PROFILE-REASON",
@@ -104,10 +106,13 @@ OBSERVABILITY_SCENARIOS = INITIAL_SCENARIOS | {
     "LAB-DIAGNOSTICS",
 }
 OBSERVABILITY_FILES = {
+    "observability-explain-responses.json",
     "observability-history.json",
     "observability-activity.json",
     "observability-dashboard.json",
     "observability-dashboard.png",
+    "gold-native-mode.png",
+    "gold-native-dom.json",
 }
 SHADOW_SCENARIOS = {
     "SHADOW-LOCK-ZERO-COMMANDS",
@@ -188,6 +193,11 @@ LAB_FILES = (
         "native-cover-closed.png",
     }
 )
+STATIC_FILES = {"result.json", "static.log", "ruff-lint.log", "ruff-format.log", "dependencies.txt"}
+MYPY_VERSION = "2.3.1"
+RUFF_VERSION = "0.16.9"
+STATIC_CONFIGS = ("pyproject.toml", "compat/ha2026.9.4/pyproject.toml")
+
 TEST_FILES = {"result.json", "coverage.json", "junit.xml", "pytest.log", "dependencies.txt"}
 
 
@@ -392,6 +402,232 @@ def run_source_tests(root: Path, python: Path, version: str, directory: Path) ->
         write_json(directory / "result.json", result)
         sanitize_artifacts(directory, [])
     return result
+
+
+def static_identity(root: Path, manifest: dict) -> dict:
+    """Bind the checked module set, strict configuration and locked tooling."""
+    config = tomllib.loads((root / "pyproject.toml").read_text())
+    require(
+        config.get("tool", {}).get("mypy")
+        == {
+            "python_version": "3.14",
+            "strict": True,
+            "follow_imports": "silent",
+            "ignore_missing_imports": False,
+        },
+        "Static proof requires the complete strict mypy configuration without overrides",
+    )
+    require(
+        config.get("tool", {}).get("ruff")
+        == {
+            "target-version": "py314",
+            "line-length": 100,
+            "lint": {"select": ["E", "F", "I", "UP", "B", "ASYNC"]},
+        },
+        "Static proof requires full Ruff lint/format configuration without scope exclusions",
+    )
+    projects = {name: tomllib.loads((root / name).read_text()) for name in STATIC_CONFIGS}
+    require(
+        f"mypy=={MYPY_VERSION}" in projects["pyproject.toml"]["dependency-groups"]["dev"]
+        and f"mypy=={MYPY_VERSION}" in projects[STATIC_CONFIGS[1]]["project"]["dependencies"],
+        "Both native environments must pin the static checker",
+    )
+    require(
+        f"ruff=={RUFF_VERSION}" in projects["pyproject.toml"]["dependency-groups"]["dev"]
+        and f"ruff=={RUFF_VERSION}" in projects[STATIC_CONFIGS[1]]["project"]["dependencies"],
+        "Both native environments must pin the lint/format checker",
+    )
+    require(
+        {"uv.lock", "compat/ha2026.9.4/uv.lock"} <= set(manifest["locks"]),
+        "Static proof requires both native environment locks",
+    )
+    for name, expected in manifest["locks"].items():
+        require(
+            digest((root / name).read_bytes()) == expected,
+            f"Static dependency lock changed: {name}",
+        )
+    modules = {
+        f"custom_components/ha_operator/{name}": data["sha256"]
+        for name, data in manifest["files"].items()
+        if name.endswith(".py")
+    }
+    require(bool(modules), "Static proof requires production modules")
+    actual_modules = {
+        path.relative_to(root).as_posix(): digest(path.read_bytes())
+        for path in (root / "custom_components/ha_operator").rglob("*.py")
+    }
+    require(
+        modules == actual_modules, "Static archive omits or differs from current production modules"
+    )
+    return {
+        "modules": modules,
+        "locks": manifest["locks"],
+        "configs": {name: digest((root / name).read_bytes()) for name in STATIC_CONFIGS},
+        "producer_sha256": digest((ROOT / "scripts/evidence.py").read_bytes()),
+    }
+
+
+def static_commands(modules: dict) -> dict[str, list[str]]:
+    scope = sorted(modules)
+    return {
+        "mypy": ["-m", "mypy", "--no-incremental", "--config-file", "pyproject.toml", *scope],
+        "ruff_lint": ["-m", "ruff", "check", *scope],
+        "ruff_format": ["-m", "ruff", "format", "--check", *scope],
+    }
+
+
+def static_success(modules: dict) -> dict[str, str]:
+    return {
+        "static.log": f"Success: no issues found in {len(modules)} source file"
+        + ("s" if len(modules) != 1 else ""),
+        "ruff-lint.log": "All checks passed!",
+        "ruff-format.log": f"{len(modules)} file"
+        + ("s" if len(modules) != 1 else "")
+        + " already formatted",
+    }
+
+
+def run_static_checks(root: Path, python: Path, version: str, directory: Path) -> dict:
+    """Execute the pinned checker against every source module bound to release bytes."""
+    manifest = release_manifest(root)
+    require(version in VERSIONS, "Unsupported static-check HA version")
+    identity = static_identity(root, manifest)
+    environment = json.loads(
+        subprocess.check_output(
+            [
+                str(python),
+                "-c",
+                "import importlib.metadata as m, json, platform; "
+                "print(json.dumps({'ha':m.version('homeassistant'), "
+                "'mypy':m.version('mypy'), 'ruff':m.version('ruff'), "
+                "'python':platform.python_version()}))",
+            ],
+            cwd=root,
+            text=True,
+        )
+    )
+    require(
+        environment["ha"] == version
+        and environment["mypy"] == MYPY_VERSION
+        and environment["ruff"] == RUFF_VERSION,
+        "Static interpreter must contain the expected native HA and pinned mypy",
+    )
+    directory.mkdir(parents=True, exist_ok=True)
+    require(not (directory / "result.json").exists(), "Use a fresh static evidence directory")
+    commands = static_commands(identity["modules"])
+    result = {
+        "status": "failed",
+        "ha_version": version,
+        "environment": environment,
+        "artifact_sha256": manifest["sha256"],
+        "source_commit": manifest["source_commit"],
+        "identity": identity,
+        "commands": commands,
+        "started_at": time.time(),
+        "execution": "uncached strict/lint/format source checks; "
+        "release/source identity verified before and after",
+    }
+    try:
+        result["exit_codes"] = {}
+        for name, command in commands.items():
+            filename = {
+                "mypy": "static.log",
+                "ruff_lint": "ruff-lint.log",
+                "ruff_format": "ruff-format.log",
+            }[name]
+            with (directory / filename).open("w") as log:
+                process = subprocess.run(
+                    [str(python), *command],
+                    cwd=root,
+                    stdout=log,
+                    stderr=subprocess.STDOUT,
+                    check=False,
+                )
+            result["exit_codes"][name] = process.returncode
+            result["exit_code"] = process.returncode
+            require(process.returncode == 0, f"Static check failed: {name}")
+        for filename, expected in static_success(identity["modules"]).items():
+            require(
+                (directory / filename).read_text().strip() == expected,
+                f"Static checker did not confirm complete scope: {filename}",
+            )
+        require(
+            release_manifest(root) == manifest and static_identity(root, manifest) == identity,
+            "Static source/configuration/locks changed while checking",
+        )
+        with (directory / "dependencies.txt").open("w") as dependencies:
+            subprocess.run(
+                ["uv", "pip", "freeze", "--python", str(python)],
+                cwd=root,
+                stdout=dependencies,
+                check=True,
+            )
+        result["status"] = "passed"
+        sanitize_artifacts(directory, [])
+        result["files"] = {
+            name: digest((directory / name).read_bytes()) for name in STATIC_FILES - {"result.json"}
+        }
+    except Exception as error:
+        result["error"] = f"{type(error).__name__}: {error}"
+        raise
+    finally:
+        result["completed_at"] = time.time()
+        write_json(directory / "result.json", result)
+        sanitize_artifacts(directory, [])
+    return result
+
+
+def validate_static(directory: Path, manifest: dict, root: Path) -> str:
+    result = read_json(directory / "result.json")
+    version = result.get("ha_version")
+    require(version in VERSIONS, "Unknown static-check HA version")
+    require(
+        result.get("status") == "passed" and result.get("exit_code") == 0,
+        "Static checks did not pass",
+    )
+    require(
+        result.get("artifact_sha256") == manifest["sha256"]
+        and result.get("source_commit") == manifest["source_commit"],
+        "Static checks cover another archive/source identity",
+    )
+    identity = static_identity(root, manifest)
+    require(
+        result.get("identity") == identity, "Static source/configuration/lock/module scope is stale"
+    )
+    require(
+        result.get("commands") == static_commands(identity["modules"]),
+        "Static checker command omits or overrides required scope",
+    )
+    environment = result.get("environment", {})
+    require(
+        environment.get("ha") == version
+        and environment.get("mypy") == MYPY_VERSION
+        and environment.get("ruff") == RUFF_VERSION
+        and environment.get("python", "").startswith("3.14."),
+        "Static checker environment is incompatible",
+    )
+    for name in STATIC_FILES - {"result.json"}:
+        require(
+            digest((directory / name).read_bytes()) == result.get("files", {}).get(name),
+            f"Static evidence changed: {name}",
+        )
+    require(
+        result.get("exit_codes") == dict.fromkeys(static_commands(identity["modules"]), 0),
+        "Static proof requires passing mypy, Ruff lint and format results",
+    )
+    for filename, expected in static_success(identity["modules"]).items():
+        require(
+            (directory / filename).read_text().strip() == expected,
+            f"Static checker did not check every production module: {filename}",
+        )
+    dependencies = (directory / "dependencies.txt").read_text().splitlines()
+    require(
+        f"homeassistant=={version}" in dependencies
+        and f"mypy=={MYPY_VERSION}" in dependencies
+        and f"ruff=={RUFF_VERSION}" in dependencies,
+        "Static installed dependencies do not match the receipt",
+    )
+    return version
 
 
 def validate_lab(directory: Path, manifest: dict) -> tuple[str, str]:
@@ -688,18 +924,30 @@ def bind_sanitized_files(
 
 
 def build_evidence(
-    root: Path, labs: list[Path], tests: list[Path], mutations: Path, validators: Path, output: Path
+    root: Path,
+    labs: list[Path],
+    tests: list[Path],
+    mutations: Path,
+    validators: Path,
+    output: Path,
+    static: list[Path] | None = None,
 ) -> dict:
     manifest = release_manifest(root)
     require(bool(manifest.get("source_commit")), "Release must identify its source commit")
     selected = [validate_lab(directory, manifest) for directory in labs]
     require(
         len(selected) == len(LAB_CASES) and set(selected) == LAB_CASES,
-        "Need both HA all runs, both observability runs, and baseline soak",
+        "Need both HA all/windows/observability/sleep runs and the HA 2026.9.3 soak (nine runs)",
     )
     versions = [validate_tests(directory, manifest, root) for directory in tests]
     require(
         len(versions) == 2 and set(versions) == VERSIONS, "Need both compatibility test results"
+    )
+    static = static or []
+    static_versions = [validate_static(directory, manifest, root) for directory in static]
+    require(
+        len(static_versions) == 2 and set(static_versions) == VERSIONS,
+        "Need both native HA strict static results",
     )
     mutation = read_json(mutations)
     require(mutation.get("status") == "passed", "Mutation gate did not pass")
@@ -714,7 +962,7 @@ def build_evidence(
             item.get("status") == "killed" and item.get("assertion_failures", 0) > 0
             for item in mutants
         ),
-        "All four guards must be killed by assertions",
+        "All nine guards must be killed by assertions",
     )
     source_hashes = {
         f"custom_components/ha_operator/{name}": data["sha256"]
@@ -759,6 +1007,11 @@ def build_evidence(
         for version, directory in zip(versions, tests, strict=True):
             for name in TEST_FILES:
                 safe_copy(directory / name, evidence / "tests" / version / name)
+        for version, directory in zip(static_versions, static, strict=True):
+            for name in STATIC_FILES:
+                safe_copy(directory / name, evidence / "static" / version / name)
+        for name in STATIC_CONFIGS:
+            safe_copy(root / name, evidence / "static-config" / name)
         safe_copy(mutations, evidence / "mutations.json")
         mutation_logs = mutations.parent / f"{mutations.stem}-logs"
         for name in ("baseline", *(item.name for item in MUTANTS)):
@@ -786,6 +1039,20 @@ def build_evidence(
             require(
                 junit_counts(delivered / "junit.xml") == junit_counts(directory / "junit.xml"),
                 "Sanitization changed executed test results",
+            )
+        for version, directory in zip(static_versions, static, strict=True):
+            delivered = evidence / "static" / version
+            bind_sanitized_files(
+                directory / "result.json",
+                delivered / "result.json",
+                {name: delivered / name for name in STATIC_FILES - {"result.json"}},
+            )
+            validate_static(delivered, manifest, root)
+        for name in STATIC_CONFIGS:
+            require(
+                digest((evidence / "static-config" / name).read_bytes())
+                == digest((root / name).read_bytes()),
+                "Sanitization changed the strict configuration",
             )
         for validator in ("hacs", "hassfest"):
             name = f"{validator}.log"
@@ -834,6 +1101,7 @@ def build_evidence(
             },
             "checks": {
                 "source_tests": sorted(versions),
+                "strict_static": sorted(static_versions),
                 "coverage": "passed",
                 "mutations": "passed",
                 "hacs": "passed",
@@ -855,7 +1123,7 @@ def build_evidence(
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=("tests", "validator", "build"))
+    parser.add_argument("command", choices=("tests", "static", "validator", "build"))
     parser.add_argument("--root", type=Path, default=ROOT)
     parser.add_argument("--python", type=Path, default=Path(sys.executable))
     parser.add_argument("--ha-version", choices=sorted(VERSIONS))
@@ -863,6 +1131,7 @@ def main() -> None:
     parser.add_argument("--validator", choices=("hacs", "hassfest"))
     parser.add_argument("--ref")
     parser.add_argument("--lab-run", type=Path, action="append", default=[])
+    parser.add_argument("--static", type=Path, action="append", default=[])
     parser.add_argument("--tests", type=Path, action="append", default=[])
     parser.add_argument("--mutations", type=Path, default=Path("artifacts/mutations.json"))
     parser.add_argument("--validators", type=Path, default=Path("artifacts/validators"))
@@ -872,17 +1141,24 @@ def main() -> None:
         if args.command == "validator":
             require(args.validator is not None, "validator requires --validator")
             result = run_validator(args.root, args.validator, args.validators, args.ref)
-        elif args.command == "tests":
+        elif args.command in {"tests", "static"}:
             require(
                 args.ha_version is not None and args.directory is not None,
-                "tests requires --ha-version and --directory",
+                "tests/static requires --ha-version and --directory",
             )
-            result = run_source_tests(
+            runner = run_source_tests if args.command == "tests" else run_static_checks
+            result = runner(
                 args.root, args.python.absolute(), args.ha_version, args.directory.absolute()
             )
         else:
             result = build_evidence(
-                args.root, args.lab_run, args.tests, args.mutations, args.validators, args.output
+                args.root,
+                args.lab_run,
+                args.tests,
+                args.mutations,
+                args.validators,
+                args.output,
+                args.static,
             )
     except (ValueError, OSError, KeyError, ET.ParseError, subprocess.CalledProcessError) as error:
         parser.exit(1, f"Evidence gate failed: {error}\n")

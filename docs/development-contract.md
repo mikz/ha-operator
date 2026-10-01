@@ -91,10 +91,15 @@ async_load(expected_existing: bool=False); async_update(mutator: Callable[[dict]
 ->dict (serialize updates from current committed state, deep copy before mutator);
 async_close() waits outstanding writer; explicit recovery only through reload.
 Empty payload keys: revision=0, manuals={}, occurrences={}, modes={}, policy_enabled={},
-requests={} (idempotency receipts), intents={} (held booleans). The version 2
-envelope reads version 1 through an explicit migration adding an empty intents map.
-Mutator exceptions must
-not fault storage. Writer failure inhibits; success persists before publication.
+requests={} (idempotency receipts), intents={} (held booleans), policy_inputs={}
+(committed numeric/timer input records), and return_monitors={} (committed cover
+return deadlines). Writes use the version 3 envelope. Reading version 1 adds an
+empty intents map; reading versions 1 and 2 adds empty policy_inputs and
+return_monitors maps before validating the complete state. Existing intent and
+absolute deadlines remain intact. Mutator exceptions must not fault storage.
+Writer failure inhibits; success persists before publication. Unusable
+authoritative state during startup fails config-entry setup with a Repair; a
+write failure after healthy setup leaves the loaded runtime inhibited.
 
 ## Entities
 

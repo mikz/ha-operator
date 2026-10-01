@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from types import SimpleNamespace
+from collections.abc import Mapping
+from types import MappingProxyType
 from typing import Any
 
 import voluptuous as vol
@@ -10,8 +11,11 @@ from homeassistant.config_entries import (
     ConfigEntry,
     ConfigEntryState,
     ConfigFlow,
+    ConfigFlowResult,
+    ConfigSubentry,
     ConfigSubentryFlow,
     OptionsFlow,
+    SubentryFlowResult,
 )
 from homeassistant.core import callback
 from homeassistant.exceptions import HomeAssistantError
@@ -19,17 +23,22 @@ from homeassistant.helpers import selector
 
 from .configuration import KINDS, RESOURCE_DEFAULTS, ConfigurationError, validate_configuration
 from .const import DOMAIN, NAME
+from .data import SubentryConfig
 
 
 def _entity(*, domains: list[str] | None = None, multiple: bool = False) -> selector.EntitySelector:
-    config: dict[str, Any] = {"multiple": multiple}
+    config: selector.EntitySelectorConfig = {"multiple": multiple}
     if domains:
         config["filter"] = [{"domain": domains}]
     return selector.EntitySelector(config)
 
 
 def _number(minimum: float = 0.001, maximum: float | None = None) -> selector.NumberSelector:
-    config: dict[str, Any] = {"min": minimum, "step": "any", "mode": "box"}
+    config: selector.NumberSelectorConfig = {
+        "min": minimum,
+        "step": "any",
+        "mode": selector.NumberSelectorMode.BOX,
+    }
     if maximum is not None:
         config["max"] = maximum
     return selector.NumberSelector(config)
@@ -75,7 +84,7 @@ class OperatorConfigFlow(ConfigFlow, domain=DOMAIN):
             "intent": IntentFlow,
         }
 
-    async def async_step_user(self, user_input: dict[str, Any] | None = None):
+    async def async_step_user(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         if self._async_current_entries():
             return self.async_abort(reason="single_instance_allowed")
         if user_input is not None:
@@ -88,7 +97,7 @@ class OperatorConfigFlow(ConfigFlow, domain=DOMAIN):
 class OperatorOptionsFlow(OptionsFlow):
     """Edit options through HA's existing single reload listener."""
 
-    async def async_step_init(self, user_input: dict[str, Any] | None = None):
+    async def async_step_init(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         errors: dict[str, str] = {}
         if user_input is not None:
             options = {**self.config_entry.options, **user_input}
@@ -124,31 +133,39 @@ class OperatorSubentryFlow(ConfigSubentryFlow):
     def _schema(self) -> vol.Schema:
         raise NotImplementedError
 
-    async def async_step_user(self, user_input: dict[str, Any] | None = None):
+    async def async_step_user(self, user_input: dict[str, Any] | None = None) -> SubentryFlowResult:
         return await self._async_step("user", user_input)
 
-    async def async_step_reconfigure(self, user_input: dict[str, Any] | None = None):
+    async def async_step_reconfigure(
+        self, user_input: dict[str, Any] | None = None
+    ) -> SubentryFlowResult:
         return await self._async_step("reconfigure", user_input)
 
-    def _validated_data(self, user_input: dict[str, Any], current: Any) -> dict[str, Any]:
+    def _validated_data(
+        self, user_input: dict[str, Any], current: ConfigSubentry | None
+    ) -> SubentryConfig:
         entry = self._get_entry()
         candidate_id = current.subentry_id if current else "__new__"
-        candidate = SimpleNamespace(
-            subentry_type=self.kind, subentry_id=candidate_id, data=user_input
+        candidate = ConfigSubentry(
+            subentry_type=self.kind,
+            subentry_id=candidate_id,
+            data=MappingProxyType(user_input),
+            title=current.title if current else "",
+            unique_id=current.unique_id if current else None,
         )
         subentries = [
             item for item in entry.subentries.values() if item.subentry_id != candidate_id
         ]
         all_data = validate_configuration([*subentries, candidate], self.hass)
-        bucket = {
-            "resource": "resources",
-            "policy": "policies",
-            "requirement": "requirements",
-            "intent": "intents",
-        }[self.kind]
-        return all_data[bucket][candidate_id]
+        if self.kind == "resource":
+            return all_data["resources"][candidate_id]
+        if self.kind == "policy":
+            return all_data["policies"][candidate_id]
+        if self.kind == "requirement":
+            return all_data["requirements"][candidate_id]
+        return all_data["intents"][candidate_id]
 
-    async def _async_step(self, step: str, user_input: dict[str, Any] | None):
+    async def _async_step(self, step: str, user_input: dict[str, Any] | None) -> SubentryFlowResult:
         entry = self._get_entry()
         current = self._get_reconfigure_subentry() if step == "reconfigure" else None
         if self.kind == "policy" and not entry.get_subentries_of_type("resource"):
@@ -159,14 +176,14 @@ class OperatorSubentryFlow(ConfigSubentryFlow):
             try:
                 data = self._validated_data(user_input, current)
             except ConfigurationError as err:
-                errors["base"] = err.code
-                placeholders["detail"] = err.detail
+                errors["base"] = err.translation_key
+                placeholders.update(err.translation_placeholders)
             else:
                 if current is not None:
                     return self.async_update_and_abort(
-                        entry, current, title=data["name"], data=data
+                        entry, current, title=data["name"], data=dict(data)
                     )
-                return self.async_create_entry(title=data["name"], data=data)
+                return self.async_create_entry(title=data["name"], data=dict(data))
         values = user_input if user_input is not None else dict(current.data) if current else {}
         return self.async_show_form(
             step_id=step,
@@ -185,7 +202,7 @@ class ResourceFlow(OperatorSubentryFlow):
         fields: dict[Any, Any] = {
             vol.Required("name"): selector.TextSelector(),
             vol.Required("kind"): selector.SelectSelector(
-                {"options": list(KINDS), "mode": "dropdown"}
+                {"options": list(KINDS), "mode": selector.SelectSelectorMode.DROPDOWN}
             ),
             vol.Optional("entity_id"): _entity(domains=["cover", "fan", "switch"]),
             vol.Optional("outputs"): _entity(domains=["switch"], multiple=True),
@@ -200,12 +217,23 @@ class ResourceFlow(OperatorSubentryFlow):
                     "fields": {
                         "target_at_most": {
                             "selector": {
-                                "number": {"min": 0, "max": 100, "step": "any", "mode": "box"}
+                                "number": {
+                                    "min": 0,
+                                    "max": 100,
+                                    "step": "any",
+                                    "mode": selector.NumberSelectorMode.BOX,
+                                }
                             },
                             "required": True,
                         },
                         "warning_after_seconds": {
-                            "selector": {"number": {"min": 0.001, "step": "any", "mode": "box"}},
+                            "selector": {
+                                "number": {
+                                    "min": 0.001,
+                                    "step": "any",
+                                    "mode": selector.NumberSelectorMode.BOX,
+                                }
+                            },
                             "required": True,
                         },
                     },
@@ -225,16 +253,16 @@ class PolicyFlow(OperatorSubentryFlow):
 
     kind = "policy"
 
-    async def _async_step(self, step: str, user_input: dict[str, Any] | None):
+    async def _async_step(self, step: str, user_input: dict[str, Any] | None) -> SubentryFlowResult:
         if not self._get_entry().get_subentries_of_type("resource"):
             return self.async_abort(reason="no_resources")
         if user_input is None:
             result = await super()._async_step(step, None)
-            if step == "reconfigure":
-                current = self._get_reconfigure_subentry().data
+            if step == "reconfigure" and (schema := result.get("data_schema")) is not None:
+                current_data = self._get_reconfigure_subentry().data
                 result["data_schema"] = self.add_suggested_values_to_schema(
-                    result["data_schema"],
-                    {"input_type": current.get("input", {}).get("type", "legacy")},
+                    schema,
+                    {"input_type": current_data.get("input", {}).get("type", "legacy")},
                 )
             return result
         data = dict(user_input)
@@ -248,29 +276,36 @@ class PolicyFlow(OperatorSubentryFlow):
                 raise ConfigurationError(
                     "input_eligibility_conflict",
                     "Remove helper eligibility fields for a native input",
+                    translation_key="config_input_eligibility_conflict",
                 )
             self._validated_data(data, current)
         except ConfigurationError as err:
             return self.async_show_form(
                 step_id=step,
                 data_schema=self.add_suggested_values_to_schema(self._schema(), user_input),
-                errors={"base": err.code},
-                description_placeholders={"detail": err.detail},
+                errors={"base": err.translation_key},
+                description_placeholders=err.translation_placeholders,
             )
         self._policy_data = data
         self._policy_step = step
         self._input_type = input_type
         return await self._async_input_step(None)
 
-    async def async_step_qualified_numeric(self, user_input: dict[str, Any] | None = None):
+    async def async_step_qualified_numeric(
+        self, user_input: dict[str, Any] | None = None
+    ) -> SubentryFlowResult:
         return await self._async_input_step(user_input)
 
-    async def async_step_timer_episode(self, user_input: dict[str, Any] | None = None):
+    async def async_step_timer_episode(
+        self, user_input: dict[str, Any] | None = None
+    ) -> SubentryFlowResult:
         return await self._async_input_step(user_input)
 
-    async def _async_input_step(self, user_input: dict[str, Any] | None):
+    async def _async_input_step(self, user_input: dict[str, Any] | None) -> SubentryFlowResult:
         numeric = self._input_type == "qualified_numeric"
-        fields = {
+        fields: dict[
+            vol.Marker, selector.EntitySelector | selector.NumberSelector | selector.TextSelector
+        ] = {
             vol.Required("entity_id"): _entity(domains=["sensor" if numeric else "timer"]),
             vol.Required("qualification_seconds"): _number(),
         }
@@ -278,14 +313,15 @@ class PolicyFlow(OperatorSubentryFlow):
             fields.update(
                 {
                     vol.Required("threshold"): selector.NumberSelector(
-                        {"step": "any", "mode": "box"}
+                        {"step": "any", "mode": selector.NumberSelectorMode.BOX}
                     ),
                     vol.Required("unit"): selector.TextSelector(),
                 }
             )
         else:
             fields[vol.Required("request_seconds")] = _number()
-        errors, placeholders = {}, {}
+        errors: dict[str, str] | None = {}
+        placeholders: Mapping[str, str] | None = {}
         if user_input is not None:
             source = {**user_input, "type": self._input_type}
             if numeric:
@@ -317,9 +353,10 @@ class PolicyFlow(OperatorSubentryFlow):
                 vol.Required("resource_id"): selector.SelectSelector(
                     {
                         "options": [
-                            {"value": item.subentry_id, "label": item.title} for item in resources
+                            selector.SelectOptionDict(value=item.subentry_id, label=item.title)
+                            for item in resources
                         ],
-                        "mode": "dropdown",
+                        "mode": selector.SelectSelectorMode.DROPDOWN,
                     }
                 ),
                 vol.Required("kind"): selector.SelectSelector({"options": ["state", "occurrence"]}),
@@ -328,7 +365,7 @@ class PolicyFlow(OperatorSubentryFlow):
                     {
                         "options": ["legacy", "qualified_numeric", "timer_episode"],
                         "translation_key": "policy_input_type",
-                        "mode": "dropdown",
+                        "mode": selector.SelectSelectorMode.DROPDOWN,
                     }
                 ),
                 vol.Optional("target"): selector.ObjectSelector(),
@@ -338,10 +375,10 @@ class PolicyFlow(OperatorSubentryFlow):
                 vol.Optional("intent_id"): selector.SelectSelector(
                     {
                         "options": [
-                            {"value": item.subentry_id, "label": item.title}
+                            selector.SelectOptionDict(value=item.subentry_id, label=item.title)
                             for item in self._get_entry().get_subentries_of_type("intent")
                         ],
-                        "mode": "dropdown",
+                        "mode": selector.SelectSelectorMode.DROPDOWN,
                     }
                 ),
                 vol.Optional("target_attribute"): selector.TextSelector(),
@@ -365,11 +402,11 @@ class IntentFlow(OperatorSubentryFlow):
                 vol.Optional("on_targets", default=[]): selector.SelectSelector(
                     {
                         "options": [
-                            {"value": item.subentry_id, "label": item.title}
+                            selector.SelectOptionDict(value=item.subentry_id, label=item.title)
                             for item in self._get_entry().get_subentries_of_type("intent")
                         ],
                         "multiple": True,
-                        "mode": "dropdown",
+                        "mode": selector.SelectSelectorMode.DROPDOWN,
                     }
                 ),
             }

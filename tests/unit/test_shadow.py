@@ -187,10 +187,13 @@ def test_deterministic_aliases_preserve_graph_links_without_private_names(config
     [
         (None, None),
         (True, True),
+        (False, False),
         (4, 4),
         (4.5, 4.5),
+        (-0.0, -0.0),
         (float("nan"), None),
         (float("inf"), None),
+        (float("-inf"), None),
         ("on", "on"),
         ("00:20:00", "00:20:00"),
         ("125:00:00.1", "125:00:00.1"),
@@ -203,7 +206,31 @@ def test_deterministic_aliases_preserve_graph_links_without_private_names(config
     ],
 )
 def test_only_safe_scalar_observations_are_preserved(configuration, value, expected):
-    assert Sanitizer(configuration, []).value(value) == expected
+    sanitized = Sanitizer(configuration, []).value(value)
+    assert sanitized == expected
+    assert type(sanitized) is type(expected)
+
+
+def test_numeric_subclasses_and_float_protocol_do_not_enter_private_trace(configuration):
+    class Integer(int):
+        pass
+
+    class Floating(float):
+        pass
+
+    class FloatProtocol:
+        def __float__(self):
+            raise AssertionError("Private objects must not be coerced")
+
+    sanitizer = Sanitizer(configuration, [])
+    for value in (Integer(4), Floating(4.5), FloatProtocol()):
+        assert shadow._finite(value) is False
+        assert sanitizer.value(value) is None
+
+
+def test_oversized_integer_is_unusable_trace_data(configuration):
+    assert shadow._finite(10**399) is False
+    assert Sanitizer(configuration, []).value(10**399) is None
 
 
 @pytest.mark.parametrize("value", ["private text", "nan", "inf", "9" * 100])

@@ -11,12 +11,32 @@ import math
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
-from typing import Any
+from typing import TYPE_CHECKING, Any, TypedDict, cast
+
+if TYPE_CHECKING:
+    from .data import TargetData
+
+
+class TargetValidationError(ValueError):
+    """Expected target validation failure; callers decide how to present it."""
+
+    def __init__(self, key: str, message: str, **placeholders: str) -> None:
+        super().__init__(message)
+        self.translation_key = key
+        self.translation_placeholders = placeholders
+
+
+class TargetFieldError(TargetValidationError, TypeError):
+    """Retain TypeError compatibility for malformed target objects and fields."""
 
 
 def _finite(value: float, name: str) -> None:
-    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
-        raise ValueError(f"{name} must be a finite number")
+    try:
+        finite = isinstance(value, (int, float)) and math.isfinite(value)
+    except OverflowError:
+        finite = False
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not finite:
+        raise TargetValidationError("finite_number", f"{name} must be a finite number", field=name)
 
 
 @dataclass(frozen=True, slots=True)
@@ -35,25 +55,47 @@ class Target:
             if value is not None:
                 _finite(value, name)
                 if not 0 <= value <= 100:
-                    raise ValueError(f"{name} must be between 0 and 100")
+                    raise TargetValidationError(
+                        "target_range",
+                        f"{name} must be between 0 and 100",
+                        field=name,
+                        maximum="100",
+                    )
         if self.on is not None and not isinstance(self.on, bool):
-            raise ValueError("on must be a boolean")
+            raise TargetValidationError("boolean_target", "on must be a boolean", field="on")
         for name in ("direction", "profile"):
             value = getattr(self, name)
             if value is not None and (not isinstance(value, str) or not value.strip()):
-                raise ValueError(f"{name} must be a nonempty string")
+                raise TargetValidationError(
+                    "string_target", f"{name} must be a nonempty string", field=name
+                )
 
     @classmethod
-    def from_dict(cls, value: Mapping[str, Any]) -> Target:
+    def from_dict(cls, value: object) -> Target:
         """Reject misspelled fields instead of silently admitting empty intent."""
+        if not isinstance(value, Mapping):
+            raise TargetFieldError("target_object", "Target must be an object")
+        extra = value.keys() - {"position", "on", "percentage", "direction", "profile"}
+        if extra:
+            fields = ", ".join(sorted(map(str, extra)))
+            raise TargetFieldError(
+                "unsupported_target_fields", f"Unsupported target fields: {fields}", fields=fields
+            )
         return cls(**dict(value))
 
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            name: value
-            for name in ("position", "on", "percentage", "direction", "profile")
-            if (value := getattr(self, name)) is not None
-        }
+    def to_dict(self) -> TargetData:
+        fields: TargetData = {}
+        if self.position is not None:
+            fields["position"] = self.position
+        if self.on is not None:
+            fields["on"] = self.on
+        if self.percentage is not None:
+            fields["percentage"] = self.percentage
+        if self.direction is not None:
+            fields["direction"] = self.direction
+        if self.profile is not None:
+            fields["profile"] = self.profile
+        return fields
 
 
 @dataclass(frozen=True, slots=True)
@@ -89,7 +131,7 @@ class ManualLease:
     target: Target | None = None
     expires_at: float | None = None
     request_id: str | None = None
-    source: str = "service"
+    source: str | None = "service"
 
     def __post_init__(self) -> None:
         if self.mode not in {"target", "hands_off"}:
@@ -168,7 +210,7 @@ def evaluate_evidence(evidence: Iterable[Evidence]) -> bool | None:
                 continue
             try:
                 actual, expected = float(item.value), float(item.expected)
-            except ValueError, TypeError:
+            except ValueError, TypeError, OverflowError:
                 unknown = True
                 continue
             if not math.isfinite(actual) or not math.isfinite(expected):
@@ -262,6 +304,19 @@ class Evaluation:
     next_evaluation: float | None = None
 
 
+class EngineInputs(TypedDict):
+    """The existing concrete snapshot supplied to the pure evaluator."""
+
+    now: float
+    resources: dict[str, Resource]
+    observations: dict[str, Observation]
+    manuals: list[ManualLease]
+    policies: list[Policy]
+    occurrences: list[Occurrence]
+    requirements: list[Requirement]
+    requirement_memory: dict[str, RequirementMemory]
+
+
 def matches(target: Target, observed: Observation | Target | None, tolerance: float = 2) -> bool:
     """Compare requested fields against feedback, not dispatched or desired state."""
     if isinstance(observed, Observation):
@@ -275,7 +330,8 @@ def matches(target: Target, observed: Observation | Target | None, tolerance: fl
         if actual is None:
             return False
         if key in {"position", "percentage"}:
-            if abs(desired - actual) > tolerance:
+            # These serialized keys contain only Target's validated numeric fields.
+            if abs(cast(float, desired) - actual) > tolerance:
                 return False
         elif actual != desired:
             return False
@@ -307,6 +363,7 @@ def _can_acquire(
         resource is None
         or resource.mode != "live"
         or resource.fault is not None
+        or observation is None
         or not _fresh(resource, observation)
         or observation.restriction is not None
     ):
@@ -412,12 +469,12 @@ def _policy_requests(
     policies: Iterable[Policy], occurrences: Iterable[Occurrence], now: float
 ) -> tuple[tuple[Request, ...], tuple[float, ...]]:
     records: dict[tuple[str, str], Occurrence] = {}
-    for occurrence in occurrences:
-        key = (occurrence.policy_id, occurrence.occurrence_id)
+    for stored_occurrence in occurrences:
+        key = (stored_occurrence.policy_id, stored_occurrence.occurrence_id)
         previous = records.get(key)
         # A tombstone must dominate an accidentally duplicated admitted record.
-        if previous is None or occurrence.skipped:
-            records[key] = occurrence
+        if previous is None or stored_occurrence.skipped:
+            records[key] = stored_occurrence
     requests: list[Request] = []
     deadlines: list[float] = []
     for policy in policies:
@@ -544,7 +601,7 @@ def evaluate(
             status, reason = "idle", "no eligible request"
         elif resource.mode != "live":
             status, reason = "observe", "observe mode prohibits actuation"
-        elif not _fresh(resource, observation):
+        elif observation is None or not _fresh(resource, observation):
             status, reason = "unavailable", "waiting for fresh physical observations"
         elif observation.restriction is not None:
             status, reason = "restricted", observation.restriction

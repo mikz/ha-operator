@@ -33,9 +33,7 @@ def run(args):
             else "test_event_profile.py"
         )
     )
-    recipe = REPOSITORY / "tests/lab/window_recipe.py" if native_suite else None
     probe_bytes = probe.read_bytes()
-    recipe_bytes = recipe.read_bytes() if recipe else None
     traces = (False,) if disk_suite else (False, True)
     workloads = (
         ("disk",)
@@ -56,8 +54,6 @@ def run(args):
                 repeats = range(args.repeats if measurement == "timing" else 1)
                 for repeat in repeats:
                     variants = [("baseline", args.baseline), ("candidate", args.candidate)]
-                    if workload.startswith("followers_"):
-                        variants = [("candidate", args.candidate)]
                     if repeat % 2:
                         variants.reverse()
                     for label, package in variants:
@@ -76,8 +72,6 @@ def run(args):
                                         raise ValueError("Unsafe release member")
                                 archive.extractall(component)
                             (root / "test_event_profile.py").write_bytes(probe_bytes)
-                            if recipe_bytes is not None:
-                                (root / "window_recipe.py").write_bytes(recipe_bytes)
                             (root / "pytest.ini").write_text(
                                 "[pytest]\nasyncio_mode=auto\nfilterwarnings=ignore::DeprecationWarning\n"
                             )
@@ -128,7 +122,7 @@ def run(args):
                         print(name, f"CPU {receipt['cpu_seconds']:.4f}s", flush=True)
     comparison = []
     for trace in traces if "timing" in args.measurements else ():
-        for workload in (name for name in workloads if not name.startswith("followers_")):
+        for workload in workloads:
             row = {"workload": workload, "trace_enabled": trace}
             for label in ("baseline", "candidate"):
                 rows = [
@@ -153,7 +147,6 @@ def run(args):
         "baseline_sha256": sha256(args.baseline.read_bytes()).hexdigest(),
         "candidate_sha256": sha256(args.candidate.read_bytes()).hexdigest(),
         "probe_sha256": sha256(probe_bytes).hexdigest(),
-        **({"recipe_sha256": sha256(recipe_bytes).hexdigest()} if recipe_bytes is not None else {}),
         "batches": args.batches,
         "timing_repeats": args.repeats,
         "measurements": args.measurements,

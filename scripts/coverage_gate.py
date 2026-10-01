@@ -1,4 +1,4 @@
-"""Require strictly over 95% line coverage in every production Python module."""
+"""Require strictly over 95% line and combined coverage in every production module."""
 
 from __future__ import annotations
 
@@ -12,9 +12,11 @@ PREFIX = "custom_components/ha_operator/"
 
 
 def typing_only_lines(source: str) -> set[int]:
-    """Permit import-only TYPE_CHECKING blocks, never executable logic exclusions."""
+    """Permit typing imports and inert overload stubs, never runtime logic exclusions."""
     allowed = set()
-    for node in ast.walk(ast.parse(source)):
+    tree = ast.parse(source)
+    lines = source.splitlines()
+    for node in ast.walk(tree):
         if (
             isinstance(node, ast.If)
             and isinstance(node.test, ast.Name)
@@ -23,12 +25,58 @@ def typing_only_lines(source: str) -> set[int]:
             and all(isinstance(child, (ast.Import, ast.ImportFrom)) for child in node.body)
         ):
             allowed.update(range(node.lineno, node.end_lineno + 1))
+    for scope in ast.walk(tree):
+        if not isinstance(scope, (ast.Module, ast.ClassDef)):
+            continue
+        functions = [
+            node for node in scope.body if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        ]
+
+        def is_overload(node: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
+            return any(
+                isinstance(item, ast.Name) and item.id == "overload" for item in node.decorator_list
+            )
+
+        implementations = {
+            node.name
+            for node in functions
+            if not is_overload(node)
+            and not (
+                len(node.body) == 1
+                and isinstance(node.body[0], ast.Expr)
+                and isinstance(node.body[0].value, ast.Constant)
+                and node.body[0].value.value is Ellipsis
+            )
+        }
+        for node in functions:
+            if (
+                node.name in implementations
+                and len(node.decorator_list) == 1
+                and is_overload(node)
+                and len(node.body) == 1
+                and isinstance(node.body[0], ast.Expr)
+                and isinstance(node.body[0].value, ast.Constant)
+                and node.body[0].value.value is Ellipsis
+                and not any(isinstance(item, ast.Call) for item in ast.walk(node.args))
+                and not (
+                    node.returns is not None
+                    and any(isinstance(item, ast.Call) for item in ast.walk(node.returns))
+                )
+            ):
+                allowed.update(range(node.decorator_list[0].lineno, node.end_lineno + 1))
+                # coverage.py includes trailing blank separators in its stub exclusion.
+                end = node.end_lineno
+                while end < len(lines) and not lines[end].strip():
+                    end += 1
+                    allowed.add(end)
     return allowed
 
 
 def check_coverage(report: dict, root: Path) -> list[str]:
     """Fail missing modules, hidden executable code, or insufficient coverage."""
     failures = []
+    if report.get("meta", {}).get("branch_coverage") is not True:
+        failures.append("Branch coverage metadata is required")
     files = report.get("files", {})
     normalized = {}
     for name, data in files.items():
@@ -47,18 +95,41 @@ def check_coverage(report: dict, root: Path) -> list[str]:
         summary = entry.get("summary", {})
         total = summary.get("num_statements")
         covered = summary.get("covered_lines")
+        branches = summary.get("num_branches")
+        covered_branches = summary.get("covered_branches")
+        missing_branches = summary.get("missing_branches")
         if set(entry.get("excluded_lines", ())) - typing_only_lines(module.read_text()):
             failures.append(f"{name}: excluded executable lines are forbidden by the release gate")
         if (
-            type(total) is not int or type(covered) is not int
-            or total < 0 or covered < 0 or covered > total
+            type(total) is not int
+            or type(covered) is not int
+            or total < 0
+            or covered < 0
+            or covered > total
         ):
             failures.append(f"{name}: invalid coverage counts")
             continue
+        if (
+            any(type(value) is not int for value in (branches, covered_branches, missing_branches))
+            or branches < 0
+            or covered_branches < 0
+            or missing_branches < 0
+            or covered_branches + missing_branches != branches
+        ):
+            failures.append(f"{name}: invalid branch coverage counts")
+            continue
         if total and covered * 100 <= total * 95:
             failures.append(f"{name}: {covered}/{total} lines; requires strictly over 95%")
+        elif total + branches and (covered + covered_branches) * 100 <= (total + branches) * 95:
+            failures.append(
+                f"{name}: {covered + covered_branches}/{total + branches} combined lines/branches; "
+                "requires strictly over 95%"
+            )
         if module.name == "config_flow.py" and (
-            covered != total or entry.get("missing_branches") or entry.get("missing_lines")
+            covered != total
+            or covered_branches != branches
+            or entry.get("missing_branches")
+            or entry.get("missing_lines")
             or report.get("meta", {}).get("branch_coverage") is not True
         ):
             failures.append(f"{name}: config flow requires full line and branch coverage")
@@ -76,7 +147,7 @@ def main() -> None:
         parser.exit(1, f"Unable to validate coverage: {error}\n")
     if failures:
         parser.exit(1, "\n".join(failures) + "\n")
-    print("Coverage gate passed: every production module >95%; config flow 100%")
+    print("Coverage gate passed: every module >95% lines and combined; config flow 100%")
 
 
 if __name__ == "__main__":

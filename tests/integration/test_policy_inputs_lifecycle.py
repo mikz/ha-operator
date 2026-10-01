@@ -17,6 +17,7 @@ from pytest_homeassistant_custom_component.common import async_fire_time_changed
 
 from custom_components.ha_operator import storage
 from custom_components.ha_operator.const import DOMAIN
+from custom_components.ha_operator.policy_inputs import NumericState, TimerState
 from tests.integration.helpers import (
     async_activate,
     async_add_physical_cover,
@@ -219,7 +220,7 @@ async def test_failed_interruption_returns_failed_unload_and_retains_visible_inh
     assert managed.state == "unavailable"
     assert managed.attributes.get("current_position") is None
     observed = hass.states.get(managed_id(hass, "sensor", key="observed"))
-    assert observed.state == "unknown" and observed.attributes["target"] is None
+    assert observed.state == "unavailable" and observed.attributes.get("target") is None
     assert ir.async_get(hass).async_get_issue(DOMAIN, f"storage_{entry.entry_id}") is not None
     with pytest.raises(HomeAssistantError, match="unloaded"):
         await old.async_set_policy_enabled("vent", False)
@@ -282,23 +283,31 @@ async def test_reload_drains_admission_then_fences_and_rejects_queued_mutator(
         assert not old._policy_events
     finally:
         release.set()
-    with pytest.raises(HomeAssistantError, match="unloaded"):
-        await queued
-    if cancel_close:
-        with pytest.raises(asyncio.CancelledError):
-            await closing
-        assert old.store.state["policy_inputs"]["vent"]["state"]["phase"] == "suppressed"
-        assert await hass.config_entries.async_reload(entry.entry_id)
-    else:
-        assert await closing
-    await hass.async_block_till_done()
-    assert revisions[:2] == [(revisions[0][0], "accepted"), (revisions[0][0] + 1, "suppressed")]
-    assert entry.runtime_data is not old
-    assert all(task.done() for task in old._tasks)
-    assert entry.runtime_data.policy_enabled("vent")  # Queued disable never committed.
-    assert entry.runtime_data.policy_input("vent").phase == "suppressed"
-    assert raw.commands == []
-    assert await hass.config_entries.async_unload(entry.entry_id)
+    try:
+        with pytest.raises(HomeAssistantError, match="unloaded"):
+            await queued
+        if cancel_close:
+            with pytest.raises(asyncio.CancelledError):
+                await closing
+            assert old.store.state["policy_inputs"]["vent"]["state"]["phase"] == "suppressed"
+            assert await hass.config_entries.async_reload(entry.entry_id)
+        else:
+            assert await closing
+        await hass.async_block_till_done()
+        assert revisions[:2] == [(revisions[0][0], "accepted"), (revisions[0][0] + 1, "suppressed")]
+        assert entry.runtime_data is not old
+        assert all(task.done() for task in old._tasks)
+        assert entry.runtime_data.policy_enabled("vent")  # Queued disable never committed.
+        assert entry.runtime_data.policy_input("vent").phase == "suppressed"
+        assert raw.commands == []
+        assert await hass.config_entries.async_unload(entry.entry_id)
+    finally:
+        # Assertion failures (including deliberate mutants) must not leave the
+        # replacement runtime or closing task alive and obscure the causal result.
+        if closing is not None:
+            await asyncio.gather(closing, return_exceptions=True)
+        await hass.config_entries.async_unload(entry.entry_id)
+        await hass.async_block_till_done()
 
 
 async def test_unload_trace_uses_existing_policy_input_admission_contract(hass, tmp_path, freezer):
@@ -413,3 +422,86 @@ async def test_public_shutdown_drains_inflight_save_before_recovery(
     if stage == "cancel":
         assert raw.commands == before
     assert await hass.config_entries.async_unload(entry.entry_id)
+
+
+@pytest.mark.parametrize("configured_type", ["timer_episode", "qualified_numeric"])
+async def test_saved_input_type_matches_current_fingerprint_at_startup(
+    hass, tmp_path, configured_type
+):
+    """A correlated saved input must fail through actionable storage readiness."""
+    raw, entry = await setup(hass, tmp_path, numeric=True)
+    runtime = entry.runtime_data
+    policy_id = "vent" if configured_type == "timer_episode" else "cold"
+    fingerprint = runtime._input_fingerprints[policy_id]
+    saved = disk(entry)
+    assert await hass.config_entries.async_unload(entry.entry_id)
+    other = NumericState() if configured_type == "timer_episode" else TimerState()
+    saved["policy_inputs"][policy_id] = {
+        "type": "qualified_numeric" if configured_type == "timer_episode" else "timer_episode",
+        "fingerprint": fingerprint,
+        "state": other.to_record(),
+    }
+    path = runtime.store._path
+    contents = json.dumps({"version": 3, "data": saved})
+    await hass.async_add_executor_job(path.write_text, contents)
+    before = list(raw.commands)
+    try:
+        assert not await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+        assert entry.state is ConfigEntryState.SETUP_ERROR
+        assert ir.async_get(hass).async_get_issue(DOMAIN, f"storage_{entry.entry_id}") is not None
+        assert entry.runtime_data._closed and not entry.runtime_data._tasks
+        assert path.read_text() == contents and raw.commands == before
+    finally:
+        if entry.state is ConfigEntryState.LOADED:
+            await hass.config_entries.async_unload(entry.entry_id)
+
+
+@pytest.mark.parametrize("configured_type", ["timer_episode", "qualified_numeric"])
+async def test_changed_input_fingerprint_recovers_without_replaying_old_type(
+    hass, tmp_path, configured_type
+):
+    """Legitimate native input type changes retain timer suppression behavior."""
+    raw, entry = await setup(hass, tmp_path, numeric=True)
+    runtime = entry.runtime_data
+    policy_id = "vent" if configured_type == "timer_episode" else "cold"
+    old_policy_id = "cold" if configured_type == "timer_episode" else "vent"
+    saved = disk(entry)
+    expiry = dt_util.utcnow().timestamp() + 1800
+    old = (
+        NumericState(due_at=expiry, qualified=True)
+        if configured_type == "timer_episode"
+        else TimerState(episode_id="old-episode", phase="accepted", expires_at=expiry)
+    )
+    saved["policy_inputs"][policy_id] = {
+        "type": "qualified_numeric" if configured_type == "timer_episode" else "timer_episode",
+        "fingerprint": runtime._input_fingerprints[old_policy_id],
+        "state": old.to_record(),
+    }
+    if configured_type == "qualified_numeric":
+        saved["occurrences"][json.dumps([policy_id, "old-episode"])] = {
+            "policy_id": policy_id,
+            "occurrence_id": "old-episode",
+            "expires_at": expiry,
+            "target": {"position": 100},
+        }
+    assert await hass.config_entries.async_unload(entry.entry_id)
+    await hass.async_add_executor_job(
+        runtime.store._path.write_text, json.dumps({"version": 3, "data": saved})
+    )
+    before = list(raw.commands)
+    try:
+        assert await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+        current = entry.runtime_data
+        record = current._state["policy_inputs"][policy_id]
+        assert record["type"] == configured_type
+        assert record["fingerprint"] == current._input_fingerprints[policy_id]
+        assert current.policy_input(policy_id).phase == "idle"
+        if configured_type == "qualified_numeric":
+            assert current._state["occurrences"][json.dumps([policy_id, "old-episode"])]["skipped"]
+        assert raw.commands == before
+        assert ir.async_get(hass).async_get_issue(DOMAIN, f"storage_{entry.entry_id}") is None
+    finally:
+        if entry.state is ConfigEntryState.LOADED:
+            await hass.config_entries.async_unload(entry.entry_id)

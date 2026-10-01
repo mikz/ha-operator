@@ -97,6 +97,7 @@ def fake_runtime():
         policy_input=Mock(return_value=None),
         return_monitor=Mock(return_value=ReturnMonitorState()),
         adapter=lambda key: adapters[key],
+        source_available=Mock(return_value=True),
         subscribe=subscribe,
         callbacks=callbacks,
         async_request=AsyncMock(),
@@ -162,10 +163,10 @@ async def test_cover_commands_do_not_claim_motion(fake_runtime):
     fake_runtime.observations["roof"] = Observation(Target(position=49.6), True)
     assert entity.current_cover_position == 50 and entity.is_closed is False
     fake_runtime.observations["roof"] = Observation(Target(position=100), False)
-    assert (
-        not entity.available and entity.current_cover_position is None and entity.is_closed is None
-    )
+    assert entity.available and entity.current_cover_position is None and entity.is_closed is None
     del fake_runtime.observations["roof"]
+    assert entity.available and entity.current_cover_position is None
+    fake_runtime.source_available.return_value = False
     assert not entity.available
 
 

@@ -174,8 +174,11 @@ async def test_observed_rejects_untrusted_feedback(hass, tmp_path, attribute):
         raw.entity_id, "unavailable" if attribute == "unavailable" else "open", attrs
     )
     await hass.async_block_till_done()
-    assert hass.states.get(managed_id(hass, "sensor", key="observed")).state == "unknown"
-    assert hass.states.get(managed_id(hass, "sensor", key="observed")).attributes["target"] is None
+    expected = "unavailable" if attribute == "unavailable" else "unknown"
+    assert hass.states.get(managed_id(hass, "sensor", key="observed")).state == expected
+    assert (
+        hass.states.get(managed_id(hass, "sensor", key="observed")).attributes.get("target") is None
+    )
     await hass.config_entries.async_unload(entry.entry_id)
 
 

@@ -3,14 +3,19 @@
 from __future__ import annotations
 
 from copy import deepcopy
-from typing import Any
+from typing import TYPE_CHECKING
 
-from homeassistant.core import callback
+from homeassistant.core import Event, callback
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.device_registry import DeviceEntryType, DeviceInfo
 from homeassistant.helpers.entity import Entity
 
 from .const import DOMAIN, NAME
+from .core import Observation, Target
+from .data import IntentConfig, PolicyConfig, RequirementConfig, ResourceConfig
+
+if TYPE_CHECKING:
+    from .runtime import OperatorRuntime
 
 
 class OperatorEntity(Entity):
@@ -19,24 +24,30 @@ class OperatorEntity(Entity):
     _attr_has_entity_name = True
     _attr_should_poll = False
 
-    def __init__(self, runtime: Any, identifier: str, key: str, name: str | None) -> None:
+    def __init__(self, runtime: OperatorRuntime, identifier: str, key: str) -> None:
         self.runtime = runtime
         self.identifier = identifier
         self._attr_unique_id = f"{identifier}_{key}"
-        self._attr_name = name
-        self._last_publication: tuple | None = None
-        data = (
+        if key == "managed":
+            self._attr_name = None
+        else:
+            self._attr_translation_key = key
+        self._last_publication: tuple[object, ...] | None = None
+        data: ResourceConfig | PolicyConfig | RequirementConfig | IntentConfig | dict[str, str] = (
             runtime.resources.get(identifier)
             or runtime.policies.get(identifier)
             or runtime.requirements.get(identifier)
             or runtime.intents.get(identifier)
             or {}
         )
+        # Kind exists only on resource/policy records; both declare text values.
+        kind_record = runtime.resources.get(identifier) or runtime.policies.get(identifier)
+        model = kind_record["kind"] if kind_record is not None else "Requirement"
         self._attr_device_info = DeviceInfo(
             identifiers={(DOMAIN, identifier)},
             name=data.get("name", identifier),
             manufacturer=NAME,
-            model=data.get("kind", "Requirement"),
+            model=model,
             entry_type=DeviceEntryType.SERVICE,
         )
 
@@ -50,11 +61,11 @@ class OperatorEntity(Entity):
         )
 
     @callback
-    def _registry_updated(self, event) -> None:
+    def _registry_updated(self, event: Event[er.EventEntityRegistryUpdatedData]) -> None:
         """Resolve links again after a rename without waking actuator workers."""
         self._runtime_updated()
 
-    def _publication_state(self) -> tuple:
+    def _publication_state(self) -> tuple[object, ...]:
         """Compare public entity values; HA still owns their rendering/validation."""
         available = self.available
         return (
@@ -106,11 +117,11 @@ class ResourceEntity(OperatorEntity):
     """A managed device whose state is exclusively physical observation."""
 
     @property
-    def observation(self) -> Any:
+    def observation(self) -> Observation | None:
         return self.runtime.observations.get(self.identifier)
 
     @property
-    def observed_target(self) -> Any:
+    def observed_target(self) -> Target | None:
         observation = self.observation
         return (
             observation.target
@@ -120,9 +131,8 @@ class ResourceEntity(OperatorEntity):
 
     @property
     def available(self) -> bool:
-        observation = self.observation
-        return not self.runtime._closed and observation is not None and observation.available
+        return self.runtime.source_available(self.identifier)
 
     @property
-    def extra_state_attributes(self) -> dict[str, Any]:
+    def extra_state_attributes(self) -> dict[str, object]:
         return {"control_mode": self.runtime.mode(self.identifier)}

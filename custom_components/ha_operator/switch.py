@@ -2,16 +2,28 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from homeassistant.components.switch import SwitchEntity
-from homeassistant.core import callback
-from homeassistant.helpers.entity import EntityCategory
+from homeassistant.const import EntityCategory
+from homeassistant.core import HomeAssistant, callback
+from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
+from . import OperatorConfigEntry
 from .entity import OperatorEntity, ResourceEntity
 
+if TYPE_CHECKING:
+    from .runtime import OperatorRuntime
 
-async def async_setup_entry(hass: Any, entry: Any, async_add_entities: Any) -> None:
+# The runtime serializes durable admission and owns one worker per resource, owning all its outputs.
+PARALLEL_UPDATES = 0
+
+
+async def async_setup_entry(
+    hass: HomeAssistant,
+    entry: OperatorConfigEntry,
+    async_add_entities: AddConfigEntryEntitiesCallback,
+) -> None:
     runtime = entry.runtime_data
     for identifier, data in runtime.resources.items():
         if data["kind"] == "switch" and runtime.manual_control(identifier):
@@ -25,8 +37,8 @@ async def async_setup_entry(hass: Any, entry: Any, async_add_entities: Any) -> N
 class DesiredSwitch(OperatorEntity, SwitchEntity):
     """A held logical intent; never a claim that any follower has reached it."""
 
-    def __init__(self, runtime: Any, identifier: str) -> None:
-        super().__init__(runtime, identifier, "desired", "Desired")
+    def __init__(self, runtime: OperatorRuntime, identifier: str) -> None:
+        super().__init__(runtime, identifier, "desired")
 
     @callback
     def _runtime_updated(self) -> None:
@@ -43,7 +55,7 @@ class DesiredSwitch(OperatorEntity, SwitchEntity):
         return self.runtime.desired_value(self.identifier)
 
     @property
-    def extra_state_attributes(self) -> dict[str, Any]:
+    def extra_state_attributes(self) -> dict[str, object]:
         return {
             "state_role": "desired",
             "intent_id": self.identifier,
@@ -60,8 +72,8 @@ class DesiredSwitch(OperatorEntity, SwitchEntity):
 class OperatorSwitch(ResourceEntity, SwitchEntity):
     """Switch exposing physical feedback."""
 
-    def __init__(self, runtime: Any, identifier: str) -> None:
-        super().__init__(runtime, identifier, "managed", None)
+    def __init__(self, runtime: OperatorRuntime, identifier: str) -> None:
+        super().__init__(runtime, identifier, "managed")
 
     @property
     def is_on(self) -> bool | None:
@@ -84,8 +96,8 @@ class PolicySwitch(OperatorEntity, SwitchEntity):
 
     _attr_entity_category = EntityCategory.CONFIG
 
-    def __init__(self, runtime: Any, identifier: str) -> None:
-        super().__init__(runtime, identifier, "enabled", "Enabled")
+    def __init__(self, runtime: OperatorRuntime, identifier: str) -> None:
+        super().__init__(runtime, identifier, "enabled")
 
     @property
     def is_on(self) -> bool:

@@ -18,11 +18,17 @@ from scripts.evidence import (
     SHADOW_SCENARIOS,
     SLEEP_FILES,
     SLEEP_SCENARIOS,
+    STATIC_FILES,
     TEST_FILES,
     WINDOW_FILES,
     WINDOW_SCENARIOS,
     build_evidence,
+    run_static_checks,
+    static_commands,
+    static_identity,
+    static_success,
     validate_lab,
+    validate_static,
     validate_tests,
 )
 from scripts.release import archive_bytes, build, digest
@@ -42,6 +48,21 @@ def complete_evidence(tmp_path):
     (source / "brand/icon.png").write_bytes(b"\x89PNG\r\n\x1a\nfixture")
     write_json(source / "manifest.json", {"domain": "ha_operator", "version": "0.1.0"})
     (root / "uv.lock").write_text("locked")
+    (root / "pyproject.toml").write_text(
+        '[project]\nname = "fixture"\nversion = "0.1.0"\n'
+        '[dependency-groups]\ndev = ["mypy==2.3.1", "ruff==0.16.9"]\n'
+        '[tool.mypy]\npython_version = "3.14"\nstrict = true\n'
+        'follow_imports = "silent"\nignore_missing_imports = false\n'
+        '[tool.ruff]\ntarget-version = "py314"\nline-length = 100\n'
+        '[tool.ruff.lint]\nselect = ["E", "F", "I", "UP", "B", "ASYNC"]\n'
+    )
+    compat = root / "compat/ha2026.9.4"
+    compat.mkdir(parents=True)
+    (compat / "pyproject.toml").write_text(
+        '[project]\nname = "compat-fixture"\nversion = "0.1.0"\n'
+        'dependencies = ["mypy==2.3.1", "ruff==0.16.9"]\n'
+    )
+    (compat / "uv.lock").write_text("compat-locked")
     manifest = build(root, root / "dist")
     manifest["source_commit"] = "a" * 40
     write_json(root / "dist/ha_operator.manifest.json", manifest)
@@ -230,11 +251,18 @@ def complete_evidence(tmp_path):
         write_json(
             directory / "coverage.json",
             {
+                "meta": {"branch_coverage": True},
                 "files": {
                     "custom_components/ha_operator/__init__.py": {
-                        "summary": {"covered_lines": 1, "num_statements": 1}
+                        "summary": {
+                            "covered_lines": 1,
+                            "num_statements": 1,
+                            "num_branches": 0,
+                            "covered_branches": 0,
+                            "missing_branches": 0,
+                        }
                     }
-                }
+                },
             },
         )
         write_json(
@@ -251,6 +279,40 @@ def complete_evidence(tmp_path):
             },
         )
         tests.append(directory)
+    static = []
+    identity = static_identity(root, manifest)
+    for version in ("2026.9.3", "2026.9.4"):
+        directory = root / "artifacts" / f"static-{version}"
+        directory.mkdir()
+        for name, contents in static_success(identity["modules"]).items():
+            (directory / name).write_text(contents + "\n")
+        (directory / "dependencies.txt").write_text(
+            f"homeassistant=={version}\nmypy==2.3.1\nruff==0.16.9\n"
+        )
+        write_json(
+            directory / "result.json",
+            {
+                "ha_version": version,
+                "status": "passed",
+                "exit_code": 0,
+                "exit_codes": dict.fromkeys(static_commands(identity["modules"]), 0),
+                "artifact_sha256": manifest["sha256"],
+                "source_commit": manifest["source_commit"],
+                "identity": identity,
+                "commands": static_commands(identity["modules"]),
+                "environment": {
+                    "ha": version,
+                    "mypy": "2.3.1",
+                    "ruff": "0.16.9",
+                    "python": "3.14.7",
+                },
+                "files": {
+                    name: digest((directory / name).read_bytes())
+                    for name in STATIC_FILES - {"result.json"}
+                },
+            },
+        )
+        static.append(directory)
     mutations = root / "artifacts/mutations.json"
     write_json(
         mutations,
@@ -288,6 +350,7 @@ def complete_evidence(tmp_path):
         root=root,
         labs=labs,
         tests=tests,
+        static=static,
         mutations=mutations,
         validators=validators,
         output=root / "dist/evidence.zip",
@@ -318,7 +381,14 @@ def test_bundle_contains_only_selected_successes_and_preserves_release_bytes(com
             if name.endswith("ha.log"):
                 assert b"accidental-test-token" not in bundle.read(name)
                 assert b"[REDACTED]" in bundle.read(name)
+        assert first["checks"]["strict_static"] == ["2026.9.3", "2026.9.4"]
+        for version in ("2026.9.3", "2026.9.4"):
+            for name in STATIC_FILES:
+                assert f"evidence/static/{version}/{name}" in bundle.namelist()
         for run in arguments["labs"]:
+            if "observability" in run.name:
+                for name in OBSERVABILITY_FILES:
+                    assert f"evidence/lab/{run.name}/{name}" in bundle.namelist()
             for name in SHADOW_FILES:
                 assert f"evidence/lab/{run.name}/{name}" in bundle.namelist()
 
@@ -687,3 +757,167 @@ def test_native_windows_inconsistent_snapshots_cannot_pass(complete_evidence, fi
     write_json(run / "window-native-evidence.json", native)
     with pytest.raises(ValueError, match="Native window evidence"):
         build_evidence(**complete_evidence)
+
+
+@pytest.mark.parametrize("version", ["2026.9.3", "2026.9.4"])
+def test_both_native_static_results_are_required(complete_evidence, version):
+    complete_evidence["static"] = [p for p in complete_evidence["static"] if version not in p.name]
+    with pytest.raises(ValueError, match="both native HA strict static"):
+        build_evidence(**complete_evidence)
+
+
+@pytest.mark.parametrize(
+    "update",
+    [
+        {"status": "failed"},
+        {"exit_code": 1},
+        {"artifact_sha256": "stale"},
+        {"source_commit": "other"},
+        {"identity": {}},
+        {"commands": {}},
+        {"environment": {"ha": "2026.9.3", "mypy": "1.19"}},
+        {"exit_codes": {"mypy": 0}},
+        {"exit_codes": {"mypy": 0, "ruff_lint": 1, "ruff_format": 0}},
+    ],
+)
+def test_static_proof_rejects_failure_staleness_and_scope(complete_evidence, update):
+    path = complete_evidence["static"][0] / "result.json"
+    change(path, **update)
+    with pytest.raises(ValueError):
+        build_evidence(**complete_evidence)
+
+
+@pytest.mark.parametrize("missing", sorted(STATIC_FILES))
+def test_static_proof_requires_every_receipt_and_log(complete_evidence, missing):
+    (complete_evidence["static"][0] / missing).unlink()
+    with pytest.raises((ValueError, FileNotFoundError)):
+        build_evidence(**complete_evidence)
+
+
+@pytest.mark.parametrize(
+    "name", ["static.log", "ruff-lint.log", "ruff-format.log", "dependencies.txt"]
+)
+def test_static_proof_rejects_altered_execution_evidence(complete_evidence, name):
+    (complete_evidence["static"][0] / name).write_text("stale")
+    with pytest.raises(ValueError, match="Static evidence changed"):
+        build_evidence(**complete_evidence)
+
+
+@pytest.mark.parametrize(
+    "name", ["gold-native-mode.png", "gold-native-dom.json", "observability-explain-responses.json"]
+)
+def test_translated_native_observability_files_are_required(complete_evidence, name):
+    run = next(p for p in complete_evidence["labs"] if "observability" in p.name)
+    (run / name).unlink()
+    with pytest.raises(ValueError):
+        build_evidence(**complete_evidence)
+
+
+def test_translated_native_observability_scenario_is_required(complete_evidence):
+    run = next(p for p in complete_evidence["labs"] if "observability" in p.name)
+    scenarios = json.loads((run / "scenarios.json").read_text())
+    write_json(
+        run / "scenarios.json",
+        [s for s in scenarios if s["id"] != "OBS-NATIVE-TRANSLATED-PRESENTATION"],
+    )
+    with pytest.raises(ValueError):
+        build_evidence(**complete_evidence)
+
+
+def test_static_runner_executes_real_pinned_checkers_against_disposable_artifact(
+    complete_evidence, tmp_path
+):
+    import importlib.metadata
+    import sys
+
+    root = complete_evidence["root"]
+    directory = tmp_path / "actual-static-run"
+    version = importlib.metadata.version("homeassistant")
+    result = run_static_checks(root, Path(sys.executable), version, directory)
+    manifest = json.loads((root / "dist/ha_operator.manifest.json").read_text())
+    assert result["status"] == "passed"
+    assert validate_static(directory, manifest, root) == version
+    assert set(result["commands"]) == {"mypy", "ruff_lint", "ruff_format"}
+    assert result["identity"]["modules"] == {
+        "custom_components/ha_operator/__init__.py": digest(
+            (root / "custom_components/ha_operator/__init__.py").read_bytes()
+        )
+    }
+
+
+@pytest.mark.parametrize(
+    "change_config",
+    [
+        "strict = false",
+        "ignore_missing_imports = true",
+        'exclude = ["runtime.py"]',
+        '[[tool.mypy.overrides]]\nmodule = "*"\nignore_errors = true',
+    ],
+)
+def test_static_config_cannot_suppress_required_scope(complete_evidence, change_config):
+    path = complete_evidence["root"] / "pyproject.toml"
+    source = path.read_text()
+    if change_config.startswith("strict"):
+        source = source.replace("strict = true", change_config)
+    elif change_config.startswith("ignore_missing"):
+        source = source.replace("ignore_missing_imports = false", change_config)
+    elif change_config.startswith("exclude"):
+        source = source.replace("[tool.mypy]\n", "[tool.mypy]\n" + change_config + "\n")
+    else:
+        source += "\n" + change_config + "\n"
+    path.write_text(source)
+    with pytest.raises(ValueError, match="strict mypy configuration"):
+        build_evidence(**complete_evidence)
+
+
+def test_static_config_and_lock_binding_reject_changed_bytes(complete_evidence):
+    path = complete_evidence["root"] / "pyproject.toml"
+    path.write_text(path.read_text() + "\n# modified configuration\n")
+    with pytest.raises(ValueError, match="scope is stale"):
+        build_evidence(**complete_evidence)
+
+
+def test_static_proof_rejects_forged_success_for_incomplete_modules(complete_evidence):
+    directory = complete_evidence["static"][0]
+    log = directory / "static.log"
+    log.write_text("Success: no issues found in 0 source files\n")
+    result = json.loads((directory / "result.json").read_text())
+    result["files"]["static.log"] = digest(log.read_bytes())
+    write_json(directory / "result.json", result)
+    with pytest.raises(ValueError, match="every production module"):
+        build_evidence(**complete_evidence)
+
+
+def test_static_proof_rejects_unchecked_production_module(complete_evidence):
+    root = complete_evidence["root"]
+    (root / "custom_components/ha_operator/unchecked.py").write_text("ready = True\n")
+    manifest = json.loads((root / "dist/ha_operator.manifest.json").read_text())
+    with pytest.raises(ValueError, match="omits or differs"):
+        validate_static(complete_evidence["static"][0], manifest, root)
+
+
+def test_static_proof_rejects_changed_lock(complete_evidence):
+    root = complete_evidence["root"]
+    (root / "compat/ha2026.9.4/uv.lock").write_text("changed lock")
+    manifest = json.loads((root / "dist/ha_operator.manifest.json").read_text())
+    with pytest.raises(ValueError, match="dependency lock changed"):
+        validate_static(complete_evidence["static"][0], manifest, root)
+
+
+def test_static_runner_retains_actual_checker_failure(complete_evidence, tmp_path):
+    import importlib.metadata
+    import sys
+
+    root = complete_evidence["root"]
+    (root / "custom_components/ha_operator/__init__.py").write_text(
+        "def missing_annotation():\n    return 1\n"
+    )
+    build(root, root / "dist", replace=True)
+    directory = tmp_path / "failed-static-run"
+    version = importlib.metadata.version("homeassistant")
+    with pytest.raises(ValueError, match="Static check failed: mypy"):
+        run_static_checks(root, Path(sys.executable), version, directory)
+    result = json.loads((directory / "result.json").read_text())
+    assert result["status"] == "failed"
+    assert result["exit_codes"] == {"mypy": 1}
+    assert "no-untyped-def" in (directory / "static.log").read_text()

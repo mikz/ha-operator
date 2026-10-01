@@ -1,0 +1,59 @@
+{
+  "entity": {
+    "sensor": {
+      "desired": {
+        "default": "mdi:target"
+      },
+      "observed": {
+        "default": "mdi:eye"
+      },
+      "reason": {
+        "default": "mdi:text-box-outline"
+      },
+      "control_status": {
+        "default": "mdi:state-machine"
+      },
+      "attempts": {
+        "default": "mdi:counter"
+      },
+      "requirement_status": {
+        "default": "mdi:air-filter"
+      },
+      "provider": {
+        "default": "mdi:source-branch"
+      },
+      "input_phase": {
+        "default": "mdi:state-machine"
+      }
+    },
+    "binary_sensor": {
+      "manual": {
+        "default": "mdi:hand-back-right"
+      },
+      "qualified": {
+        "default": "mdi:check-decagram"
+      }
+    },
+    "select": {
+      "mode": {
+        "default": "mdi:tune"
+      }
+    },
+    "button": {
+      "release": {
+        "default": "mdi:play-circle-outline"
+      },
+      "reconcile": {
+        "default": "mdi:sync"
+      }
+    },
+    "switch": {
+      "enabled": {
+        "default": "mdi:power"
+      },
+      "desired": {
+        "default": "mdi:target"
+      }
+    }
+  }
+}

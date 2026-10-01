@@ -12,6 +12,8 @@ from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from typing import Any, Literal
 
+from .data import NumericStateRecord, TimerStateRecord
+
 
 def _finite(value: float, name: str) -> None:
     if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
@@ -77,7 +79,7 @@ class NumericState:
             return "qualified"
         return "qualifying" if self.due_at is not None else "idle"
 
-    def to_record(self) -> dict[str, Any]:
+    def to_record(self) -> NumericStateRecord:
         return {
             "due_at": self.due_at,
             "qualified": self.qualified,
@@ -209,7 +211,7 @@ class TimerState:
             if self.expires_at <= self.due_at:
                 raise ValueError("timer expiry must follow qualification")
 
-    def to_record(self) -> dict[str, Any]:
+    def to_record(self) -> TimerStateRecord:
         return {
             "episode_id": self.episode_id,
             "phase": self.phase,

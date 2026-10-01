@@ -433,6 +433,24 @@ async def test_http_fault_contract_keeps_controls_private(sim, aiohttp_client, s
     )
 
 
+def test_native_ha_bridge_poll_interval_defaults_and_rejects_subsecond():
+    import voluptuous as vol
+
+    from tests.lab.custom_components.ha_operator_sim import CONFIG_SCHEMA
+
+    settings = {"url": "http://simulator:8099"}
+    assert CONFIG_SCHEMA({"ha_operator_sim": settings})["ha_operator_sim"]["poll_interval"] == 1
+    for interval in (0.05, 0.25, 0.999):
+        with pytest.raises(vol.Invalid):
+            CONFIG_SCHEMA({"ha_operator_sim": {**settings, "poll_interval": interval}})
+    assert (
+        CONFIG_SCHEMA({"ha_operator_sim": {**settings, "poll_interval": 1}})["ha_operator_sim"][
+            "poll_interval"
+        ]
+        == 1
+    )
+
+
 async def test_native_ha_bridge_reports_feedback_not_receipts(
     sim, aiohttp_client, hass, monkeypatch, socket_enabled
 ):

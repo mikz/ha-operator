@@ -16,6 +16,7 @@ from custom_components.ha_operator.core import (
     RequirementMemory,
     Resource,
     Target,
+    TargetValidationError,
     evaluate,
     evaluate_evidence,
     matches,
@@ -23,6 +24,17 @@ from custom_components.ha_operator.core import (
 
 OPEN = Target(position=100)
 CLOSED = Target(position=0)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [("position", 10**399), ("percentage", 10**399), ("percentage", -(10**399))],
+)
+def test_oversized_target_numbers_use_existing_semantic_validation(field, value):
+    with pytest.raises(TargetValidationError) as raised:
+        Target.from_dict({field: value})
+    assert raised.value.translation_key == "finite_number"
+    assert raised.value.translation_placeholders == {"field": field}
 
 
 def run(*, now=10, **kwargs):

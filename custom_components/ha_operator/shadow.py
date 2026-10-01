@@ -15,13 +15,52 @@ import re
 import threading
 from collections.abc import Mapping
 from copy import copy
+from datetime import datetime
 from pathlib import Path
 from time import time
-from typing import Any
+from typing import Literal, TypedDict, TypeGuard, cast, overload
 from uuid import UUID, uuid4
 
+from homeassistant.core import Context, HomeAssistant, State
+
+from . import OperatorConfigEntry
 from .async_utils import async_settle
 from .const import VERSION
+from .data import JSONObject, JSONValue, OperatorConfiguration, RuntimeSnapshot
+
+
+class OccurrenceIdentity(TypedDict):
+    """Only the identity field consumed from existing serialized occurrences."""
+
+    occurrence_id: str
+
+
+class TraceRecord(TypedDict):
+    schema: int
+    sequence: int
+    session_id: str
+    at: float
+    kind: str
+    data: JSONObject
+
+
+class DiskRead(TypedDict):
+    records: list[TraceRecord]
+    invalid: int
+    sequence: int
+    previous: TraceRecord | None
+    first_sequence: int | None
+    more: bool
+    gap: bool
+    history_gap: bool
+
+
+class AppendResult(TypedDict):
+    rotations: int
+    evictions: int
+    oversized: int
+    durable: int
+
 
 SCHEMA = 1
 QUEUE_LIMIT = 512
@@ -111,8 +150,11 @@ def entity_alias(value: str) -> str:
     return value.split(".", 1)[0] + "." + alias(value, "shadow_")
 
 
-def _finite(value: Any) -> bool:
-    return type(value) in (int, float) and math.isfinite(value)
+def _finite(value: object) -> TypeGuard[int | float]:
+    try:
+        return (type(value) is int or type(value) is float) and math.isfinite(value)
+    except OverflowError:
+        return False
 
 
 def component_fingerprint(directory: Path) -> str:
@@ -134,19 +176,20 @@ def component_fingerprint(directory: Path) -> str:
 class Sanitizer:
     """One deterministic graph mapping shared by configuration and observations."""
 
-    def __init__(self, config: dict, extra_entities: list[str]) -> None:
+    def __init__(self, config: OperatorConfiguration, extra_entities: list[str]) -> None:
         self.ids: dict[str, str] = {}
         self.profiles: dict[str, str] = {}
         self.attrs: dict[str, set[str]] = {}
         self.attribute_aliases: dict[str, str] = {}
         self.occurrence_aliases: dict[str, str] = {}
-        for collection, prefix in (
-            ("resources", "r_"),
-            ("policies", "p_"),
-            ("requirements", "q_"),
-            ("intents", "i_"),
-        ):
-            for key in config.get(collection, {}):
+        groups = (
+            (config["resources"], "r_"),
+            (config["policies"], "p_"),
+            (config["requirements"], "q_"),
+            (config.get("intents", {}), "i_"),
+        )
+        for records, prefix in groups:
+            for key in records:
                 self.ids[key] = alias(key, prefix)
         for resource in config["resources"].values():
             for profile in resource.get("profiles", {}):
@@ -158,10 +201,12 @@ class Sanitizer:
         for policy in config["policies"].values():
             self.add_entity(policy.get("eligibility_entity"))
             self.add_entity(policy.get("target_entity"), policy.get("target_attribute"))
-            source = policy.get("input", {})
+            source = policy.get("input")
             self.add_entity(
-                source.get("entity_id"),
-                "unit_of_measurement" if source.get("type") == "qualified_numeric" else None,
+                source["entity_id"] if source is not None else None,
+                "unit_of_measurement"
+                if source is not None and source["type"] == "qualified_numeric"
+                else None,
             )
         for requirement in config["requirements"].values():
             for entity in requirement["activation_entities"]:
@@ -177,7 +222,7 @@ class Sanitizer:
             json.dumps(self.config, sort_keys=True, separators=(",", ":")).encode()
         ).hexdigest()
 
-    def add_entity(self, entity: str | None, attribute: str | None = None) -> None:
+    def add_entity(self, entity: object, attribute: str | None = None) -> None:
         if not isinstance(entity, str) or not _ENTITY.fullmatch(entity):
             return
         self.attrs.setdefault(entity, _BASE_ATTRS | _DOMAIN_ATTRS.get(entity.split(".")[0], set()))
@@ -190,7 +235,7 @@ class Sanitizer:
                 else alias(attribute, "attribute_")
             )
 
-    def value(self, value: Any) -> Any:
+    def value(self, value: object) -> JSONValue:
         if value is None or type(value) is bool or _finite(value):
             return value
         if isinstance(value, str):
@@ -216,29 +261,47 @@ class Sanitizer:
             return {}
         return None
 
-    def target(self, value: dict | None) -> dict | None:
+    def target(self, value: Mapping[str, object] | None) -> JSONObject | None:
         if value is None:
             return None
         return {
-            key: self.profiles.get(item, alias(str(item), "profile_"))
+            key: self.profiles.get(cast(str, item), alias(str(item), "profile_"))
             if key == "profile" and item is not None
             else self.value(item)
             for key, item in value.items()
             if key in {"position", "on", "percentage", "direction", "profile"}
         }
 
-    def configuration(self, config: dict, extras: list[str]) -> dict:
-        result = {group: {} for group in config}
-        for group, records in config.items():
+    def configuration(self, config: OperatorConfiguration, extras: list[str]) -> JSONObject:
+        groups: dict[str, dict[str, JSONObject]] = {group: {} for group in config}
+        # Every owned configuration collection maps identifiers to concrete record maps.
+        # Preserve optional legacy collections and their original iteration order.
+        collections = cast(Mapping[str, Mapping[str, Mapping[str, object]]], config)
+        for group, records in collections.items():
             for key, data in records.items():
                 item = self.fields(data)
                 item["name"] = self.ids[key]
-                result[group][self.ids[key]] = item
+                groups[group][self.ids[key]] = item
+        # The nested values were produced entirely by fields(), not native attributes.
+        result: JSONObject = {
+            key: {name: item for name, item in items.items()} for key, items in groups.items()
+        }
         result["trace_entities"] = [entity_alias(e) for e in extras if e in self.attrs]
         return result
 
-    def fields(self, data: Any, key: str = "", depth: int = 0) -> Any:
+    @overload
+    def fields(
+        self, data: Mapping[str, object], key: Literal[""] = "", depth: Literal[0] = 0
+    ) -> JSONObject: ...
+
+    @overload
+    def fields(self, data: object, key: str = "", depth: int = 0) -> JSONValue: ...
+
+    def fields(self, data: object, key: str = "", depth: int = 0) -> JSONValue:
         """Sanitize known integration-owned records; never whole HA attribute maps."""
+        # Named branches consume the existing owned configuration/model field shapes.
+        # Lookup casts preserve the reflective sanitizer contract (including nulls);
+        # unrecognized/native attribute values still pass through scalar narrowing.
         if depth > 12:
             return None
         if key == "name":
@@ -254,7 +317,9 @@ class Sanitizer:
         }:
             return entity_alias(data) if isinstance(data, str) and data in self.attrs else None
         if key in {"attribute", "target_attribute"}:
-            return self.attribute_aliases.get(data, data)
+            if data is None:
+                return None
+            return self.attribute_aliases.get(cast(str, data), cast(str, data))
         if key in {
             "resource_id",
             "policy_id",
@@ -263,19 +328,25 @@ class Sanitizer:
             "selected_provider",
             "acquiring_provider",
         }:
-            return self.ids.get(data) if data is not None else None
+            return self.ids.get(cast(str, data)) if data is not None else None
         if key == "on_targets":
-            return [self.ids.get(item) for item in data]
+            return [self.ids.get(cast(str, item)) for item in cast(list[object], data)]
         if key == "source_id" and isinstance(data, str):
             return self.ids.get(data, self.value(data))
         if key in {"request_id", "occurrence_id", "context_id", "episode_id", "fingerprint"}:
-            if key in {"occurrence_id", "episode_id"} and data in self.occurrence_aliases:
-                return self.occurrence_aliases[data]
+            if (
+                key in {"occurrence_id", "episode_id"}
+                and data is not None
+                and cast(str, data) in self.occurrence_aliases
+            ):
+                return self.occurrence_aliases[cast(str, data)]
             prefix = "occurrence_id" if key == "episode_id" else key
             return alias(str(data), prefix + "_") if data is not None else None
         if key == "profile":
             return (
-                self.profiles.get(data, alias(str(data), "profile_")) if data is not None else None
+                self.profiles.get(cast(str, data), alias(str(data), "profile_"))
+                if data is not None
+                else None
             )
         if key == "profiles" and isinstance(data, dict):
             return {
@@ -287,11 +358,14 @@ class Sanitizer:
                 return [entity_alias(entity) for entity in data if entity in self.attrs]
             return {
                 entity_alias(entity): value
-                for entity, value in data.items()
+                for entity, value in cast(Mapping[str, JSONValue], data).items()
                 if entity in self.attrs
             }
         if key == "failed_until":
-            return [[self.ids.get(item[0]), item[1]] for item in data]
+            return [
+                [self.ids.get(item[0]), item[1]]
+                for item in cast(tuple[tuple[str, float], ...], data)
+            ]
         if key == "source" and isinstance(data, str):
             if ":" not in data:
                 return (
@@ -361,7 +435,9 @@ class Sanitizer:
             return str(data)[:128] if data is not None else None
         return self.value(data)
 
-    def engine_frames(self, engine: dict, result: dict) -> tuple[dict, dict, dict]:
+    def engine_frames(
+        self, engine: Mapping[str, object], result: Mapping[str, object]
+    ) -> tuple[JSONObject, JSONObject, JSONObject]:
         """Preserve stable-ID tie ordering with snapshot-local opaque aliases.
 
         Configuration aliases remain stable across records. Snapshot aliases add
@@ -375,17 +451,24 @@ class Sanitizer:
         local.occurrence_aliases = {
             key: f"occurrence_id_{rank:08x}" + hashlib.sha256(key.encode()).hexdigest()[:12]
             for rank, key in enumerate(
-                sorted({item["occurrence_id"] for item in engine["occurrences"]})
+                sorted(
+                    {
+                        item["occurrence_id"]
+                        # Runtime emits asdict(Occurrence); only its text identity is read.
+                        for item in cast(list[OccurrenceIdentity], engine["occurrences"])
+                    }
+                )
             )
         }
-        aliases = {self.ids[key]: value for key, value in local.ids.items()}
+        aliases: JSONObject = {self.ids[key]: value for key, value in local.ids.items()}
         aliases.update(
             {alias(key, "occurrence_id_"): value for key, value in local.occurrence_aliases.items()}
         )
         return local.fields(engine), local.fields(result), aliases
 
-    def intent(self, state: dict) -> dict:
-        result = {}
+    def intent(self, state: RuntimeSnapshot) -> JSONObject:
+        result: JSONObject = {}
+        maps: Mapping[str, object] = state
         for key in (
             "manuals",
             "modes",
@@ -395,7 +478,9 @@ class Sanitizer:
             "return_monitors",
         ):
             result[key] = {
-                self.ids[k]: self.fields(v) for k, v in state.get(key, {}).items() if k in self.ids
+                self.ids[k]: self.fields(v)
+                for k, v in cast(Mapping[str, object], maps.get(key, {})).items()
+                if k in self.ids
             }
         result["occurrences"] = [self.fields(value) for value in state["occurrences"].values()]
         return result
@@ -403,12 +488,12 @@ class Sanitizer:
     def input(
         self,
         entity: str,
-        state: Any,
+        state: State | None,
         event_type: str,
-        context: Any = None,
-        old_reported: Any = None,
-        reported: Any = None,
-    ) -> dict:
+        context: Context | None = None,
+        old_reported: datetime | None = None,
+        reported: datetime | None = None,
+    ) -> JSONObject:
         attrs = (
             {}
             if state is None
@@ -453,8 +538,13 @@ class TraceDisk:
     def _file(self, index: int) -> Path:
         return self.path / f"trace-{index}.jsonl"
 
-    def _read(self, after: int | None = None, limit: int = 0, through: int | None = None) -> dict:
-        records, invalid, maximum, first, previous, more, size = [], 0, 0, None, None, False, 0
+    def _read(
+        self, after: int | None = None, limit: int = 0, through: int | None = None
+    ) -> DiskRead:
+        records: list[TraceRecord] = []
+        previous: TraceRecord | None = None
+        first: int | None = None
+        invalid, maximum, more, size = 0, 0, False, 0
         gap, history_gap = False, False
         expected = 1 if after is None else after + 1
         for index in reversed(range(self.segments)):
@@ -495,6 +585,9 @@ class TraceDisk:
                             ):
                                 raise ValueError
                             UUID(record["session_id"])
+                            # JSON decoding and the complete existing envelope checks above
+                            # establish this journal record; nested data remains JSON values.
+                            record = cast(TraceRecord, record)
                         except ValueError, KeyError, TypeError, AttributeError:
                             invalid += 1
                             continue
@@ -540,7 +633,7 @@ class TraceDisk:
             "history_gap": history_gap or bool(invalid),
         }
 
-    def load(self) -> dict:
+    def load(self) -> DiskRead:
         with self.lock:
             created = not self.path.exists()
             self.path.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -571,7 +664,7 @@ class TraceDisk:
                 self._file(index).replace(self._file(index + 1))
         return evicted
 
-    def append(self, records: list[dict]) -> dict:
+    def append(self, records: list[TraceRecord]) -> AppendResult:
         with self.lock:
             rotations, evictions, oversized, durable = 0, 0, 0, 0
             directory_changed = False
@@ -622,7 +715,9 @@ class TraceDisk:
                 "durable": durable,
             }
 
-    def export(self, after: int | None, limit: int, through: int | None = None) -> dict:
+    def export(
+        self, after: int | None, limit: int, through: int | None = None
+    ) -> dict[str, object]:
         with self.lock:
             state = self._read(after, limit, through)
         page = state["records"]
@@ -637,7 +732,13 @@ class TraceDisk:
 class ShadowTrace:
     """Synchronous event copying plus independent bounded asynchronous persistence."""
 
-    def __init__(self, hass: Any, entry: Any, config: dict, extras: list[str]) -> None:
+    def __init__(
+        self,
+        hass: HomeAssistant,
+        entry: OperatorConfigEntry,
+        config: OperatorConfiguration,
+        extras: list[str],
+    ) -> None:
         self.hass, self.entry = hass, entry
         self.enabled = bool(entry.options.get("trace_enabled", False))
         self.sanitizer = Sanitizer(config, extras)
@@ -645,21 +746,22 @@ class ShadowTrace:
         self.session_id = str(uuid4())
         self.sequence = self.durable_sequence = 0
         self.dropped = self.write_errors = self.rotations = 0
-        self.last_heartbeat = self.last_write = None
-        self.queue: asyncio.Queue[dict] = asyncio.Queue(QUEUE_LIMIT)
+        self.last_heartbeat: float | None = None
+        self.last_write: float | None = None
+        self.queue: asyncio.Queue[TraceRecord] = asyncio.Queue(QUEUE_LIMIT)
         self._pending_gap = 0
         self._closing = False
-        self._writer: asyncio.Task | None = None
-        self._closed_task: asyncio.Task | None = None
+        self._writer: asyncio.Task[None] | None = None
+        self._closed_task: asyncio.Task[None] | None = None
         self._flush = asyncio.Condition()
         self._processed_sequence = 0
         self._inflight = False
         self._unclean_previous = False
         self._history_gap = False
-        self.component_sha256 = None
-        self._last_decision = None
+        self.component_sha256: str | None = None
+        self._last_decision: bytes | None = None
 
-    async def async_start(self, intent: dict, shadow_lock: bool) -> None:
+    async def async_start(self, intent: RuntimeSnapshot, shadow_lock: bool) -> None:
         if not self.enabled:
             return
         previous = None
@@ -703,7 +805,7 @@ class ShadowTrace:
             self.hass, self._run(), "ha_operator:shadow_trace"
         )
 
-    def record(self, kind: str, data: dict, *, at: float | None = None) -> None:
+    def record(self, kind: str, data: Mapping[str, object], *, at: float | None = None) -> None:
         if not self.enabled or self._closing:
             return
         self.sequence += 1
@@ -720,7 +822,9 @@ class ShadowTrace:
             encoded = json.dumps(record, allow_nan=False, separators=(",", ":"))
             if len(encoded.encode()) + 1 > RECORD_LIMIT:
                 raise ValueError("Trace record exceeds byte limit")
-            self.queue.put_nowait(json.loads(encoded))
+            self.queue.put_nowait(
+                cast(TraceRecord, json.loads(encoded))
+            )  # Detached owned envelope.
         except asyncio.QueueFull, ValueError, TypeError:
             self.dropped += 1
             self._pending_gap += 1
@@ -728,12 +832,12 @@ class ShadowTrace:
     def input(
         self,
         entity: str,
-        state: Any,
+        state: State | None,
         event_type: str,
         at: float | None = None,
-        context: Any = None,
-        old_reported: Any = None,
-        reported: Any = None,
+        context: Context | None = None,
+        old_reported: datetime | None = None,
+        reported: datetime | None = None,
     ) -> None:
         if self.enabled and entity in self.sanitizer.attrs:
             self.record(
@@ -742,12 +846,13 @@ class ShadowTrace:
                 at=at,
             )
 
-    def event(self, kind: str, data: dict) -> None:
+    def event(self, kind: str, data: Mapping[str, object]) -> None:
         if self.enabled:
             try:
                 if kind == "decision":
                     engine, result, aliases = self.sanitizer.engine_frames(
-                        data["engine"], data["engine_result"]
+                        cast(Mapping[str, object], data["engine"]),
+                        cast(Mapping[str, object], data["engine_result"]),
                     )
                     sanitized = self.sanitizer.fields(
                         {
@@ -776,7 +881,7 @@ class ShadowTrace:
                 self.dropped += 1
                 self._pending_gap += 1
 
-    def health(self) -> dict:
+    def health(self) -> dict[str, object]:
         return {
             "enabled": self.enabled,
             "healthy": not self.write_errors and not self.dropped,
@@ -854,7 +959,7 @@ class ShadowTrace:
                 count, self._pending_gap = self._pending_gap, 0
                 self.record("gap", {"lost_records": count, "health": self.health()})
 
-    async def async_export(self, after: int | None = None, limit: int = 100) -> dict:
+    async def async_export(self, after: int | None = None, limit: int = 100) -> dict[str, object]:
         if after is not None and (type(after) is not int or after < 0):
             raise ValueError("after must be a non-negative sequence")
         if type(limit) is not int or not 1 <= limit <= 1000:

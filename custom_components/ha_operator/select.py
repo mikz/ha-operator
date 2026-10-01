@@ -2,16 +2,30 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING
 
 from homeassistant.components.select import SelectEntity
+from homeassistant.const import EntityCategory
+from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ServiceValidationError
-from homeassistant.helpers.entity import EntityCategory
+from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
+from . import OperatorConfigEntry
+from .const import DOMAIN
 from .entity import OperatorEntity
 
+if TYPE_CHECKING:
+    from .runtime import OperatorRuntime
 
-async def async_setup_entry(hass: Any, entry: Any, async_add_entities: Any) -> None:
+# The runtime serializes durable admission and owns one worker per resource, owning all its outputs.
+PARALLEL_UPDATES = 0
+
+
+async def async_setup_entry(
+    hass: HomeAssistant,
+    entry: OperatorConfigEntry,
+    async_add_entities: AddConfigEntryEntitiesCallback,
+) -> None:
     for identifier in entry.runtime_data.resources:
         async_add_entities(
             [ModeSelect(entry.runtime_data, identifier)], config_subentry_id=identifier
@@ -24,8 +38,8 @@ class ModeSelect(OperatorEntity, SelectEntity):
     _attr_options = ["observe", "live"]
     _attr_entity_category = EntityCategory.CONFIG
 
-    def __init__(self, runtime: Any, identifier: str) -> None:
-        super().__init__(runtime, identifier, "mode", "Control mode")
+    def __init__(self, runtime: OperatorRuntime, identifier: str) -> None:
+        super().__init__(runtime, identifier, "mode")
 
     @property
     def current_option(self) -> str:
@@ -33,5 +47,7 @@ class ModeSelect(OperatorEntity, SelectEntity):
 
     async def async_select_option(self, option: str) -> None:
         if option not in self.options:
-            raise ServiceValidationError("Choose observe or live")
+            raise ServiceValidationError(
+                translation_domain=DOMAIN, translation_key="invalid_select_option"
+            )
         await self.runtime.async_set_mode(self.identifier, option)

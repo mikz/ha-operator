@@ -199,6 +199,29 @@ async def test_occurrence_submit_response_suppression_and_no_catchup(hass, integ
         await call(hass, "submit_occurrence", {**occurrence, "policy_id": "missing"})
 
 
+@pytest.mark.parametrize("action", ["submit_occurrence", "skip_occurrence"])
+async def test_oversized_occurrence_expiry_rejects_before_durable_admission(
+    hass, integration, tmp_path, action
+):
+    entry, raw = integration
+    await async_activate(hass)
+    path = tmp_path / f"ha_operator.{entry.entry_id}.json"
+    before = path.read_bytes()
+    with pytest.raises(ServiceValidationError) as raised:
+        await call(
+            hass,
+            action,
+            {"policy_id": "morning", "occurrence_id": "oversized", "expires_at": 10**399},
+        )
+    assert raised.value.translation_domain == DOMAIN
+    assert raised.value.translation_key == "finite_number"
+    assert raised.value.translation_placeholders == {"field": "expires_at"}
+    await hass.async_block_till_done()
+    assert path.read_bytes() == before
+    assert entry.runtime_data.fault is None and raw.commands == []
+    assert all(not task.done() for task in entry.runtime_data._tasks)
+
+
 async def test_action_rejects_unloaded_entry(hass, integration):
     entry, _ = integration
     assert await hass.config_entries.async_unload(entry.entry_id)

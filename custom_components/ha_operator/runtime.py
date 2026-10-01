@@ -8,23 +8,27 @@ import json
 import logging
 import math
 from collections import deque
-from collections.abc import Callable
+from collections.abc import Callable, Iterable, Mapping
 from copy import deepcopy
 from dataclasses import asdict, replace
+from datetime import datetime
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, TypedDict, TypeGuard, cast
 from uuid import uuid4
 
 from homeassistant.components import persistent_notification
+from homeassistant.const import EVENT_STATE_CHANGED, EVENT_STATE_REPORTED
 from homeassistant.core import (
-    EVENT_STATE_CHANGED,
-    EVENT_STATE_REPORTED,
     Context,
+    Event,
+    EventStateChangedData,
+    EventStateReportedData,
     HassJob,
     HomeAssistant,
+    State,
     callback,
 )
-from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
+from homeassistant.exceptions import ConfigEntryError, HomeAssistantError, ServiceValidationError
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.event import (
@@ -35,24 +39,45 @@ from homeassistant.helpers.event import (
 from homeassistant.helpers.start import async_at_started
 from homeassistant.util import dt as dt_util
 
-from .adapters import DISPATCH_PARENT, create_adapter
+from . import OperatorConfigEntry
+from .adapters import DISPATCH_PARENT, Adapter, create_adapter
 from .async_utils import async_settle
 from .configuration import validate_configuration
 from .const import DOMAIN
 from .core import (
     Decision,
+    EngineInputs,
     Evidence,
     ManualLease,
+    Observation,
     Occurrence,
     Policy,
     Provider,
     Requirement,
+    RequirementMemory,
+    RequirementResult,
     Resource,
     Target,
+    TargetValidationError,
     evaluate,
     evaluate_evidence,
 )
-from .intents import apply_command
+from .data import (
+    AcceptedRequestReceipt,
+    JSONObject,
+    NumericInputConfig,
+    OccurrenceRecord,
+    PolicyConfig,
+    PolicyInputRecord,
+    RequestReceipt,
+    RequirementConfig,
+    ResourceConfig,
+    RuntimeSnapshot,
+    StoredSnapshot,
+    TargetData,
+    TimerInputConfig,
+)
+from .intents import IntentValidationError, apply_command
 from .policy_inputs import (
     NumericInput,
     NumericReport,
@@ -66,39 +91,81 @@ from .policy_inputs import (
     timer_transition,
 )
 from .provenance import Selection, selection_for, target_label
-from .return_monitor import ReturnMonitorInput, ReturnMonitorState, return_transition
+from .return_monitor import (
+    ReturnMonitorInput,
+    ReturnMonitorState,
+    ReturnMonitorTransition,
+    return_transition,
+)
 from .shadow import ShadowTrace
 from .storage import IntentStore, IntentStoreError
 
 _LOGGER = logging.getLogger(__name__)
 _UNKNOWN = {"unknown", "unavailable"}
 
+type ContextKey = tuple[str, str | None] | tuple[str, str | None, str | None]
+type StateEvent = Event[EventStateChangedData] | Event[EventStateReportedData]
+type PolicyEvent = NumericReport | TimerEvent | None
+
+
+class PolicyInputMaps(TypedDict):
+    """The existing two-map policy-input preview and mutation surface."""
+
+    policy_inputs: dict[str, PolicyInputRecord]
+    occurrences: dict[str, OccurrenceRecord]
+
+
+class LastCommand(TypedDict):
+    target: TargetData
+    at: float
+
+
+def _is_state_event(value: StateEvent | datetime) -> TypeGuard[StateEvent]:
+    """Preserve the existing distinction between native state and deadline callbacks."""
+    return hasattr(value, "data")
+
+
+def _input_episode(record: PolicyInputRecord) -> str | None:
+    return record["state"].get("episode_id") if record["type"] == "timer_episode" else None
+
 
 def _now() -> float:
     return dt_util.utcnow().timestamp()
 
 
-def _number(value: Any, label: str) -> float:
-    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
-        raise ServiceValidationError(f"{label} must be a finite number")
+def _number(value: object, label: str) -> float:
+    try:
+        finite = isinstance(value, (int, float)) and math.isfinite(value)
+    except OverflowError:
+        finite = False
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not finite:
+        raise ServiceValidationError(
+            translation_domain=DOMAIN,
+            translation_key="finite_number",
+            translation_placeholders={"field": label},
+        )
     return float(value)
 
 
-def _validate_saved_state(state: dict) -> None:
+def _validate_saved_state(state: StoredSnapshot) -> RuntimeSnapshot:
     """Validate intent records before publishing or pruning a loaded snapshot."""
 
-    def record(item):
+    def record(item: object) -> dict[str, Any]:
         if not isinstance(item, dict):
             raise ValueError("Saved intent record must be an object")
         return item
 
-    def text(value, label):
+    def text(value: object, label: str) -> str:
         if not isinstance(value, str) or not 1 <= len(value) <= 128:
             raise ValueError(f"Saved {label} must contain 1 to 128 characters")
         return value
 
     for key, value in state["manuals"].items():
         item = record(value)
+        for field in ("request_id", "source"):
+            metadata = item.get(field)
+            if metadata is not None and not isinstance(metadata, str):
+                raise ValueError(f"Saved manual {field} must be text or null")
         ManualLease(
             key,
             item["mode"],
@@ -148,11 +215,15 @@ def _validate_saved_state(state: dict) -> None:
         # Reuse the finite-or-explicit-indefinite deadline contract.
         ManualLease(receipt["resource_id"], "hands_off", expires_at=receipt["expires_at"])
 
+    # The current semantic checks have run. Falsey legacy targets retain JSONValue
+    # rather than claiming that their original saved representation was rewritten.
+    return cast(RuntimeSnapshot, state)
+
 
 class OperatorRuntime:
     """Recompute current intent; never enqueue historical target commands."""
 
-    def __init__(self, hass: HomeAssistant, entry) -> None:
+    def __init__(self, hass: HomeAssistant, entry: OperatorConfigEntry) -> None:
         self.hass, self.entry = hass, entry
         configured = validate_configuration(entry.subentries)
         self.resources = configured["resources"]
@@ -162,16 +233,17 @@ class OperatorRuntime:
         self._shadow_lock_latched = bool(entry.options.get("shadow_lock", False))
         self._trace = ShadowTrace(hass, entry, configured, entry.options.get("trace_entities", []))
         self.store = IntentStore(hass, Path(hass.config.path(f"ha_operator.{entry.entry_id}.json")))
-        self.observations: dict[str, Any] = {}
+        self.observations: dict[str, Observation] = {}
+        self._source_availability: dict[str, bool] = {}
         self.decisions: dict[str, Decision] = {}
         self.selections: dict[str, Selection] = {}
-        self._contexts: dict[tuple, Context] = {}
-        self.requirement_results: dict[str, Any] = {}
-        self._requirement_details: dict[str, Any] = {}
-        self.last_commands: dict[str, dict] = {}
+        self._contexts: dict[ContextKey, Context] = {}
+        self.requirement_results: dict[str, RequirementResult] = {}
+        self._requirement_details: dict[str, dict[str, object]] = {}
+        self.last_commands: dict[str, LastCommand] = {}
         self.next_attempts: dict[str, float] = {}
         self.attempts: dict[str, int] = {}
-        self.history: deque[dict] = deque(maxlen=100)
+        self.history: deque[dict[str, object]] = deque(maxlen=100)
         self.fault: str | None = None
         self._adapters = {
             key: create_adapter(hass, key, config) for key, config in self.resources.items()
@@ -186,28 +258,30 @@ class OperatorRuntime:
         self._next_evaluation: float | None = None
         self._wake = {key: asyncio.Event() for key in self.resources}
         self._actuator_locks = {key: asyncio.Lock() for key in self.resources}
-        self._tasks: list[asyncio.Task] = []
-        self._stop_tasks: set[asyncio.Task] = set()
-        self._close_task: asyncio.Task | None = None
+        self._tasks: list[asyncio.Task[None]] = []
+        self._stop_tasks: set[asyncio.Task[None]] = set()
+        self._close_task: asyncio.Task[bool] | None = None
         self._close_interrupts_timer_inputs = False
         self._generation = dict.fromkeys(self.resources, 0)
-        self._signatures: dict[str, Any] = {}
+        self._signatures: dict[str, tuple[Target | None, str | None, str | None, str, bool]] = {}
         self._last_send: dict[str, float] = {}
         self._motion_started: dict[str, float] = {}
-        self._last_identity: dict[str, Any] = {}
+        self._last_identity: dict[str, tuple[Target, str | None]] = {}
         self._applying: set[str] = set()
         self._errors: dict[str, str] = {}
         self._emergency_hands_off: dict[str, ManualLease] = {}
-        self._memory: dict[str, Any] = {}
+        self._memory: dict[str, RequirementMemory] = {}
         self._closed = False
-        self._state = self.store.state
-        self._input_flush: asyncio.Task | None = None
+        self._initialized = False
+        # A newly constructed store contains only the known empty maps.
+        self._state = cast(RuntimeSnapshot, self.store.state)
+        self._input_flush: asyncio.Task[None] | None = None
         self._pending_resources: set[str] = set()
-        self._policy_events: deque[tuple[str, Any, float, Context | None, bool]] = deque()
+        self._policy_events: deque[tuple[str, PolicyEvent, float, Context | None, bool]] = deque()
         self._input_ingress = dict.fromkeys(self.resources, 0)
         self._input_processed = dict.fromkeys(self.resources, 0)
         self._policy_sources: dict[str, list[str]] = {}
-        self._input_fingerprints = {}
+        self._input_fingerprints: dict[str, str] = {}
         self._timer_states: dict[str, tuple[str, str | None, float | None]] = {}
         self._timer_episodes: dict[str, str] = {}
         self._numeric_reports: dict[str, NumericReport] = {}
@@ -228,7 +302,7 @@ class OperatorRuntime:
             for key, config in self.resources.items()
             if config.get("return_monitor")
         }
-        self._return_notifications: dict[str, tuple[float, float] | None] = {}
+        self._return_notifications: dict[str, tuple[float | None, float | None] | None] = {}
         for policy_id, config in self.policies.items():
             if source := config.get("input"):
                 self._policy_sources.setdefault(source["entity_id"], []).append(policy_id)
@@ -252,23 +326,25 @@ class OperatorRuntime:
             for entity_id in feedback:
                 self._feedback_resources.setdefault(entity_id, set()).add(identifier)
             inputs = feedback | {
-                config[key] for key in ("restriction_entity", "fault_entity") if config.get(key)
+                source_id
+                for source_id in (config.get("restriction_entity"), config.get("fault_entity"))
+                if source_id is not None
             }
             for entity_id in inputs:
                 dependencies.setdefault(entity_id, set()).add(identifier)
-        for config in self.policies.values():
-            if source := config.get("input"):
-                dependencies.setdefault(source["entity_id"], set()).add(config["resource_id"])
-            for key in ("eligibility_entity", "target_entity"):
-                if entity_id := config.get(key):
-                    dependencies.setdefault(entity_id, set()).add(config["resource_id"])
+        for policy in self.policies.values():
+            if source := policy.get("input"):
+                dependencies.setdefault(source["entity_id"], set()).add(policy["resource_id"])
+            for entity_id in (policy.get("eligibility_entity"), policy.get("target_entity")):
+                if entity_id:
+                    dependencies.setdefault(entity_id, set()).add(policy["resource_id"])
         groups = []
-        for config in self.requirements.values():
-            owners = {p["resource_id"] for p in config["providers"] if p.get("resource_id")}
+        for requirement in self.requirements.values():
+            owners = {p["resource_id"] for p in requirement["providers"] if p.get("resource_id")}
             groups.append(owners)
-            inputs = set(config["activation_entities"]) | {
+            inputs = set(requirement["activation_entities"]) | {
                 evidence["entity_id"]
-                for provider in config["providers"]
+                for provider in requirement["providers"]
                 for evidence in provider["evidence"]
             }
             for entity_id in inputs:
@@ -285,15 +361,19 @@ class OperatorRuntime:
                         changed = True
         return dependencies
 
-    def _input_record(self, policy_id: str, state: NumericState | TimerState) -> dict:
-        return {
-            "type": self.policies[policy_id]["input"]["type"],
-            "fingerprint": self._input_fingerprints[policy_id],
-            "state": state.to_record(),
-        }
+    def _input_record(self, policy_id: str, state: NumericState | TimerState) -> PolicyInputRecord:
+        # Each caller pairs this state with this input's own transition or recovery.
+        return cast(
+            PolicyInputRecord,
+            {
+                "type": self.policies[policy_id]["input"]["type"],
+                "fingerprint": self._input_fingerprints[policy_id],
+                "state": state.to_record(),
+            },
+        )
 
     @staticmethod
-    def _numeric_report(source: dict, native) -> NumericReport:
+    def _numeric_report(source: NumericInputConfig, native: State | None) -> NumericReport:
         value = None
         if (
             native is not None
@@ -312,7 +392,9 @@ class OperatorRuntime:
         return NumericReport(value)
 
     @callback
-    def _capture_timer_state(self, entity_id, native, previous) -> None:
+    def _capture_timer_state(
+        self, entity_id: str, native: State | None, previous: State | None
+    ) -> None:
         if native is None:
             self._timer_states[entity_id] = ("unknown", None, None)
             return
@@ -325,12 +407,12 @@ class OperatorRuntime:
         )
 
     @callback
-    def _timer_event(self, event) -> None:
+    def _timer_event(self, event: Event[Mapping[str, Any]]) -> None:
         if self._closed:
             return
         entity_id = event.data["entity_id"]
         phase, previous, finish = self._timer_states.get(entity_id, ("unknown", None, None))
-        kind = event.event_type.partition(".")[2]
+        kind = str(event.event_type).partition(".")[2]
         for policy_id in self._policy_sources[entity_id]:
             source = self.policies[policy_id]["input"]
             if source["type"] != "timer_episode":
@@ -395,7 +477,9 @@ class OperatorRuntime:
     async def _recover_policy_inputs(self) -> None:
         now = _now()
 
-        def recover(state):
+        def recover(raw_state: StoredSnapshot) -> None:
+            # async_start validated all saved semantics before recovery enters the store lock.
+            state = cast(RuntimeSnapshot, raw_state)
             for policy_id in set(state["policy_inputs"]) & (
                 set(self.policies) - set(self._input_fingerprints)
             ):
@@ -420,7 +504,8 @@ class OperatorRuntime:
                             {
                                 "policy_id": policy_id,
                                 "occurrence_id": old.episode_id,
-                                "expires_at": old.expires_at,
+                                # Every saved non-idle episode validates a finite expiry.
+                                "expires_at": cast(float, old.expires_at),
                             },
                         )
                         item["skipped"] = True
@@ -428,13 +513,13 @@ class OperatorRuntime:
                 if source["type"] == "qualified_numeric":
                     recovered = (
                         recover_numeric(NumericState.from_record(record["state"]))
-                        if matching
+                        if matching and record is not None
                         else NumericState()
                     )
                 else:
                     recovered = (
                         recover_timer(TimerState.from_record(record["state"]), now=now).state
-                        if matching
+                        if matching and record is not None
                         else TimerState()
                     )
                     if recovered.episode_id is not None:
@@ -443,20 +528,29 @@ class OperatorRuntime:
 
         await self.store.async_update(recover, skip_unchanged=True)
 
-    async def _apply_policy_input(self, policy_id, event, captured_at, context, admissible) -> None:
+    async def _apply_policy_input(
+        self,
+        policy_id: str,
+        event: PolicyEvent,
+        captured_at: float,
+        context: Context | None,
+        admissible: bool,
+    ) -> None:
         if self._closed or self.fault:
             return
         config = self.policies[policy_id]
         source = config["input"]
 
-        def mutate(state):
+        def mutate(state: PolicyInputMaps) -> None:
             record = state["policy_inputs"][policy_id]
             final: NumericState | TimerState
             if source["type"] == "qualified_numeric":
+                # Only numeric-source callbacks enqueue NumericReport; ticks enqueue None.
+                numeric_event = cast(NumericReport | None, event)
                 numeric = numeric_transition(
                     NumericInput(source["threshold"], source["qualification_seconds"]),
                     NumericState.from_record(record["state"]),
-                    event,
+                    numeric_event,
                     now=captured_at,
                 )
                 # Process a report at its captured time, then catch up without inventing evidence.
@@ -471,10 +565,12 @@ class OperatorRuntime:
                     source["qualification_seconds"], source["request_seconds"]
                 )
                 previous = TimerState.from_record(record["state"])
-                if event is not None and event.kind == "start":
-                    if json.dumps([policy_id, event.episode_id]) in state["occurrences"]:
+                # Only timer lifecycle callbacks enqueue TimerEvent; ticks enqueue None.
+                timer_event = cast(TimerEvent | None, event)
+                if timer_event is not None and timer_event.kind == "start":
+                    if json.dumps([policy_id, timer_event.episode_id]) in state["occurrences"]:
                         return
-                transition = timer_transition(timer_config, previous, event, now=captured_at)
+                transition = timer_transition(timer_config, previous, timer_event, now=captured_at)
                 tick = timer_transition(timer_config, transition.state, None, now=_now())
                 changes = (*transition.occurrence_changes, *tick.occurrence_changes)
                 final = tick.state
@@ -516,13 +612,15 @@ class OperatorRuntime:
                                 now=_now(),
                             )
                             final = rejected.state
-                        state["occurrences"][key] = {
+                        occurrence: OccurrenceRecord = {
                             "policy_id": policy_id,
                             "occurrence_id": change.episode_id,
                             "expires_at": change.expires_at,
                             "skipped": target is None,
-                            **({"target": target.to_dict()} if target is not None else {}),
                         }
+                        if target is not None:
+                            occurrence["target"] = target.to_dict()
+                        state["occurrences"][key] = occurrence
             state["policy_inputs"][policy_id] = self._input_record(policy_id, final)
 
         prior_episode = self._state["policy_inputs"][policy_id]["state"].get("episode_id")
@@ -531,7 +629,7 @@ class OperatorRuntime:
             for key, item in self._state["occurrences"].items()
             if item["policy_id"] == policy_id
         }
-        original = {
+        original: PolicyInputMaps = {
             "policy_inputs": {policy_id: self._state["policy_inputs"][policy_id]},
             "occurrences": original_occurrences,
         }
@@ -563,10 +661,21 @@ class OperatorRuntime:
     async def async_start(self) -> None:
         try:
             await self.store.async_load(expected_existing=self.entry.data.get("initialized", False))
-            _validate_saved_state(self.store.state)
+            try:
+                self._state = _validate_saved_state(self.store.state)
+                for policy_id, fingerprint in self._input_fingerprints.items():
+                    record = self._state["policy_inputs"].get(policy_id)
+                    if (
+                        record is not None
+                        and record["fingerprint"] == fingerprint
+                        and record["type"] != self.policies[policy_id]["input"]["type"]
+                    ):
+                        raise ValueError("Saved policy input type disagrees with its fingerprint")
+            except (ValueError, TypeError, KeyError, OverflowError) as err:
+                raise IntentStoreError("Saved intent records are invalid") from err
             if any(key not in self.store.state["intents"] for key in self.intents):
 
-                def initialize(state):
+                def initialize(state: StoredSnapshot) -> None:
                     for key, config in self.intents.items():
                         state["intents"].setdefault(key, config["initial_value"])
 
@@ -586,44 +695,52 @@ class OperatorRuntime:
             removed_monitors = (
                 set(self.store.state["return_monitors"]) - self._return_fingerprints.keys()
             )
+
             # Preserve deadlines only when the monitor settings and raw source agree.
-            await self.store.async_update(
-                lambda state: state.update(
-                    return_monitors={
-                        key: state["return_monitors"][key]
-                        if key in state["return_monitors"]
-                        and state["return_monitors"][key]["fingerprint"] == fingerprint
-                        else {"fingerprint": fingerprint, "state": ReturnMonitorState().to_record()}
-                        for key, fingerprint in self._return_fingerprints.items()
-                    }
-                ),
-                skip_unchanged=True,
-            )
+            def initialize_monitors(state: StoredSnapshot) -> None:
+                state["return_monitors"] = {
+                    key: state["return_monitors"][key]
+                    if key in state["return_monitors"]
+                    and state["return_monitors"][key]["fingerprint"] == fingerprint
+                    else {"fingerprint": fingerprint, "state": ReturnMonitorState().to_record()}
+                    for key, fingerprint in self._return_fingerprints.items()
+                }
+
+            await self.store.async_update(initialize_monitors, skip_unchanged=True)
             for key in removed_monitors:
                 persistent_notification.async_dismiss(
                     self.hass, f"ha_operator_{self.entry.entry_id}_{key}_return"
                 )
             now = _now()
 
-            def prune(state):
+            def prune(raw_state: StoredSnapshot) -> None:
+                # Only startup-owned mutations have followed the saved-intent validation.
+                state = cast(RuntimeSnapshot, raw_state)
                 state["manuals"] = {
                     key: item
                     for key, item in state["manuals"].items()
-                    if (item.get("expires_at") is None or item["expires_at"] > now)
+                    if ((expiry := item.get("expires_at")) is None or expiry > now)
                     and self.manual_control(key)
                 }
 
             if any(
-                (item.get("expires_at") is not None and item["expires_at"] <= now)
+                ((expiry := item.get("expires_at")) is not None and expiry <= now)
                 or not self.manual_control(key)
-                for key, item in self.store.state["manuals"].items()
+                # Earlier startup-owned writes affect other maps, never manuals.
+                for key, item in self._state["manuals"].items()
             ):
                 await self.store.async_update(prune)
-        except (IntentStoreError, ValueError, TypeError, KeyError) as err:
+        except IntentStoreError as err:
             self.store.fault = self.store.fault or "Saved intent records are invalid"
             self._storage_fault(err)
+            raise ConfigEntryError(
+                translation_domain=DOMAIN,
+                translation_key="storage_error",
+            ) from err
         else:
-            self._state = self.store.state
+            # Startup semantic validation and owned mutations preserve these records.
+            self._state = cast(RuntimeSnapshot, self.store.state)
+            self._initialized = True
         await self._trace.async_start(self._state, self.shadow_locked)
         self._unsubscribers.append(self.hass.async_add_shutdown_job(HassJob(self.async_close)))
         if self.requirements:
@@ -644,7 +761,7 @@ class OperatorRuntime:
         if self._policy_sources:
 
             @callback
-            def open_timer_admissions(_):
+            def open_timer_admissions(_: HomeAssistant) -> None:
                 for entity_id in self._policy_sources:
                     if entity_id.startswith("timer."):
                         native = self.hass.states.get(entity_id)
@@ -654,7 +771,7 @@ class OperatorRuntime:
             self._unsubscribers.append(async_at_started(self.hass, open_timer_admissions))
 
             @callback
-            def timer_filter(data):
+            def timer_filter(data: Mapping[str, Any]) -> bool:
                 return data.get("entity_id") in self._policy_sources
 
             for event_type in (
@@ -676,8 +793,9 @@ class OperatorRuntime:
                     self._capture_timer_state(entity_id, native, native)
                 else:
                     for policy_id in self._policy_sources[entity_id]:
+                        # Configuration validates sensor sources as qualified-numeric inputs.
                         self._numeric_reports[policy_id] = self._numeric_report(
-                            self.policies[policy_id]["input"], native
+                            cast(NumericInputConfig, self.policies[policy_id]["input"]), native
                         )
         if self._trace.enabled:
             self._unsubscribers.append(
@@ -735,13 +853,15 @@ class OperatorRuntime:
         # Waiting for this lock also drains service writes already in flight.
         # Mutators queued before close recheck _closed under the same store lock.
         interrupted = []
-        demote = self.shadow_locked
+        demote = self.shadow_locked and self._initialized
         interrupt = self._close_interrupts_timer_inputs and any(
-            policy.get("input", {}).get("type") == "timer_episode"
+            (source := policy.get("input")) is not None and source["type"] == "timer_episode"
             for policy in self.policies.values()
         )
 
-        def fence(state):
+        def fence(raw_state: StoredSnapshot) -> None:
+            # Unload fencing is entered only for initialized intent; abort cleanup skips it.
+            state = cast(RuntimeSnapshot, raw_state)
             if interrupt:
                 for policy_id in self._input_fingerprints:
                     record = state["policy_inputs"].get(policy_id)
@@ -759,7 +879,8 @@ class OperatorRuntime:
         if interrupt or demote:
             try:
                 await self.store.async_update(fence, skip_unchanged=True)
-                self._state = self.store.state
+                # The unload fence starts from validated intent and changes only owned records.
+                self._state = cast(RuntimeSnapshot, self.store.state)
             except IntentStoreError as err:
                 self._storage_fault(err)
                 success = not interrupt
@@ -771,7 +892,7 @@ class OperatorRuntime:
                 if interrupted:
                     for policy_id in interrupted:
                         record = self._state["policy_inputs"][policy_id]
-                        episode_id = record["state"]["episode_id"]
+                        episode_id = _input_episode(record)
                         self._trace.event(
                             "admission",
                             {
@@ -817,7 +938,7 @@ class OperatorRuntime:
         for listener in tuple(self._listeners):
             listener()
 
-    def adapter(self, resource_id: str):
+    def adapter(self, resource_id: str) -> Adapter:
         return self._adapters[resource_id]
 
     def mode(self, resource_id: str) -> str:
@@ -830,16 +951,18 @@ class OperatorRuntime:
         self._shadow_lock_latched |= bool(self.entry.options.get("shadow_lock", False))
         return self._shadow_lock_latched
 
-    def trace_health(self) -> dict:
+    def trace_health(self) -> dict[str, object]:
         return self._trace.health()
 
-    async def async_export_trace(self, *, after: int | None = None, limit: int = 100) -> dict:
+    async def async_export_trace(
+        self, *, after: int | None = None, limit: int = 100
+    ) -> dict[str, object]:
         return await self._trace.async_export(after, limit)
 
     async def async_prepare_unlock(self) -> None:
         """Durably demote all resources before the options flow removes its lock."""
         if self._closed:
-            raise HomeAssistantError("HA Operator is unloaded")
+            raise HomeAssistantError(translation_domain=DOMAIN, translation_key="unloaded")
         if self.shadow_locked:
             await self._commit(
                 lambda state: state["modes"].update(dict.fromkeys(self.resources, "observe"))
@@ -866,29 +989,38 @@ class OperatorRuntime:
         )
         return lease if lease.active(_now()) else None
 
-    def _resource(self, resource_id: str) -> dict:
+    def _resource(self, resource_id: str) -> ResourceConfig:
         if resource_id not in self.resources:
-            raise ServiceValidationError("Unknown resource")
+            raise ServiceValidationError(
+                translation_domain=DOMAIN, translation_key="unknown_resource"
+            )
         if self._closed:
-            raise HomeAssistantError("HA Operator is unloaded")
+            raise HomeAssistantError(translation_domain=DOMAIN, translation_key="unloaded")
         return self.resources[resource_id]
 
-    def _admit(self, resource_id: str) -> dict:
+    def _admit(self, resource_id: str) -> ResourceConfig:
         config = self._resource(resource_id)
         if self.fault or self.store.fault:
-            raise HomeAssistantError("HA Operator storage is inhibited; inspect Repairs")
+            raise HomeAssistantError(translation_domain=DOMAIN, translation_key="storage_inhibited")
         if self.mode(resource_id) != "live":
-            raise ServiceValidationError("Resource is in observe mode; request not accepted")
+            raise ServiceValidationError(
+                translation_domain=DOMAIN, translation_key="observe_request"
+            )
         return config
 
     def manual_control(self, resource_id: str) -> bool:
-        return self.resources.get(resource_id, {}).get("manual_control", True)
+        resource = self.resources.get(resource_id)
+        return resource.get("manual_control", True) if resource is not None else True
 
-    def _manual_resource(self, resource_id: str) -> dict:
+    def source_available(self, resource_id: str) -> bool:
+        """Return published source presence, without treating it as physical evidence."""
+        return not self._closed and self._source_availability.get(resource_id, False)
+
+    def _manual_resource(self, resource_id: str) -> ResourceConfig:
         config = self._resource(resource_id)
         if not self.manual_control(resource_id):
             raise ServiceValidationError(
-                "This resource follows its source; manual control is disabled"
+                translation_domain=DOMAIN, translation_key="manual_disabled"
             )
         return config
 
@@ -898,25 +1030,31 @@ class OperatorRuntime:
     def intent_context(self, intent_id: str) -> Context | None:
         return self._contexts.get(("intent", intent_id))
 
-    async def async_set_desired(self, intent_id: str, on: bool, *, context=None) -> None:
+    async def async_set_desired(
+        self, intent_id: str, on: bool, *, context: Context | None = None
+    ) -> None:
         if self._closed:
-            raise HomeAssistantError("HA Operator is unloaded")
+            raise HomeAssistantError(translation_domain=DOMAIN, translation_key="unloaded")
         replayed = False
-        changed = []
+        changed: list[str] = []
 
-        def mutate(state):
+        def mutate(state: RuntimeSnapshot) -> None:
             nonlocal replayed
             if self._closed:
-                raise HomeAssistantError("HA Operator is unloaded")
+                raise HomeAssistantError(translation_domain=DOMAIN, translation_key="unloaded")
+            previous = dict(state["intents"])
             try:
-                previous = dict(state["intents"])
                 apply_command(state["intents"], self.intents, intent_id, on)
-                changed[:] = [
-                    key for key, value in state["intents"].items() if previous.get(key) != value
-                ]
-                replayed = previous == state["intents"]
-            except ValueError as err:
-                raise ServiceValidationError(str(err)) from err
+            except IntentValidationError as err:
+                raise ServiceValidationError(
+                    translation_domain=DOMAIN,
+                    translation_key=err.translation_key,
+                    translation_placeholders=err.translation_placeholders,
+                ) from err
+            changed[:] = [
+                key for key, value in state["intents"].items() if previous.get(key) != value
+            ]
+            replayed = previous == state["intents"]
 
         await self._commit(
             mutate,
@@ -931,14 +1069,14 @@ class OperatorRuntime:
             skip_unchanged=True,
         )
 
-    async def async_seed_intents(self, values: dict) -> None:
+    async def async_seed_intents(self, values: object) -> None:
         """Import a migration snapshot without replaying logical ON edges."""
         if self._closed:
-            raise HomeAssistantError("HA Operator is unloaded")
+            raise HomeAssistantError(translation_domain=DOMAIN, translation_key="unloaded")
 
-        def mutate(state):
+        def mutate(state: RuntimeSnapshot) -> None:
             if self._closed:
-                raise HomeAssistantError("HA Operator is unloaded")
+                raise HomeAssistantError(translation_domain=DOMAIN, translation_key="unloaded")
             if (
                 not isinstance(values, dict)
                 or not values
@@ -947,15 +1085,18 @@ class OperatorRuntime:
                     for key, value in values.items()
                 )
             ):
-                raise ServiceValidationError("Seed configured desired controls with boolean values")
+                raise ServiceValidationError(
+                    translation_domain=DOMAIN, translation_key="invalid_seed"
+                )
             if any(
                 config.get("intent_id") in values and self.mode(config["resource_id"]) != "observe"
                 for config in self.policies.values()
             ):
                 raise ServiceValidationError(
-                    "Seed only while all affected followers are in observe mode"
+                    translation_domain=DOMAIN, translation_key="seed_requires_observe"
                 )
-            state["intents"].update(values)
+            # The request dictionary and every configured key/boolean were checked above.
+            state["intents"].update(cast(dict[str, bool], values))
 
         await self._commit(mutate, lambda state: {"action": "seed_intents", "intents": values})
 
@@ -973,40 +1114,47 @@ class OperatorRuntime:
 
     async def _commit(
         self,
-        mutator: Callable[[dict], None],
-        admission=None,
+        mutator: Callable[[RuntimeSnapshot], object],
+        admission: Callable[[RuntimeSnapshot], dict[str, object]] | None = None,
         *,
-        context_key=None,
-        context=None,
-        skip_unchanged=False,
-    ) -> dict:
+        context_key: ContextKey | Callable[[], Iterable[ContextKey]] | None = None,
+        context: Context | None = None,
+        skip_unchanged: bool = False,
+    ) -> RuntimeSnapshot:
         if self._closed:
-            raise HomeAssistantError("HA Operator is unloaded")
+            raise HomeAssistantError(translation_domain=DOMAIN, translation_key="unloaded")
         if self.fault or self.store.fault:
-            raise HomeAssistantError("HA Operator storage is inhibited; inspect Repairs")
-        candidate = None
-        candidate_revision = None
+            raise HomeAssistantError(translation_domain=DOMAIN, translation_key="storage_inhibited")
+        candidate: RuntimeSnapshot | None = None
+        candidate_revision: int | None = None
 
-        def own_mutation(state):
+        def own_mutation(raw_state: StoredSnapshot) -> None:
+            # Runtime writes start from startup-validated intent and produce typed records.
+            state = cast(RuntimeSnapshot, raw_state)
             nonlocal candidate, candidate_revision
             if self._closed:
-                raise HomeAssistantError("HA Operator is unloaded")
+                raise HomeAssistantError(translation_domain=DOMAIN, translation_key="unloaded")
             candidate_revision = state["revision"]
             mutator(state)
             candidate = state
 
         try:
-            return await self.store.async_update(
+            committed = await self.store.async_update(
                 own_mutation, **({"skip_unchanged": True} if skip_unchanged else {})
             )
+            # The store detached and persisted the existing validated intent plus our mutation.
+            return cast(RuntimeSnapshot, committed)
         except IntentStoreError as err:
             self._storage_fault(err)
-            raise HomeAssistantError("Request persistence failed; actuation inhibited") from err
+            raise HomeAssistantError(
+                translation_domain=DOMAIN, translation_key="persistence_failed"
+            ) from err
         finally:
             # A cancelled request can still have committed. Store drains its executor
             # before cancellation escapes, so always observe the committed revision.
             if not self.fault:
-                self._state = self.store.state
+                # This publication is the validated snapshot plus this owned transaction.
+                self._state = cast(RuntimeSnapshot, self.store.state)
                 if (
                     admission is not None
                     and candidate is not None
@@ -1032,29 +1180,35 @@ class OperatorRuntime:
         resource_id: str,
         *,
         mode: str = "target",
-        target: Target | dict | None = None,
+        target: object = None,
         duration: float | None = None,
         expires_at: float | None = None,
         indefinite: bool = False,
         request_id: str | None = None,
         source: str = "service",
         context: Context | None = None,
-    ) -> dict:
+    ) -> AcceptedRequestReceipt:
         self._manual_resource(resource_id)
         config = self._admit(resource_id)
         if mode not in {"target", "hands_off"}:
-            raise ServiceValidationError("mode must be target or hands_off")
+            raise ServiceValidationError(
+                translation_domain=DOMAIN, translation_key="invalid_request_mode"
+            )
         if sum((duration is not None, expires_at is not None, indefinite)) > 1:
-            raise ServiceValidationError("Choose duration, expires_at, or indefinite")
+            raise ServiceValidationError(
+                translation_domain=DOMAIN, translation_key="ambiguous_expiry"
+            )
         if mode == "hands_off" and target is not None:
-            raise ServiceValidationError("hands_off cannot carry a target")
+            raise ServiceValidationError(
+                translation_domain=DOMAIN, translation_key="hands_off_target"
+            )
         try:
             requested = (
                 None
                 if mode == "hands_off"
                 else target
                 if isinstance(target, Target)
-                else Target.from_dict(target or {})
+                else Target.from_dict({} if target is None else target)
             )
             fan_command = requested is not None and config["kind"] in {"fan", "relay_fan"}
             normalized = (
@@ -1062,13 +1216,19 @@ class OperatorRuntime:
                 if requested is None or fan_command
                 else self.adapter(resource_id).normalize(requested)
             )
-        except (TypeError, ValueError) as err:
-            raise ServiceValidationError(str(err)) from err
+        except TargetValidationError as err:
+            raise ServiceValidationError(
+                translation_domain=DOMAIN,
+                translation_key=err.translation_key,
+                translation_placeholders=err.translation_placeholders,
+            ) from err
         now = _now()
         if duration is not None:
             duration = _number(duration, "duration")
             if duration <= 0:
-                raise ServiceValidationError("duration must be positive")
+                raise ServiceValidationError(
+                    translation_domain=DOMAIN, translation_key="positive_duration"
+                )
         if expires_at is not None:
             expires_at = _number(expires_at, "expires_at")
         actual_duration = duration if duration is not None else config["manual_duration"]
@@ -1079,9 +1239,11 @@ class OperatorRuntime:
         )
         request_id = str(uuid4()) if request_id is None else request_id
         if not isinstance(request_id, str) or not 1 <= len(request_id) <= 128:
-            raise ServiceValidationError("request_id must contain 1 to 128 characters")
+            raise ServiceValidationError(
+                translation_domain=DOMAIN, translation_key="invalid_request_id"
+            )
 
-        def fingerprint_for(value):
+        def fingerprint_for(value: Target | None) -> str:
             return hashlib.sha256(
                 json.dumps(
                     {
@@ -1097,10 +1259,14 @@ class OperatorRuntime:
             ).hexdigest()
 
         fingerprint = fingerprint_for(normalized)
-        receipt = {"request_id": request_id, "resource_id": resource_id, "expires_at": expiry}
+        receipt: RequestReceipt = {
+            "request_id": request_id,
+            "resource_id": resource_id,
+            "expires_at": expiry,
+        }
         replayed = False
 
-        def mutate(state):
+        def mutate(state: RuntimeSnapshot) -> None:
             nonlocal replayed
             # Admission can wait behind another write; observe mode or unload
             # may have changed while the request was queued.
@@ -1110,27 +1276,44 @@ class OperatorRuntime:
                 expected = fingerprint
                 # Older snapshots fingerprinted the normalized target. Keep their
                 # receipts usable; new fan receipts identify the submitted command.
-                if fan_command and existing.get("fingerprint_kind") != "requested":
+                if (
+                    fan_command
+                    and requested is not None
+                    and existing.get("fingerprint_kind") != "requested"
+                ):
                     try:
                         expected = fingerprint_for(self.adapter(resource_id).normalize(requested))
-                    except (TypeError, ValueError) as err:
-                        raise ServiceValidationError(str(err)) from err
+                    except TargetValidationError as err:
+                        raise ServiceValidationError(
+                            translation_domain=DOMAIN,
+                            translation_key=err.translation_key,
+                            translation_placeholders=err.translation_placeholders,
+                        ) from err
                 if existing["fingerprint"] != expected:
-                    raise ServiceValidationError("request_id was already used for different intent")
+                    raise ServiceValidationError(
+                        translation_domain=DOMAIN, translation_key="request_id_conflict"
+                    )
                 receipt.update(existing["receipt"])
                 replayed = True
                 return
             if expiry is not None and expiry <= _now():
-                raise ServiceValidationError("expires_at must be in the future")
+                raise ServiceValidationError(
+                    translation_domain=DOMAIN, translation_key="future_expiry"
+                )
             accepted = normalized
             settings = None
-            if fan_command:
+            if fan_command and requested is not None:
                 try:
                     accepted, settings = self._fan_command(resource_id, requested, state)
-                except (TypeError, ValueError) as err:
-                    raise ServiceValidationError(str(err)) from err
+                except TargetValidationError as err:
+                    raise ServiceValidationError(
+                        translation_domain=DOMAIN,
+                        translation_key=err.translation_key,
+                        translation_placeholders=err.translation_placeholders,
+                    ) from err
             state["manuals"][resource_id] = {
-                "mode": mode,
+                # The public mode check above admits exactly these two values.
+                "mode": cast(Literal["target", "hands_off"], mode),
                 "target": accepted.to_dict() if accepted else None,
                 "expires_at": expiry,
                 "request_id": request_id,
@@ -1155,7 +1338,9 @@ class OperatorRuntime:
         )
         return {**receipt, "accepted": True}
 
-    def _fan_command(self, resource_id: str, requested: Target, state: dict) -> tuple[Target, dict]:
+    def _fan_command(
+        self, resource_id: str, requested: Target, state: RuntimeSnapshot
+    ) -> tuple[Target, JSONObject]:
         """Compose under the intent writer lock, never from uncommitted state.
 
         Fan protocols send power, speed and direction separately. An off relay
@@ -1164,16 +1349,19 @@ class OperatorRuntime:
         """
         adapter = self.adapter(resource_id)
         if not requested.to_dict():
-            raise ValueError("Fan target must not be empty")
+            raise TargetValidationError("empty_fan_target", "Fan target must not be empty")
         default = adapter.normalize(Target.from_dict(self.resources[resource_id]["default_target"]))
         prior = state["manuals"].get(resource_id)
         base = None
         if (
             prior
             and prior["mode"] == "target"
-            and (prior["expires_at"] is None or prior["expires_at"] > _now())
+            and ((expiry := prior.get("expires_at")) is None or expiry > _now())
         ):
-            base = Target.from_dict({**prior["target"], **prior.get("fan_settings", {})})
+            # A validated target-mode lease has a nonempty target object; falsey legacy
+            # targets are admitted only for hands-off and cannot enter this branch.
+            prior_target = cast(Mapping[str, object], prior["target"])
+            base = Target.from_dict({**prior_target, **prior.get("fan_settings", {})})
         if base is None:
             # Bare on uses the configured profile until the user selects one.
             base = (
@@ -1185,7 +1373,7 @@ class OperatorRuntime:
         percentage = (
             requested.percentage or (base.percentage if base else None) or default.percentage
         )
-        command = requested.to_dict()
+        command: dict[str, object] = dict(requested.to_dict())
         if requested.profile is None:
             if requested.on is None and requested.percentage is None and base is not None:
                 command["on"] = base.on
@@ -1198,7 +1386,7 @@ class OperatorRuntime:
                 if requested.direction is None and direction is not None:
                     command["direction"] = direction
         normalized = adapter.normalize(Target.from_dict(command))
-        settings = {
+        settings: JSONObject = {
             key: value
             for key, value in {
                 "direction": normalized.direction if normalized.on else direction,
@@ -1234,7 +1422,7 @@ class OperatorRuntime:
     async def _async_stop(self, resource_id: str, *, context: Context | None = None) -> None:
         config = self._manual_resource(resource_id)
         if self.mode(resource_id) != "live":
-            raise ServiceValidationError("Resource is in observe mode; no STOP dispatched")
+            raise ServiceValidationError(translation_domain=DOMAIN, translation_key="observe_stop")
         self._generation[resource_id] += 1
         stop_id = str(uuid4())
         expiry = _now() + config["manual_duration"]
@@ -1256,7 +1444,7 @@ class OperatorRuntime:
         finally:
             DISPATCH_PARENT.reset(context_token)
 
-        def mutate(state):
+        def mutate(state: RuntimeSnapshot) -> None:
             state["manuals"][resource_id] = {
                 "mode": "hands_off",
                 "expires_at": expiry,
@@ -1282,7 +1470,7 @@ class OperatorRuntime:
             # A newer explicit lease supersedes this barrier as well as intent.
             if had_inflight_command and self.adapter(resource_id).supports_stop:
 
-                async def finish_stop():
+                async def finish_stop() -> bool:
                     async with actuator_lock:
                         lease = self.manual(resource_id)
                         if (
@@ -1311,12 +1499,17 @@ class OperatorRuntime:
     async def async_set_mode(self, resource_id: str, mode: str) -> None:
         self._resource(resource_id)
         if mode not in {"observe", "live"}:
-            raise ServiceValidationError("mode must be observe or live")
+            raise ServiceValidationError(
+                translation_domain=DOMAIN, translation_key="invalid_control_mode"
+            )
 
-        def mutate(state):
+        def mutate(state: RuntimeSnapshot) -> None:
             if mode == "live" and self.shadow_locked:
-                raise ServiceValidationError("Shadow lock prohibits live control")
-            state["modes"][resource_id] = mode
+                raise ServiceValidationError(
+                    translation_domain=DOMAIN, translation_key="shadow_locked"
+                )
+            # The public mode guard admits only these two persisted values.
+            state["modes"][resource_id] = cast(Literal["observe", "live"], mode)
             if mode == "observe":
                 for policy_id, policy in self.policies.items():
                     if policy["resource_id"] == resource_id:
@@ -1331,14 +1524,15 @@ class OperatorRuntime:
             },
         )
 
-    def _suppress_timer_input(self, state: dict, policy_id: str) -> None:
+    def _suppress_timer_input(self, state: RuntimeSnapshot, policy_id: str) -> None:
         record = state["policy_inputs"].get(policy_id)
         if record is None or record["type"] != "timer_episode":
             return
         timer = TimerState.from_record(record["state"])
         if timer.phase not in {"qualifying", "accepted"}:
             return
-        source = self.policies[policy_id]["input"]
+        # Only this timer input's own record can reach timer suppression.
+        source = cast(TimerInputConfig, self.policies[policy_id]["input"])
         assert timer.episode_id is not None
         transition = timer_transition(
             TimerInput(source["qualification_seconds"], source["request_seconds"]),
@@ -1361,9 +1555,11 @@ class OperatorRuntime:
 
     async def async_set_policy_enabled(self, policy_id: str, enabled: bool) -> None:
         if policy_id not in self.policies or not isinstance(enabled, bool):
-            raise ServiceValidationError("Unknown policy or invalid enabled value")
+            raise ServiceValidationError(
+                translation_domain=DOMAIN, translation_key="invalid_policy_enabled"
+            )
 
-        def mutate(state):
+        def mutate(state: RuntimeSnapshot) -> None:
             state["policy_enabled"][policy_id] = enabled
             if not enabled:
                 self._suppress_timer_input(state, policy_id)
@@ -1380,30 +1576,43 @@ class OperatorRuntime:
             },
         )
 
-    def _occurrence(self, policy_id, occurrence_id, expires_at):
+    def _occurrence(
+        self, policy_id: str, occurrence_id: str, expires_at: object
+    ) -> tuple[PolicyConfig, str, float]:
         config = self.policies.get(policy_id)
         if not config or config["kind"] != "occurrence":
-            raise ServiceValidationError("Unknown occurrence policy")
+            raise ServiceValidationError(
+                translation_domain=DOMAIN, translation_key="unknown_occurrence_policy"
+            )
         self._resource(config["resource_id"])
         if not isinstance(occurrence_id, str) or not 1 <= len(occurrence_id) <= 128:
-            raise ServiceValidationError("occurrence_id must contain 1 to 128 characters")
+            raise ServiceValidationError(
+                translation_domain=DOMAIN, translation_key="invalid_occurrence_id"
+            )
         expiry = _number(expires_at, "expires_at")
         if expiry <= _now():
-            raise ServiceValidationError("expires_at must be in the future")
+            raise ServiceValidationError(translation_domain=DOMAIN, translation_key="future_expiry")
         return config, json.dumps([policy_id, occurrence_id]), expiry
 
     async def async_submit_occurrence(
-        self, policy_id, occurrence_id, expires_at, *, context: Context | None = None
-    ) -> dict:
+        self,
+        policy_id: str,
+        occurrence_id: str,
+        expires_at: object,
+        *,
+        context: Context | None = None,
+    ) -> OccurrenceRecord:
         config, key, expiry = self._occurrence(policy_id, occurrence_id, expires_at)
         self._admit(config["resource_id"])
         target = self._policy_target(config)
         if target is None:
-            raise ServiceValidationError("Occurrence target is unavailable")
+            raise ServiceValidationError(
+                translation_domain=DOMAIN, translation_key="occurrence_target_unavailable"
+            )
 
         replayed = False
 
-        def mutate(state):
+        def mutate(state: RuntimeSnapshot) -> None:
             nonlocal replayed
             self._admit(config["resource_id"])
             replayed = key in state["occurrences"]
@@ -1428,12 +1637,14 @@ class OperatorRuntime:
             context_key=("occurrence", policy_id, occurrence_id),
             context=context,
         )
-        return dict(self._state["occurrences"][key])
+        return self._state["occurrences"][key].copy()
 
-    async def async_skip_occurrence(self, policy_id, occurrence_id, expires_at) -> None:
+    async def async_skip_occurrence(
+        self, policy_id: str, occurrence_id: str, expires_at: object
+    ) -> None:
         _, key, expiry = self._occurrence(policy_id, occurrence_id, expires_at)
 
-        def mutate(state):
+        def mutate(state: RuntimeSnapshot) -> None:
             item = state["occurrences"].setdefault(
                 key,
                 {
@@ -1469,7 +1680,8 @@ class OperatorRuntime:
             self._wake_all()
             self._notify()
 
-    def _state_value(self, entity_id: str, attribute: str | None = None):
+    def _state_value(self, entity_id: str, attribute: str | None = None) -> Any:
+        # Native HA attributes are dynamically supplied and narrowed by each consumer.
         state = self.hass.states.get(entity_id)
         if (
             state is None
@@ -1481,7 +1693,7 @@ class OperatorRuntime:
             return None
         return state.attributes.get(attribute) if attribute else state.state
 
-    def _eligible(self, config: dict, policy_id: str) -> bool:
+    def _eligible(self, config: PolicyConfig, policy_id: str) -> bool:
         if source := config.get("input"):
             record = self._state["policy_inputs"].get(policy_id)
             if record is None or record["fingerprint"] != self._input_fingerprints[policy_id]:
@@ -1495,13 +1707,13 @@ class OperatorRuntime:
             "eligibility_state", "on"
         )
 
-    def _policy_target(self, config: dict) -> Target | None:
-        target = dict(config.get("target", {}))
+    def _policy_target(self, config: PolicyConfig) -> Target | None:
+        target: dict[str, object] = dict(config.get("target", {}))
         if intent_id := config.get("intent_id"):
-            value = self.desired_value(intent_id)
-            return Target(on=value) if value is not None else None
-        if config.get("target_entity"):
-            value = self._state_value(config["target_entity"], config.get("target_attribute"))
+            desired = self.desired_value(intent_id)
+            return Target(on=desired) if desired is not None else None
+        if target_entity := config.get("target_entity"):
+            value = self._state_value(target_entity, config.get("target_attribute"))
             if value is None:
                 return None
             field = config.get("target_field", "position")
@@ -1510,7 +1722,7 @@ class OperatorRuntime:
                     return None
                 try:
                     value = float(value)
-                except ValueError, TypeError:
+                except ValueError, TypeError, OverflowError:
                     return None
             elif field == "on":
                 if isinstance(value, bool):
@@ -1525,7 +1737,7 @@ class OperatorRuntime:
         except ValueError, TypeError, HomeAssistantError:
             return None
 
-    def _requirement(self, key: str, config: dict) -> Requirement:
+    def _requirement(self, key: str, config: RequirementConfig) -> Requirement:
         activations = [self._state_value(entity_id) for entity_id in config["activation_entities"]]
         active = (
             False
@@ -1567,27 +1779,34 @@ class OperatorRuntime:
             active,
             tuple(providers),
             config["acquisition_timeout"],
-            config.get("retry_interval", 300),
+            # Requirement configuration admits no retry_interval override.
+            300,
         )
 
     @callback
-    def _input_changed(self, event) -> None:
+    def _input_changed(self, event: StateEvent | datetime) -> None:
         if self._closed:
             return
-        if self._trace.enabled and hasattr(event, "data"):
+        if self._trace.enabled and _is_state_event(event):
+            # Only state-reported payloads supply these native datetime fields.
+            report_data = (
+                cast(Event[EventStateReportedData], event).data
+                if event.event_type == EVENT_STATE_REPORTED
+                else None
+            )
             entity_id = event.data.get("entity_id")
             self._trace.input(
                 entity_id,
                 event.data.get("new_state"),
-                event.event_type,
+                str(event.event_type),
                 event.time_fired.timestamp(),
                 event.context,
-                event.data.get("old_last_reported"),
-                event.data.get("last_reported"),
+                report_data.get("old_last_reported") if report_data is not None else None,
+                report_data.get("last_reported") if report_data is not None else None,
             )
             if entity_id not in self._decision_input_entities:
                 return
-        if not hasattr(event, "data"):
+        if not _is_state_event(event):
             # Absolute lease/occurrence and provider deadlines need no telemetry.
             self._queue_reconciliation(
                 set(self.resources), durable_input=bool(self._input_fingerprints)
@@ -1600,7 +1819,11 @@ class OperatorRuntime:
             native = event.data.get("new_state")
             if entity_id.startswith("timer."):
                 if event.event_type == EVENT_STATE_CHANGED:
-                    self._capture_timer_state(entity_id, native, event.data.get("old_state"))
+                    # HA state-changed events carry EventStateChangedData.
+                    changed_event = cast(Event[EventStateChangedData], event)
+                    self._capture_timer_state(
+                        entity_id, native, changed_event.data.get("old_state")
+                    )
                     if (
                         native is None
                         or native.state in _UNKNOWN
@@ -1647,22 +1870,24 @@ class OperatorRuntime:
                         ):
                             unchanged = False
                             break
-                        previous = NumericState.from_record(record["state"])
-                        source = self.policies[policy_id]["input"]
+                        previous_numeric = NumericState.from_record(record["state"])
+                        # Validated sensor sources have qualified-numeric configuration.
+                        source = cast(NumericInputConfig, self.policies[policy_id]["input"])
                         config = NumericInput(source["threshold"], source["qualification_seconds"])
                         report = self._numeric_reports.get(policy_id, NumericReport(None))
                         reported = numeric_transition(
-                            config, previous, report, now=event.time_fired.timestamp()
+                            config, previous_numeric, report, now=event.time_fired.timestamp()
                         )
                         current = numeric_transition(config, reported.state, None, now=_now())
-                        if previous.recovery_pending or current.state != previous:
+                        if previous_numeric.recovery_pending or current.state != previous_numeric:
                             unchanged = False
                             break
                 if not unchanged:
                     for policy_id in self._policy_sources[entity_id]:
                         if event.event_type == EVENT_STATE_CHANGED:
+                            # Configuration validates sensor sources as qualified-numeric inputs.
                             self._numeric_reports[policy_id] = self._numeric_report(
-                                self.policies[policy_id]["input"], native
+                                cast(NumericInputConfig, self.policies[policy_id]["input"]), native
                             )
                         report = self._numeric_reports.get(policy_id, NumericReport(None))
                         self._policy_events.append(
@@ -1760,7 +1985,7 @@ class OperatorRuntime:
                 self._queue_reconciliation(set())
 
     @callback
-    def _external_command(self, event) -> None:
+    def _external_command(self, event: Event[Mapping[str, Any]]) -> None:
         data = event.data
         entity_id = data.get("entity_id")
         if entity_id not in self._trace.sanitizer.attrs or data.get("service") not in {
@@ -1792,7 +2017,7 @@ class OperatorRuntime:
         self._wake_resources(self.resources)
 
     @callback
-    def _wake_resources(self, resource_ids) -> None:
+    def _wake_resources(self, resource_ids: Iterable[str]) -> None:
         for identifier in resource_ids:
             if self.decisions[identifier].status in {"pending", "waiting"}:
                 self._wake[identifier].set()
@@ -1810,7 +2035,9 @@ class OperatorRuntime:
         record = self._state["return_monitors"].get(resource_id)
         return ReturnMonitorState.from_record(record["state"]) if record else ReturnMonitorState()
 
-    def _return_transition(self, resource_id: str, state: ReturnMonitorState, now: float):
+    def _return_transition(
+        self, resource_id: str, state: ReturnMonitorState, now: float
+    ) -> ReturnMonitorTransition:
         config = self.resources[resource_id]
         settings = config["return_monitor"]
         decision = self.decisions.get(resource_id)
@@ -1838,7 +2065,7 @@ class OperatorRuntime:
     async def _apply_return_monitors(self) -> None:
         self._return_dirty.clear()
 
-        def mutate(state):
+        def mutate(state: RuntimeSnapshot) -> None:
             # Run under the existing writer using current inputs, not a queued desired snapshot.
             self._recompute(mark_returns=False)
             for key, fingerprint in self._return_fingerprints.items():
@@ -1887,7 +2114,15 @@ class OperatorRuntime:
         now = _now()
         resources = {}
         for key, config in self.resources.items():
-            observation = self.adapter(key).read_observation(now)
+            adapter = self.adapter(key)
+            available = adapter.source_available
+            previous = self._source_availability.get(key)
+            if not available and previous is not False:
+                _LOGGER.info("Resource %s source is unavailable", key)
+            elif available and previous is False:
+                _LOGGER.info("Resource %s source is available again", key)
+            self._source_availability[key] = available
+            observation = adapter.read_observation(now)
             fault = self.fault
             if config.get("fault_entity") and self._state_value(config["fault_entity"]) != "off":
                 fault = "device_fault_or_unknown"
@@ -1920,7 +2155,7 @@ class OperatorRuntime:
             self._storage_fault(err)
             manuals, occurrences = [], []
             resources = {key: replace(item, fault=self.fault) for key, item in resources.items()}
-        engine = dict(
+        engine: EngineInputs = dict(
             now=now,
             resources=resources,
             observations=self.observations,
@@ -1960,16 +2195,19 @@ class OperatorRuntime:
         if self._trace.enabled:
             trace_engine = {
                 "now": now,
-                **{
-                    key: {identifier: asdict(value) for identifier, value in engine[key].items()}
-                    for key in ("resources", "observations", "requirement_memory")
+                "resources": {key: asdict(value) for key, value in engine["resources"].items()},
+                "observations": {
+                    key: asdict(value) for key, value in engine["observations"].items()
                 },
-                **{
-                    key: [asdict(value) for value in engine[key]]
-                    for key in ("manuals", "policies", "occurrences", "requirements")
+                "requirement_memory": {
+                    key: asdict(value) for key, value in engine["requirement_memory"].items()
                 },
+                "manuals": [asdict(value) for value in engine["manuals"]],
+                "policies": [asdict(value) for value in engine["policies"]],
+                "occurrences": [asdict(value) for value in engine["occurrences"]],
+                "requirements": [asdict(value) for value in engine["requirements"]],
             }
-        previous = self.decisions
+        previous_decisions = self.decisions
         previous_selections = self.selections
         # HA state reads and evaluation are synchronous: retain this cause snapshot,
         # rather than scanning changed group members when a dashboard reads it later.
@@ -1990,8 +2228,10 @@ class OperatorRuntime:
         }
         registry = er.async_get(self.hass)
         for key, selection in self.selections.items():
-            policy = self.policies.get(selection.source_id, {})
-            if intent_id := policy.get("intent_id"):
+            policy = (
+                self.policies.get(selection.source_id) if selection.source_id is not None else None
+            )
+            if policy is not None and (intent_id := policy.get("intent_id")):
                 name = self.intents[intent_id]["name"][:128]
                 entity_id = registry.async_get_entity_id("switch", DOMAIN, f"{intent_id}_desired")
                 self.selections[key] = replace(
@@ -2037,7 +2277,7 @@ class OperatorRuntime:
                 self._last_identity.pop(key, None)
                 if cancel := self._timers.pop(key, None):
                     cancel()
-            old = previous.get(key)
+            old = previous_decisions.get(key)
             selection = self.selections[key]
             cause_changed = previous_selections.get(key) != selection
             if (
@@ -2098,9 +2338,11 @@ class OperatorRuntime:
         self._memory = {key: item.memory for key, item in result.requirements.items()}
         unconfirmed = {"acquiring", "unmet", "unknown"}
         for key, item in self.requirement_results.items():
-            old = old_requirements.get(key)
+            old_requirement = old_requirements.get(key)
             notification_id = f"ha_operator_{self.entry.entry_id}_{key}"
-            if item.status in unconfirmed and (old is None or old.status not in unconfirmed):
+            if item.status in unconfirmed and (
+                old_requirement is None or old_requirement.status not in unconfirmed
+            ):
                 persistent_notification.async_create(
                     self.hass,
                     f"{self.requirements[key]['name']}: incoming air is not confirmed. "
@@ -2109,7 +2351,11 @@ class OperatorRuntime:
                     title="HA Operator: airflow requirement",
                     notification_id=notification_id,
                 )
-            elif old and old.status in unconfirmed and item.status not in unconfirmed:
+            elif (
+                old_requirement
+                and old_requirement.status in unconfirmed
+                and item.status not in unconfirmed
+            ):
                 persistent_notification.async_dismiss(self.hass, notification_id)
         if self._deadline_timer:
             self._deadline_timer()
@@ -2182,7 +2428,7 @@ class OperatorRuntime:
         )
         return self._contexts.get(key)
 
-    def selection_attributes(self, resource_id: str) -> dict:
+    def selection_attributes(self, resource_id: str) -> dict[str, object]:
         """Resolve a desired control's entity name after native registry renames."""
         selection = self.selections.get(resource_id)
         if selection is None:
@@ -2195,7 +2441,7 @@ class OperatorRuntime:
             attributes["related_entities"] = (entity_id,) if entity_id else ()
         return attributes
 
-    def _active_inputs(self, entity_ids) -> tuple[tuple[str, str], ...]:
+    def _active_inputs(self, entity_ids: Iterable[str]) -> tuple[tuple[str, str], ...]:
         """Bound group expansion; report active inputs, never invent physical proof."""
         pending = list(entity_ids)
         seen: set[str] = set()
@@ -2208,6 +2454,8 @@ class OperatorRuntime:
             if self._state_value(entity_id) != "on":
                 continue
             state = self.hass.states.get(entity_id)
+            if state is None:
+                continue
             members = state.attributes.get("entity_id")
             if isinstance(members, (list, tuple)) and members:
                 pending.extend(item for item in members[:32] if isinstance(item, str))
@@ -2218,7 +2466,7 @@ class OperatorRuntime:
         return tuple(active)
 
     @callback
-    def _activation_input_changed(self, event) -> None:
+    def _activation_input_changed(self, event: Event[EventStateChangedData]) -> None:
         """Group membership can change cause while the group's aggregate stays on."""
         entity_id = event.data["entity_id"]
         if self._closed or entity_id in self._observed_entities:
@@ -2226,7 +2474,7 @@ class OperatorRuntime:
         pending = [
             item for config in self.requirements.values() for item in config["activation_entities"]
         ]
-        seen = set()
+        seen: set[str] = set()
         while pending and len(seen) < 32:
             item = pending.pop(0)
             if item in seen:
@@ -2254,7 +2502,7 @@ class OperatorRuntime:
             cancel()
 
         @callback
-        def wake(_):
+        def wake(_: datetime) -> None:
             self._timers.pop(resource_id, None)
             self._wake[resource_id].set()
 
@@ -2292,7 +2540,7 @@ class OperatorRuntime:
             generation = self._generation[resource_id]
             target = decision.target
 
-            def still_current(generation=generation, target=target):
+            def still_current(generation: int = generation, target: Target = target) -> bool:
                 if self._input_ingress[resource_id] != self._input_processed[resource_id]:
                     return False
                 self._recompute()
@@ -2340,12 +2588,12 @@ class OperatorRuntime:
                 if self.decisions[resource_id].status in {"pending", "waiting"}:
                     wake.set()
 
-    def _explain_requirements(self) -> dict:
+    def _explain_requirements(self) -> dict[str, dict[str, object]]:
         """Capture bounded predicates in the same synchronous evaluation turn."""
-        requirements = {}
+        requirements: dict[str, dict[str, object]] = {}
         for key, item in self.requirement_results.items():
             config = self.requirements[key]
-            providers = {}
+            providers: dict[str, dict[str, object]] = {}
             for provider in config["providers"]:
                 predicates = []
                 evidence = []
@@ -2386,7 +2634,7 @@ class OperatorRuntime:
             }
         return requirements
 
-    def explain(self, resource_id: str | None = None) -> dict:
+    def explain(self, resource_id: str | None = None) -> dict[str, object]:
         if resource_id is not None:
             self._resource(resource_id)
         ids = [resource_id] if resource_id is not None else list(self.resources)

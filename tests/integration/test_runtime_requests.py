@@ -8,7 +8,7 @@ import threading
 
 import pytest
 from homeassistant.core import Context
-from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
+from homeassistant.exceptions import ConfigEntryError, HomeAssistantError, ServiceValidationError
 from homeassistant.helpers import issue_registry as ir
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
@@ -41,7 +41,9 @@ async def runtime_factory(hass, tmp_path, clock):
     hass.services.async_register("cover", "stop_cover", capture)
     instances = []
 
-    async def create(*, resource=None, policies=None, initialized=False, before_start=None):
+    async def create(
+        *, resource=None, policies=None, initialized=False, before_start=None, setup_error=False
+    ):
         resource_data = {
             "name": "Window",
             "kind": "cover",
@@ -76,7 +78,12 @@ async def runtime_factory(hass, tmp_path, clock):
         instances.append(runtime)
         if before_start:
             await before_start(runtime)
-        await runtime.async_start()
+        if setup_error:
+            with pytest.raises(ConfigEntryError) as error:
+                await runtime.async_start()
+            assert error.value.translation_key == "storage_error"
+        else:
+            await runtime.async_start()
         await hass.async_block_till_done()
         return runtime, calls
 
@@ -307,9 +314,9 @@ async def test_failed_request_inhibits_and_creates_repair(runtime_factory, hass,
 
 
 async def test_initialized_missing_file_inhibits(runtime_factory, hass):
-    runtime, calls = await runtime_factory(initialized=True)
+    runtime, calls = await runtime_factory(initialized=True, setup_error=True)
     assert runtime.fault == "storage_error"
-    assert runtime.decisions["roof"].status == "fault"
+    assert not runtime.decisions and not runtime._tasks and not runtime._unsubscribers
     assert not runtime.store._path.exists()
     assert calls == []
     assert ir.async_get(hass).async_get_issue("ha_operator", f"storage_{runtime.entry.entry_id}")
@@ -569,7 +576,7 @@ async def test_corrupt_nested_manual_inhibits_without_overwriting(runtime_factor
         original.append(contents)
         await asyncio.to_thread(runtime.store._path.write_text, contents)
 
-    runtime, calls = await runtime_factory(initialized=True, before_start=prepare)
+    runtime, calls = await runtime_factory(initialized=True, before_start=prepare, setup_error=True)
     assert runtime.fault == "storage_error"
     assert runtime.store._path.read_text() == original[0]
     assert calls == []
@@ -660,7 +667,7 @@ async def test_corrupt_saved_records_are_readable_and_cannot_be_mutated(runtime_
         contents.append(json.dumps({"version": 1, "data": data}))
         await asyncio.to_thread(runtime.store._path.write_text, contents[-1])
 
-    runtime, calls = await runtime_factory(before_start=prepare)
+    runtime, calls = await runtime_factory(before_start=prepare, setup_error=True)
     assert runtime.fault == "storage_error"
     assert runtime.explain()["fault"] == "storage_error"
     assert runtime.manual("roof") is None

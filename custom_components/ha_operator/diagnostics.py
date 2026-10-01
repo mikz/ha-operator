@@ -2,8 +2,22 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from hashlib import sha256
-from typing import Any
+from typing import TYPE_CHECKING, cast, overload
+
+from homeassistant.core import HomeAssistant
+
+from . import OperatorConfigEntry
+from .data import PolicyConfig
+from .policy_inputs import NumericState, TimerState
+
+if TYPE_CHECKING:
+    from .runtime import OperatorRuntime
+
+from homeassistant.helpers import issue_registry as ir
+
+from .const import DOMAIN
 
 _STATUSES = {
     "pending",
@@ -24,23 +38,33 @@ _STATUSES = {
 }
 
 
-def _identifier(value: Any) -> str | None:
+@overload
+def _identifier(value: str) -> str: ...
+
+
+@overload
+def _identifier(value: object) -> str | None: ...
+
+
+def _identifier(value: object) -> str | None:
     """Pseudonyms preserve relationships without revealing entity IDs or labels."""
     return sha256(str(value).encode()).hexdigest()[:12] if value is not None else None
 
 
-def _number(value: Any) -> float | int | None:
-    return value if type(value) in (int, float) else None
+def _number(value: object) -> float | int | None:
+    # The exact-type check excludes bool and nonnumeric native attributes.
+    return cast(int | float, value) if type(value) in (int, float) else None
 
 
-def _target(value: Any) -> dict[str, Any] | None:
+def _target(value: object) -> dict[str, object] | None:
     if value is None:
         return None
     if hasattr(value, "to_dict"):
+        # Reflection accepts model-like diagnostic inputs; output remains allowlisted.
         value = value.to_dict()
     if not isinstance(value, dict):
         return None
-    clean: dict[str, Any] = {}
+    clean: dict[str, object] = {}
     for key in ("position", "percentage"):
         if _number(value.get(key)) is not None:
             clean[key] = value[key]
@@ -53,17 +77,19 @@ def _target(value: Any) -> dict[str, Any] | None:
     return clean
 
 
-def _status(value: Any) -> str:
+def _status(value: object) -> str:
     return value if isinstance(value, str) and value in _STATUSES else "unknown"
 
 
-def _policy_input(runtime: Any, identifier: str, config: dict) -> dict | None:
+def _policy_input(
+    runtime: OperatorRuntime, identifier: str, config: PolicyConfig
+) -> dict[str, object] | None:
     """Export the bounded input contract and committed state with opaque identifiers."""
     source = config.get("input")
     if source is None:
         return None
     state = runtime.policy_input(identifier)
-    result = {
+    result: dict[str, object] = {
         "type": source["type"],
         "entity": _identifier(source["entity_id"]),
         "qualification_seconds": _number(source["qualification_seconds"]),
@@ -76,27 +102,31 @@ def _policy_input(runtime: Any, identifier: str, config: dict) -> dict | None:
             unit=_identifier(source["unit"]),
         )
         if state is not None:
+            # Startup and owned input writes pair the numeric model with this source.
+            numeric = cast(NumericState, state)
             result["state"] = {
-                "phase": state.phase,
-                "due_at": _number(state.due_at),
-                "qualified": state.qualified,
-                "source_quality": state.source_quality,
-                "recovery_pending": state.recovery_pending,
+                "phase": numeric.phase,
+                "due_at": _number(numeric.due_at),
+                "qualified": numeric.qualified,
+                "source_quality": numeric.source_quality,
+                "recovery_pending": numeric.recovery_pending,
             }
     else:
         result["request_seconds"] = _number(source["request_seconds"])
         if state is not None:
+            # The same validated/owned pairing holds for timer records.
+            timer = cast(TimerState, state)
             result["state"] = {
-                "phase": state.phase,
-                "due_at": _number(state.due_at),
-                "expires_at": _number(state.expires_at),
-                "finish_at": _number(state.finish_at),
-                "episode_id": _identifier(state.episode_id),
+                "phase": timer.phase,
+                "due_at": _number(timer.due_at),
+                "expires_at": _number(timer.expires_at),
+                "finish_at": _number(timer.finish_at),
+                "episode_id": _identifier(timer.episode_id),
             }
     return result
 
 
-def _trace_health(value: dict[str, Any]) -> dict[str, Any]:
+def _trace_health(value: Mapping[str, object]) -> dict[str, object]:
     """Export health counters only; raw records and paths belong outside diagnostics."""
     return {
         **{key: value.get(key) is True for key in ("enabled", "healthy", "complete")},
@@ -117,10 +147,32 @@ def _trace_health(value: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-async def async_get_config_entry_diagnostics(hass: Any, entry: Any) -> dict[str, Any]:
+async def async_get_config_entry_diagnostics(
+    hass: HomeAssistant, entry: OperatorConfigEntry
+) -> dict[str, object]:
     """Export structural evidence only; never call devices or alter runtime state."""
-    runtime = entry.runtime_data
-    resources: dict[str, Any] = {}
+    runtime: OperatorRuntime | None = getattr(entry, "runtime_data", None)
+    if runtime is None or runtime._closed:
+        issues = ir.async_get(hass)
+        return {
+            "version": 1,
+            "runtime_state": "absent" if runtime is None else "closed",
+            "faulted": bool(runtime and runtime.fault)
+            or any(
+                issues.async_get_issue(DOMAIN, f"{kind}_{entry.entry_id}") is not None
+                for kind in ("storage", "configuration")
+            ),
+            "subentries": {
+                kind: len(entry.get_subentries_of_type(kind))
+                for kind in ("resource", "policy", "requirement", "intent")
+            },
+            "resources": {},
+            "intents": {},
+            "policies": {},
+            "requirements": {},
+            "history": [],
+        }
+    resources: dict[str, dict[str, object]] = {}
     for identifier, config in runtime.resources.items():
         observation = runtime.observations.get(identifier)
         decision = runtime.decisions.get(identifier)
@@ -163,7 +215,7 @@ async def async_get_config_entry_diagnostics(hass: Any, entry: Any) -> dict[str,
                 "due_at": _number(monitor.due_at),
                 "overdue": monitor.overdue,
             }
-    requirements: dict[str, Any] = {}
+    requirements: dict[str, dict[str, object]] = {}
     for identifier in runtime.requirements:
         result = runtime.requirement_results.get(identifier)
         requirements[_identifier(identifier)] = {

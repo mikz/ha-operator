@@ -82,6 +82,45 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
+  static:
+    name: HA ${{ matrix.ha }} strict static checks
+    runs-on: ubuntu-24.04
+    needs: package
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - ha: "2026.9.3"
+            project: .
+            python: .venv/bin/python
+          - ha: "2026.9.4"
+            project: compat/ha2026.9.4
+            python: compat/ha2026.9.4/.venv/bin/python
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-package
+          path: dist/
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.12.15"
+          python-version: "3.14.7"
+      - run: uv sync --locked --project "${{ matrix.project }}" --python 3.14.7
+      - name: Check all production modules with the native HA API
+        run: ${{ matrix.python }} scripts/evidence.py static --ha-version "${{ matrix.ha }}" --python "${{ matrix.python }}" --directory "artifacts/static-${{ matrix.ha }}"
+      - name: Check artifact privacy
+        id: privacy
+        if: always()
+        run: python scripts/privacy_gate.py artifacts/
+      - uses: actions/upload-artifact@v4
+        if: always() && steps.privacy.outcome == 'success'
+        with:
+          name: static-ha-${{ matrix.ha }}
+          path: artifacts/
+          if-no-files-found: error
+          retention-days: 30
+
   mutations:
     name: Safety guard mutation tests
     runs-on: ubuntu-24.04
@@ -208,7 +247,7 @@ jobs:
 
   release-gates:
     name: All release gates
-    needs: [package, tests, mutations, hacs, hassfest, lab]
+    needs: [package, tests, static, mutations, hacs, hassfest, lab]
     if: always()
     runs-on: ubuntu-24.04
     steps:
@@ -267,6 +306,7 @@ jobs:
               [root / f"evidence/tests-ha-{version}/tests-{version}" for version in ("2026.9.3", "2026.9.4")],
               root / "evidence/guard-mutations/mutations.json", validators,
               dist / "ha_operator-evidence.zip",
+              static=[root / f"evidence/static-ha-{version}/static-{version}" for version in ("2026.9.3", "2026.9.4")],
           )
           PY
       - name: Check artifact privacy

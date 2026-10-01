@@ -1,7 +1,7 @@
-"""Opt-in comparison of five native HA recipe writers and Operator policy inputs.
+"""Compare identical native Operator policy workloads in both release ZIPs.
 
-The runner supplies an extracted integration ZIP and the public recipe module.
-All entities, helpers, timers, automations, and storage use offline HA fixtures.
+The runner supplies an extracted integration ZIP. All entities, timers and
+storage use offline HA fixtures with identical configuration and warmup.
 """
 
 from __future__ import annotations
@@ -34,7 +34,6 @@ from pytest_homeassistant_custom_component.common import (
     MockConfigEntry,
     async_fire_time_changed_exact,
 )
-from window_recipe import cold_automation, overdue_automation, timer_automation
 
 from custom_components.ha_operator import storage
 from custom_components.ha_operator.const import DOMAIN
@@ -47,14 +46,6 @@ SENSOR = "sensor.profile_temperature"
 TIMER = "timer.profile_ventilation"
 RAW = [f"cover.profile_raw_{index}" for index in range(3)]
 RESOURCES = [f"roof{index}" for index in range(3)]
-HELPERS = {
-    "input_boolean.profile_timer_ready",
-    "input_boolean.profile_cold_ready",
-    "input_boolean.profile_cold_qualified",
-    "input_text.profile_timer_record",
-    "input_text.profile_cold_record",
-    *(f"input_text.profile_return_{index}" for index in range(3)),
-}
 WORKLOADS = ("idle", "unchanged", "changing", "timer", "reload")
 
 
@@ -71,7 +62,6 @@ async def test_profile(hass, tmp_path, freezer, monkeypatch):
     count = int(os.environ["OPERATOR_PROFILE_COUNT"])
     warmup = int(os.environ.get("OPERATOR_PROFILE_WARMUP", "10"))
     trace = os.environ["OPERATOR_PROFILE_TRACE"] == "1"
-    native = os.environ["OPERATOR_PROFILE_VARIANT"] == "candidate"
     # Freezegun freezes perf_counter too. Its preserved clock measures actual
     # elapsed wall time, while only the HA clock advances through virtual UTC.
     wall_clock = freezegun.api.real_perf_counter
@@ -101,36 +91,6 @@ async def test_profile(hass, tmp_path, freezer, monkeypatch):
     assert await async_setup_component(
         hass, "timer", {"timer": {"profile_ventilation": {"duration": "00:01:05"}}}
     )
-    if not native:
-        assert await async_setup_component(
-            hass,
-            "input_boolean",
-            {
-                "input_boolean": {
-                    name: {"initial": False}
-                    for name in (
-                        "profile_timer_ready",
-                        "profile_cold_ready",
-                        "profile_cold_qualified",
-                    )
-                }
-            },
-        )
-        assert await async_setup_component(
-            hass,
-            "input_text",
-            {
-                "input_text": {
-                    name: {"initial": "{}", "max": 255}
-                    for name in (
-                        "profile_timer_record",
-                        "profile_cold_record",
-                        *(f"profile_return_{index}" for index in range(3)),
-                    )
-                }
-            },
-        )
-
     original_write = storage._write_snapshot
     original_recompute = OperatorRuntime._recompute
 
@@ -154,8 +114,7 @@ async def test_profile(hass, tmp_path, freezer, monkeypatch):
             "manual_control": True,
             "tolerance": 2,
         }
-        if native:
-            data["return_monitor"] = {"target_at_most": 7, "warning_after_seconds": 300}
+        data["return_monitor"] = {"target_at_most": 7, "warning_after_seconds": 300}
         subentries.append((resource_id, "resource", data))
         subentries.append(
             (
@@ -184,28 +143,25 @@ async def test_profile(hass, tmp_path, freezer, monkeypatch):
         "priority": 20,
         "target": {"position": 100},
     }
-    if native:
-        cold["input"] = {
-            "type": "qualified_numeric",
-            "entity_id": SENSOR,
-            "comparison": "below",
-            "threshold": 16,
-            "unit": "°C",
-            "qualification_seconds": 1800,
-        }
-        vent["input"] = {
-            "type": "timer_episode",
-            "entity_id": TIMER,
-            "qualification_seconds": 60,
-            "request_seconds": 1800,
-        }
-    else:
-        cold["eligibility_entity"] = "input_boolean.profile_cold_qualified"
+    cold["input"] = {
+        "type": "qualified_numeric",
+        "entity_id": SENSOR,
+        "comparison": "below",
+        "threshold": 16,
+        "unit": "°C",
+        "qualification_seconds": 1800,
+    }
+    vent["input"] = {
+        "type": "timer_episode",
+        "entity_id": TIMER,
+        "qualification_seconds": 60,
+        "request_seconds": 1800,
+    }
     subentries.extend((("cold", "policy", cold), ("vent", "policy", vent)))
     entry = MockConfigEntry(
         domain=DOMAIN,
         title="Native policy profile",
-        version=2 if native else 1,
+        version=2,
         data={},
         options={"trace_enabled": trace, "trace_entities": [SENSOR, TIMER]},
         subentries_data=[
@@ -229,54 +185,6 @@ async def test_profile(hass, tmp_path, freezer, monkeypatch):
         return result
 
     automations = set()
-    if not native:
-        recipes = [
-            (
-                "profile_timer",
-                timer_automation(
-                    TIMER,
-                    "input_text.profile_timer_record",
-                    "vent",
-                    entity("cover", "roof0_managed"),
-                    "input_boolean.profile_timer_ready",
-                    qualify=60,
-                    duration=1800,
-                ),
-            ),
-            (
-                "profile_cold",
-                cold_automation(
-                    SENSOR,
-                    "input_text.profile_cold_record",
-                    "input_boolean.profile_cold_qualified",
-                    "input_boolean.profile_cold_ready",
-                    threshold=16,
-                    qualify=1800,
-                ),
-            ),
-            *[
-                (
-                    "profile_return_" + resource_id,
-                    overdue_automation(
-                        resource_id,
-                        entity("cover", resource_id + "_managed"),
-                        entity("sensor", resource_id + "_desired"),
-                        entity("sensor", resource_id + "_status"),
-                        f"input_text.profile_return_{index}",
-                        baseline=7,
-                        timeout=300,
-                    ),
-                )
-                for index, resource_id in enumerate(RESOURCES)
-            ],
-        ]
-        assert len(recipes) == 5
-        assert await async_setup_component(
-            hass, "automation", {"automation": [{"id": key, **data} for key, data in recipes]}
-        )
-        automations = {state.entity_id for state in hass.states.async_all("automation")}
-        assert len(automations) == 5
-        assert all(hass.states.get(entity_id) is not None for entity_id in HELPERS)
     await hass.async_start()
     await hass.async_block_till_done()
     runtime = entry.runtime_data
@@ -298,8 +206,6 @@ async def test_profile(hass, tmp_path, freezer, monkeypatch):
         registered = registry.async_get(entity_id)
         if registered and registered.platform == DOMAIN:
             group = "operator"
-        elif entity_id in HELPERS and not native:
-            group = "helper"
         elif entity_id in automations:
             group = "automation"
         elif entity_id in {*RAW, SENSOR, TIMER}:
@@ -321,7 +227,7 @@ async def test_profile(hass, tmp_path, freezer, monkeypatch):
     watched = {
         state.entity_id
         for state in hass.states.async_all()
-        if state.entity_id in {*RAW, SENSOR, TIMER, *automations, *HELPERS}
+        if state.entity_id in {*RAW, SENSOR, TIMER, *automations}
         or (
             registry.async_get(state.entity_id)
             and registry.async_get(state.entity_id).platform == DOMAIN
@@ -364,8 +270,7 @@ async def test_profile(hass, tmp_path, freezer, monkeypatch):
             await hass.async_block_till_done()
         elif workload == "changing":
             # Below-threshold value changes, plus warm/cold edges in one turn.
-            # Legacy actions inspect the final current state, unlike captured
-            # native transitions; identical inputs do not imply equal semantics.
+            # Both archives receive the same native input transitions.
             for value in (15, 14, 17, 15):
                 temperature(value)
             feedback(100 if index % 2 else 7)
@@ -459,7 +364,7 @@ async def test_profile(hass, tmp_path, freezer, monkeypatch):
         assert counts["operator_snapshot_writes"] == 0
     if workload == "idle":
         assert counts["recomputations"] == 0
-        assert counts["automation_runs"] == (0 if native else 5 * count)
+        assert counts["automation_runs"] == 0
     metrics = dict.fromkeys(
         (
             "operator_snapshot_writes",
@@ -485,6 +390,13 @@ async def test_profile(hass, tmp_path, freezer, monkeypatch):
         "trace_enabled": trace,
         "batches": count,
         "warmup_batches": warmup,
+        "configuration": {
+            "subentries": subentries,
+            "options": dict(entry.options),
+            "source_timer_duration": "00:01:05",
+            "initial_temperature": 20,
+            "initial_cover_position": 7,
+        },
         "entity_count": sum(
             1
             for state in hass.states.async_all()
@@ -492,7 +404,7 @@ async def test_profile(hass, tmp_path, freezer, monkeypatch):
             and registry.async_get(state.entity_id).platform == DOMAIN
         ),
         "automation_count": len(automations),
-        "helper_count": 0 if native else len(HELPERS),
+        "helper_count": 0,
         "counts": metrics,
         "input_events": counts["source_state_changed"] + counts["source_state_reported"],
         "wall_seconds": elapsed_wall,
@@ -519,12 +431,12 @@ async def test_profile(hass, tmp_path, freezer, monkeypatch):
         "ha_version": version("homeassistant"),
         "fixture_version": version("pytest-homeassistant-custom-component"),
         "asyncio_debug": False,
-        "scope": "offline native HA fixture; real five public recipe automations vs "
-        "two native policy inputs and three return monitors; three live covers with "
+        "scope": "offline native HA fixture; identical two native policy inputs and "
+        "three return monitors in both releases; three live covers with "
         "independent synthetic raw reports; fixed virtual UTC and 65s source timer; "
         "60s timer qualification, 1800s request and cold qualification, 300s warning; "
         "no Recorder, KNX, full-house load or physical oracle; no production-duration soak; "
-        "snapshot counts cover Operator only, not debounced helper storage; "
+        "snapshot counts cover Operator storage; "
         "workload timing excludes final trace drain; memory measured after drain",
     }
 

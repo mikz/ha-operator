@@ -25,8 +25,9 @@ CONFIG_SCHEMA = vol.Schema(
         DOMAIN: vol.Schema(
             {
                 vol.Required("url"): cv.url,
-                vol.Optional("poll_interval", default=0.25): vol.All(
-                    vol.Coerce(float), vol.Range(min=0.05)
+                # Native HA coordinator scheduling can repeatedly poll below one second.
+                vol.Optional("poll_interval", default=1): vol.All(
+                    vol.Coerce(float), vol.Range(min=1)
                 ),
             }
         ),

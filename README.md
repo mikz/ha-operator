@@ -5,18 +5,19 @@ manual overrides, scheduled occurrences, and requirements shared by several
 devices. It separates a request from the effective target, the last command, and
 the device's observed state.
 
-Version 0.1.0 passed local source tests and packaged acceptance runs on Home
-Assistant 2026.9.3 and 2026.9.4. Each packaged run passed all 23 runner scenarios;
-a separate baseline run verified five-minute retries. Download the
-[v0.1.0 release](https://github.com/mikz/ha-operator/releases/tag/v0.1.0) and its
-[validation evidence](https://github.com/mikz/ha-operator/releases/download/v0.1.0/ha_operator-evidence.zip).
-The [validation record](docs/scenarios.md#release-validation-record) identifies the
-tested archive and the limits of this evidence. Automated results are available
-in [GitHub Actions](https://github.com/mikz/ha-operator/actions/workflows/validate.yml).
+The [0.1.5 release notes](docs/releases/0.1.5.md) and
+[validation record](docs/scenarios.md#release-validation-record) identify the
+released behavior, tested archive, and evidence limits. Automated results are
+available in [GitHub Actions](https://github.com/mikz/ha-operator/actions/workflows/validate.yml).
 Development requires Python 3.14.2 or later within Python 3.14.
-The [0.1.1 release notes](docs/releases/0.1.1.md) describe shadow observation.
-[0.1.2](docs/releases/0.1.2.md) fixes partial fan commands from native controls
-and HomeKit.
+
+The [configuration and action reference](docs/reference.md) covers setup fields,
+all eight integration actions, and durable acceptance. Follow the
+[removal instructions](docs/removal.md) to transfer ownership before uninstalling.
+For recovery steps, see [Troubleshooting](docs/troubleshooting.md).
+
+The [quality checklist](docs/quality-scale.md) is a custom-integration
+self-assessment, not an official Home Assistant medal.
 
 ## Control behavior
 
@@ -183,7 +184,8 @@ an actuator that lacks it.
 
 ## Integration actions
 
-The integration registers seven actions. Resource actions accept either one
+The integration registers eight actions. The complete
+[configuration and action reference](docs/reference.md) defines their contracts. Resource actions accept either one
 `resource_id` or one managed `entity_id`, never both. `config_entry_id` is
 optional for the singleton integration.
 
@@ -195,6 +197,7 @@ optional for the singleton integration.
 | `ha_operator.skip_occurrence` | Mark the specified `policy_id` and `occurrence_id` skipped through its supplied UTC Unix `expires_at`. |
 | `ha_operator.reconcile` | Reevaluate one resource, or all resources when no target is supplied. Existing mode, lease, fault, and command guards still apply. |
 | `ha_operator.explain` | Return response data for one resource, or all resources: revision, fault, decision, observation, manual lease, last command, attempts, and requirements. |
+| `ha_operator.seed_intents` | Admin-only observe-mode migration action accepting a mapping of desired control IDs to explicit Boolean values in `values`. No response or dependent ON-edge replay. |
 | `ha_operator.export_trace` | Admin-only action that returns a sanitized, versioned journal page. Accepts optional `config_entry_id`, `after`, and `limit`; does not accept a resource target or change control state. |
 
 For `request`, `mode` defaults to `target`, which needs a capability-valid `target`
@@ -239,8 +242,10 @@ uv run python scripts/coverage_gate.py artifacts/coverage.json
 uv run python scripts/mutation_gate.py --output artifacts/mutations.json
 ```
 
-The coverage gate requires more than 95% line coverage for every production Python
-module and 100% line and branch coverage for the config flow. The mutation gate checks selected decision
+The coverage gate requires more than 95% line coverage and more than 95% combined
+statement/branch coverage for every production Python module. Branch metadata and
+complete counts are required, with no executable exclusions. Config flow requires
+100% line and branch coverage. The mutation gate checks selected decision
 and dispatch guards; inspect its report rather than treating execution as proof
 that every mutation was detected.
 

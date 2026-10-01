@@ -83,8 +83,13 @@ async def test_native_delete_referenced_resource_inhibits_until_repaired_and_rel
     assert entry.state is ConfigEntryState.SETUP_ERROR
     assert not entry.update_listeners
     issue = ir.async_get(hass).async_get_issue(DOMAIN, f"configuration_{entry.entry_id}")
-    assert issue is not None and issue.translation_key == "configuration_error"
-    assert "existing resource" in issue.translation_placeholders["detail"]
+    assert issue is not None
+    assert issue.translation_key == (
+        "config_policy_must_reference_an_existing_resource"
+        if kind == "policy"
+        else "config_provider_must_reference_an_existing_resource"
+    )
+    assert issue.translation_placeholders == {}
     assert raw.commands == []
 
     # HA removes update listeners after failed setup. The Repair explicitly tells
@@ -130,18 +135,26 @@ async def test_restored_valid_snapshot_clears_storage_repair_only_after_good_rel
     entry = await async_setup_operator(hass, tmp_path)
     path = tmp_path / f"ha_operator.{entry.entry_id}.json"
     snapshot = await hass.async_add_executor_job(path.read_text)
+    original = entry.runtime_data
     await hass.async_add_executor_job(path.write_text, "invalid json")
-    assert await hass.config_entries.async_reload(entry.entry_id)
-    await hass.async_block_till_done()
-    assert entry.runtime_data.fault == "storage_error"
-    assert ir.async_get(hass).async_get_issue(DOMAIN, f"storage_{entry.entry_id}") is not None
-    assert await hass.config_entries.async_reload(entry.entry_id)
-    await hass.async_block_till_done()
-    assert entry.runtime_data.fault == "storage_error"
-    assert ir.async_get(hass).async_get_issue(DOMAIN, f"storage_{entry.entry_id}") is not None
+    for _ in range(2):
+        assert not await hass.config_entries.async_reload(entry.entry_id)
+        await hass.async_block_till_done()
+        assert entry.state is ConfigEntryState.SETUP_ERROR
+        runtime = entry.runtime_data
+        assert runtime.fault == "storage_error" and runtime._closed
+        assert not runtime._tasks and not runtime._listeners and not runtime._unsubscribers
+        assert not runtime._timers and runtime._deadline_timer is None
+        assert original._closed and all(task.done() for task in original._tasks)
+        assert not original._listeners and not original._unsubscribers
+        assert ir.async_get(hass).async_get_issue(DOMAIN, f"storage_{entry.entry_id}") is not None
+        assert await hass.async_add_executor_job(path.read_text) == "invalid json"
+        assert raw.commands == []
     await hass.async_add_executor_job(path.write_text, snapshot)
     assert await hass.config_entries.async_reload(entry.entry_id)
     await hass.async_block_till_done()
+    assert entry.state is ConfigEntryState.LOADED
+    assert len(entry.runtime_data._tasks) == 1 and not entry.runtime_data._tasks[0].done()
     assert entry.runtime_data.fault is None
     assert ir.async_get(hass).async_get_issue(DOMAIN, f"storage_{entry.entry_id}") is None
     assert raw.commands == []

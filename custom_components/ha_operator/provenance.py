@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import asdict, dataclass
 
 from .core import Decision, ManualLease, Occurrence, Target
+from .data import PolicyConfig, RequirementConfig
 
 
 def target_label(target: Target | None) -> str:
@@ -36,16 +38,16 @@ class Selection:
     related_entities: tuple[str, ...] = ()
     active_inputs: tuple[str, ...] = ()
 
-    def attributes(self) -> dict:
+    def attributes(self) -> dict[str, object]:
         return asdict(self)
 
 
 def selection_for(
     decision: Decision,
     manual: ManualLease | None,
-    policies: dict,
+    policies: Mapping[str, PolicyConfig],
     occurrences: list[Occurrence],
-    requirements: dict,
+    requirements: Mapping[str, RequirementConfig],
     activations: dict[str, tuple[tuple[str, str], ...]],
 ) -> Selection:
     """Match configured identities exactly, including occurrence IDs containing colons."""
@@ -86,18 +88,18 @@ def selection_for(
                         for entity_id in (
                             config.get("eligibility_entity"),
                             config.get("target_entity"),
-                            config.get("input", {}).get("entity_id"),
+                            config["input"]["entity_id"] if "input" in config else None,
                         )
                         if entity_id
                     )
                 ),
             )
-    for key, config in requirements.items():
-        for provider in config["providers"]:
+    for key, requirement in requirements.items():
+        for provider in requirement["providers"]:
             if source != f"requirement:{key}:{provider['id']}":
                 continue
             active = activations.get(key, ())
-            name = config["name"][:128]
+            name = requirement["name"][:128]
             reason = f"Airflow: {name}"
             if active:
                 reason += " — " + ", ".join(label for _, label in active)
@@ -106,7 +108,7 @@ def selection_for(
                 key,
                 name,
                 reason[:255],
-                related_entities=tuple(config["activation_entities"][:32]),
+                related_entities=tuple(requirement["activation_entities"][:32]),
                 active_inputs=tuple(entity_id for entity_id, _ in active),
             )
     return Selection("unknown", source, selection_reason="Source unavailable")

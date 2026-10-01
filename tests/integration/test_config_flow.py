@@ -53,8 +53,8 @@ async def test_resource_errors_then_creation_and_reconfigure(hass, native_source
     invalid = await hass.config_entries.subentries.async_configure(
         form["flow_id"], {"name": "Bad", "kind": "cover", "entity_id": "cover.missing"}
     )
-    assert invalid["errors"] == {"base": "entity_not_found"}
-    assert "cover.missing" in invalid["description_placeholders"]["detail"]
+    assert invalid["errors"] == {"base": "config_entity_not_found"}
+    assert "cover.missing" in invalid["description_placeholders"]["value"]
     result = await hass.config_entries.subentries.async_configure(
         form["flow_id"],
         {
@@ -75,7 +75,7 @@ async def test_resource_errors_then_creation_and_reconfigure(hass, native_source
         error = await hass.config_entries.subentries.async_configure(
             edit["flow_id"], {"name": "Window", "kind": "cover", "entity_id": "cover.missing"}
         )
-        assert error["errors"] == {"base": "entity_not_found"}
+        assert error["errors"] == {"base": "config_entity_not_found"}
         changed = await hass.config_entries.subentries.async_configure(
             edit["flow_id"], {"name": "Renamed", "kind": "cover", "entity_id": "cover.raw"}
         )
@@ -87,7 +87,7 @@ async def test_resource_errors_then_creation_and_reconfigure(hass, native_source
     duplicate = await hass.config_entries.subentries.async_configure(
         duplicate["flow_id"], {"name": "Duplicate", "kind": "cover", "entity_id": "cover.raw"}
     )
-    assert duplicate["errors"] == {"base": "duplicate_output"}
+    assert duplicate["errors"] == {"base": "config_an_output_is_already_owned_by_another_resource"}
 
 
 async def test_policy_needs_resource_then_creates(hass, native_sources):
@@ -193,10 +193,10 @@ async def test_native_policy_forms_create_then_reconfigure_type_and_legacy(
 @pytest.mark.parametrize(
     "base_patch,source_patch,code",
     [
-        ({}, {"entity_id": "sensor.missing"}, "entity_not_found"),
-        ({}, {"entity_id": "timer.ventilation"}, "invalid_input_source"),
-        ({}, {"unit": "°F"}, "input_unit_mismatch"),
-        ({}, {"threshold": float("nan")}, "invalid_policy_input"),
+        ({}, {"entity_id": "sensor.missing"}, "config_entity_not_found"),
+        ({}, {"entity_id": "timer.ventilation"}, "config_entity_domain"),
+        ({}, {"unit": "°F"}, "config_input_unit_must_match_the_sensor_unit"),
+        ({}, {"threshold": float("nan")}, "config_number_minimum"),
     ],
 )
 async def test_native_policy_final_atomic_validation_errors(
@@ -230,7 +230,7 @@ async def test_native_policy_final_atomic_validation_errors(
         },
     )
     assert result["step_id"] == "qualified_numeric" and result["errors"] == {"base": code}
-    assert result["description_placeholders"]["detail"]
+    assert "detail" not in result["description_placeholders"]
     assert len(entry.subentries) == 1
 
 
@@ -323,9 +323,9 @@ async def test_reconfigure_policy_without_resource_aborts(hass):
 @pytest.mark.parametrize(
     "patch,code",
     [
-        ({"target": {"on": True}}, "invalid_configuration"),
-        ({"eligibility_entity": "input_boolean.ready"}, "input_eligibility_conflict"),
-        ({"priority": 0.5}, "invalid_configuration"),
+        ({"target": {"on": True}}, "config_target_fields_are_not_supported_by"),
+        ({"eligibility_entity": "input_boolean.ready"}, "config_input_eligibility_conflict"),
+        ({"priority": 0.5}, "config_priority_must_be_an_integer"),
     ],
 )
 async def test_native_common_errors_are_repairable_before_input_form(
@@ -384,7 +384,7 @@ async def test_desired_controls_create_reconfigure_and_follow(hass):
             "on_targets": [parent_id],
         },
     )
-    assert error["errors"] == {"base": "invalid_configuration"}
+    assert error["errors"] == {"base": "config_intent_cycle"}
     result = await hass.config_entries.subentries.async_configure(
         edit["flow_id"],
         {
@@ -454,7 +454,7 @@ async def test_requirement_passive_and_overlap(hass, native_sources):
     form = await _start(hass, entry, "requirement")
     assert (await hass.config_entries.subentries.async_configure(form["flow_id"], data))[
         "errors"
-    ] == {"base": "overlapping_requirement"}
+    ] == {"base": "config_a_resource_cannot_belong_to_multiple_airflow_control_groups"}
 
 
 def test_base_flow_requires_a_schema():

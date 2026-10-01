@@ -7,12 +7,12 @@ import logging
 import math
 from collections.abc import Callable, Mapping
 from contextvars import ContextVar
-from typing import Any
+from typing import TypeGuard, cast
 
 from homeassistant.components.cover import CoverEntityFeature
 from homeassistant.components.fan import FanEntityFeature
 from homeassistant.const import STATE_UNAVAILABLE, STATE_UNKNOWN
-from homeassistant.core import Context, HomeAssistant, State, callback
+from homeassistant.core import Context, Event, EventStateChangedData, HomeAssistant, State, callback
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.event import async_track_state_change_event
 from homeassistant.util import dt as dt_util
@@ -22,7 +22,9 @@ from homeassistant.util.percentage import (
 )
 
 from .async_utils import async_settle
-from .core import Observation, Target
+from .const import DOMAIN
+from .core import Observation, Target, TargetValidationError
+from .data import ResourceConfig
 
 DISPATCH_PARENT: ContextVar[Context | None] = ContextVar(
     "ha_operator_dispatch_parent", default=None
@@ -34,15 +36,20 @@ _UNKNOWN = {STATE_UNAVAILABLE, STATE_UNKNOWN}
 _DIRECTIONS = {"forward", "reverse"}
 
 
-def _number(value: Any, label: str, maximum: float = 100) -> float:
+def _number(value: object, label: str, maximum: float = 100) -> float:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
-        raise ValueError(f"{label} must be numeric")
+        raise TargetValidationError("numeric_target", f"{label} must be numeric", field=label)
     if not math.isfinite(value) or not 0 <= value <= maximum:
-        raise ValueError(f"{label} must be between 0 and {maximum}")
+        raise TargetValidationError(
+            "target_range",
+            f"{label} must be between 0 and {maximum}",
+            field=label,
+            maximum=str(maximum),
+        )
     return float(value)
 
 
-def _usable(state: State | None) -> bool:
+def _usable(state: State | None) -> TypeGuard[State]:
     return bool(
         state is not None
         and state.state not in _UNKNOWN
@@ -55,12 +62,13 @@ def _usable(state: State | None) -> bool:
 class Adapter:
     """Read feedback directly, dispatch only while the caller's generation is current."""
 
-    def __init__(self, hass: HomeAssistant, resource_id: str, config: Mapping[str, Any]) -> None:
+    def __init__(self, hass: HomeAssistant, resource_id: str, config: ResourceConfig) -> None:
         self.hass = hass
         self.resource_id = resource_id
         self.config = config
         self.entity_id: str = config.get("entity_id", "")
-        self.audit_callback: Callable[[dict[str, Any]], None] | None = None
+        self._source_entities = tuple(config.get("outputs", (self.entity_id,)))
+        self.audit_callback: Callable[[dict[str, object]], None] | None = None
         self._audit_warning_logged = False
 
     @property
@@ -74,9 +82,21 @@ class Adapter:
     def _state(self) -> State | None:
         return self.hass.states.get(self.entity_id)
 
+    @property
+    def source_available(self) -> bool:
+        """Source presence is separate from usable, independently confirmed feedback."""
+        return all(
+            (state := self.hass.states.get(entity_id)) is not None
+            and state.state != STATE_UNAVAILABLE
+            for entity_id in self._source_entities
+        )
+
     def _restriction(self) -> str | None:
-        for key, label in (("fault_entity", "fault"), ("restriction_entity", "restricted")):
-            if entity_id := self.config.get(key):
+        for entity_id, label in (
+            (self.config.get("fault_entity"), "fault"),
+            (self.config.get("restriction_entity"), "restricted"),
+        ):
+            if entity_id:
                 state = self.hass.states.get(entity_id)
                 if not _usable(state):
                     return f"{label}_unknown"
@@ -94,22 +114,22 @@ class Adapter:
         raise NotImplementedError
 
     async def async_stop(self) -> None:
-        raise HomeAssistantError("This device does not support physical STOP")
+        raise HomeAssistantError(translation_domain=DOMAIN, translation_key="stop_unsupported")
 
     async def _call(
-        self, domain: str, service: str, data: dict[str, Any], current: Callable[[], bool]
+        self, domain: str, service: str, data: dict[str, object], current: Callable[[], bool]
     ) -> bool:
         # Re-read restrictions immediately before every individual physical command.
         if not current():
             return False
         if self._restriction():
-            raise HomeAssistantError("Device is restricted")
+            raise HomeAssistantError(translation_domain=DOMAIN, translation_key="device_restricted")
         await self._async_service(domain, service, data)
         # The command was sent even if synchronous feedback satisfied the target
         # or a newer generation arrived while the service was running.
         return True
 
-    async def _async_service(self, domain: str, service: str, data: dict[str, Any]) -> None:
+    async def _async_service(self, domain: str, service: str, data: dict[str, object]) -> None:
         """Drain physical I/O on cancellation before an old worker can disappear.
 
         HA services may await executor threads, whose physical writes cannot be
@@ -150,7 +170,7 @@ class Adapter:
         self,
         domain: str,
         service: str,
-        data: Mapping[str, Any],
+        data: Mapping[str, object],
         context: Context,
         status: str,
         *,
@@ -164,7 +184,7 @@ class Adapter:
         """
         if self.audit_callback is None:
             return
-        payload: dict[str, Any] = {}
+        payload: dict[str, object] = {}
         if isinstance(entity_id := data.get("entity_id"), str):
             payload["entity_id"] = entity_id[:255]
         for field in ("position", "percentage"):
@@ -201,7 +221,11 @@ class Adapter:
     def _validate_fields(self, target: Target, allowed: set[str]) -> None:
         extra = target.to_dict().keys() - allowed
         if extra:
-            raise ValueError(f"Unsupported target fields: {', '.join(sorted(extra))}")
+            raise TargetValidationError(
+                "unsupported_target_fields",
+                f"Unsupported target fields: {', '.join(sorted(extra))}",
+                fields=", ".join(sorted(extra)),
+            )
 
     def _native_observation(self, target: Target | None, now: float) -> Observation:
         state = self._state()
@@ -236,14 +260,16 @@ class CoverAdapter(Adapter):
         state = self._state()
         position = state.attributes.get("current_position") if _usable(state) else None
         if isinstance(position, (int, float)) and not isinstance(position, bool):
-            if math.isfinite(position) and 0 <= position <= 100:
+            if 0 <= position <= 100 and math.isfinite(position):
                 return self._native_observation(Target(position=float(position)), now)
         return self._native_observation(None, now)
 
     def normalize(self, target: Target) -> Target:
         self._validate_fields(target, {"position"})
         if not self.supported_features & CoverEntityFeature.SET_POSITION:
-            raise ValueError("Cover does not support percentage position")
+            raise TargetValidationError(
+                "cover_position_unsupported", "Cover does not support percentage position"
+            )
         return Target(position=_number(target.position, "position"))
 
     async def async_apply(self, target: Target, still_current: Callable[[], bool]) -> bool:
@@ -277,7 +303,9 @@ class SwitchAdapter(Adapter):
     def normalize(self, target: Target) -> Target:
         self._validate_fields(target, {"on"})
         if not isinstance(target.on, bool):
-            raise ValueError("Switch target requires a boolean on value")
+            raise TargetValidationError(
+                "switch_boolean_required", "Switch target requires a boolean on value"
+            )
         return target
 
     async def async_apply(self, target: Target, still_current: Callable[[], bool]) -> bool:
@@ -308,7 +336,9 @@ class FanAdapter(Adapter):
         state = self._state()
         step = state.attributes.get("percentage_step", 1) if state else 1
         if not isinstance(step, (float, int)) or isinstance(step, bool) or not 0 < step <= 100:
-            raise ValueError("Fan reports invalid percentage_step")
+            raise TargetValidationError(
+                "invalid_percentage_step", "Fan reports invalid percentage_step"
+            )
         return max(1, round(100 / step))
 
     @property
@@ -321,7 +351,7 @@ class FanAdapter(Adapter):
         except ValueError:
             return 1
 
-    def _percentage(self, percentage: Any) -> int:
+    def _percentage(self, percentage: object) -> int:
         percentage = _number(percentage, "percentage")
         if percentage == 0:
             return 0
@@ -338,8 +368,8 @@ class FanAdapter(Adapter):
         if (
             not isinstance(percentage, (int, float))
             or isinstance(percentage, bool)
-            or not math.isfinite(percentage)
             or not 0 <= percentage <= 100
+            or not math.isfinite(percentage)
         ):
             percentage = None
         direction = state.attributes.get("direction")
@@ -355,30 +385,39 @@ class FanAdapter(Adapter):
     def normalize(self, target: Target) -> Target:
         self._validate_fields(target, {"on", "percentage", "direction"})
         if not target.to_dict():
-            raise ValueError("Fan target must not be empty")
+            raise TargetValidationError("empty_fan_target", "Fan target must not be empty")
         features = self.supported_features
         if target.percentage is not None and not features & FanEntityFeature.SET_SPEED:
-            raise ValueError("Fan does not support percentage speed")
+            raise TargetValidationError(
+                "fan_speed_unsupported", "Fan does not support percentage speed"
+            )
         if target.direction is not None:
             if target.direction not in _DIRECTIONS or not features & FanEntityFeature.DIRECTION:
-                raise ValueError("Fan does not support this direction")
+                raise TargetValidationError(
+                    "fan_direction_unsupported", "Fan does not support this direction"
+                )
         observed = self.read_observation(0).target
         on = target.on
         if target.percentage is not None:
             percentage = self._percentage(target.percentage)
             if on is False and percentage > 0 or on is True and percentage == 0:
-                raise ValueError("Fan on and percentage targets conflict")
+                raise TargetValidationError(
+                    "fan_power_conflict", "Fan on and percentage targets conflict"
+                )
             on = percentage > 0
         else:
             percentage = None
         if on is None:
             if observed is None or observed.on is None:
-                raise ValueError("Direction-only command requires known on/off feedback")
+                raise TargetValidationError(
+                    "direction_requires_feedback",
+                    "Direction-only command requires known on/off feedback",
+                )
             on = observed.on
         if on and not features & (FanEntityFeature.TURN_ON | FanEntityFeature.SET_SPEED):
-            raise ValueError("Fan does not support turning on")
+            raise TargetValidationError("fan_on_unsupported", "Fan does not support turning on")
         if not on and not features & (FanEntityFeature.TURN_OFF | FanEntityFeature.SET_SPEED):
-            raise ValueError("Fan does not support turning off")
+            raise TargetValidationError("fan_off_unsupported", "Fan does not support turning off")
         if on and features & FanEntityFeature.SET_SPEED and percentage is None:
             default = self.config.get("default_target", {})
             value = (
@@ -387,7 +426,9 @@ class FanAdapter(Adapter):
             if value is None and observed:
                 value = observed.percentage
             if not value:
-                raise ValueError("Bare turn_on requires a configured default speed")
+                raise TargetValidationError(
+                    "fan_default_speed_required", "Bare turn_on requires a configured default speed"
+                )
             percentage = self._percentage(value)
         if not on:
             percentage = None
@@ -397,7 +438,9 @@ class FanAdapter(Adapter):
             if direction is not None and (
                 direction not in _DIRECTIONS or not features & FanEntityFeature.DIRECTION
             ):
-                raise ValueError("Fan default direction is unsupported")
+                raise TargetValidationError(
+                    "fan_default_direction_unsupported", "Fan default direction is unsupported"
+                )
         return Target(on=on, percentage=percentage, direction=direction)
 
     async def async_apply(self, target: Target, still_current: Callable[[], bool]) -> bool:
@@ -419,7 +462,7 @@ class FanAdapter(Adapter):
                 still_current,
             )
         service = "turn_on" if target.on else "turn_off"
-        data: dict[str, Any] = {"entity_id": self.entity_id}
+        data: dict[str, object] = {"entity_id": self.entity_id}
         if target.on and target.percentage is not None:
             data["percentage"] = target.percentage
         return await self._call("fan", service, data, still_current)
@@ -428,7 +471,7 @@ class FanAdapter(Adapter):
 class RelayFanAdapter(Adapter):
     """One finite relay bundle, with confirmed break-before-make transitions."""
 
-    def __init__(self, hass: HomeAssistant, resource_id: str, config: Mapping[str, Any]) -> None:
+    def __init__(self, hass: HomeAssistant, resource_id: str, config: ResourceConfig) -> None:
         super().__init__(hass, resource_id, config)
         self.outputs = tuple(config["outputs"])
         if not self.outputs or len(set(self.outputs)) != len(self.outputs):
@@ -518,30 +561,40 @@ class RelayFanAdapter(Adapter):
     def normalize(self, target: Target) -> Target:
         self._validate_fields(target, {"on", "percentage", "direction", "profile"})
         if not target.to_dict():
-            raise ValueError("Fan target must not be empty")
+            raise TargetValidationError("empty_fan_target", "Fan target must not be empty")
         if target.direction is not None and target.direction not in _DIRECTIONS:
-            raise ValueError("Relay direction must be forward or reverse")
+            raise TargetValidationError(
+                "relay_direction_invalid", "Relay direction must be forward or reverse"
+            )
         percentage = None if target.percentage is None else _number(target.percentage, "percentage")
         if target.profile is not None:
             if target.profile not in self.profiles:
-                raise ValueError("Unknown relay profile")
+                raise TargetValidationError("unknown_relay_profile", "Unknown relay profile")
             result = self._target(target.profile)
             for field in ("on", "percentage", "direction"):
                 value = getattr(target, field)
                 if value is not None and value != getattr(result, field):
-                    raise ValueError("Relay profile conflicts with other target fields")
+                    raise TargetValidationError(
+                        "relay_profile_conflict", "Relay profile conflicts with other target fields"
+                    )
             return result
         if target.on is False or percentage == 0:
             if target.on is True or percentage is not None and percentage > 0:
-                raise ValueError("Fan on and percentage targets conflict")
+                raise TargetValidationError(
+                    "fan_power_conflict", "Fan on and percentage targets conflict"
+                )
             return self._target(self.off_profile)
         if target.on is True and percentage is None and target.direction is None:
             return self._target(self.default_profile)
         observed = self.read_observation(0).target
-        if target.on is None and percentage is None and observed is None:
-            raise ValueError("Direction-only command requires known on/off feedback")
-        if target.on is None and percentage is None and observed.on is False:
-            return self._target(self.off_profile)
+        if target.on is None and percentage is None:
+            if observed is None:
+                raise TargetValidationError(
+                    "direction_requires_feedback",
+                    "Direction-only command requires known on/off feedback",
+                )
+            if observed.on is False:
+                return self._target(self.off_profile)
         default = self._target(self.default_profile)
         direction = (
             target.direction
@@ -555,7 +608,9 @@ class RelayFanAdapter(Adapter):
             and (direction is None or self._target(name).direction == direction)
         ]
         if not candidates:
-            raise ValueError("No relay profile supports this direction")
+            raise TargetValidationError(
+                "relay_direction_unsupported", "No relay profile supports this direction"
+            )
         candidates.sort(key=lambda name: (self._target(name).percentage, name))
         if percentage is None:
             value = (
@@ -573,7 +628,7 @@ class RelayFanAdapter(Adapter):
         changed = asyncio.Event()
 
         @callback
-        def on_change(event: Any) -> None:
+        def on_change(event: Event[EventStateChangedData]) -> None:
             changed.set()
 
         unsubscribe = async_track_state_change_event(self.hass, self.outputs, on_change)
@@ -588,14 +643,18 @@ class RelayFanAdapter(Adapter):
                     except TimeoutError:
                         pass
         except TimeoutError as err:
-            raise HomeAssistantError("Relay interlock timed out waiting for confirmed off") from err
+            raise HomeAssistantError(
+                translation_domain=DOMAIN, translation_key="relay_interlock_timeout"
+            ) from err
         finally:
             unsubscribe()
         return False
 
     async def async_apply(self, target: Target, still_current: Callable[[], bool]) -> bool:
         target = self.normalize(target)
-        expected = self.profiles[target.profile]["outputs"]
+        # Every successful relay normalization returns _target(configured_name).
+        profile = cast(str, target.profile)
+        expected = self.profiles[profile]["outputs"]
         if not still_current():
             return False
         if self._feedback() == expected:
@@ -616,20 +675,24 @@ class RelayFanAdapter(Adapter):
         if not still_current():
             return False
         if self._feedback() != dict.fromkeys(self.outputs, False):
-            raise HomeAssistantError("Relay feedback changed during reversal dead time")
+            raise HomeAssistantError(
+                translation_domain=DOMAIN, translation_key="relay_feedback_changed"
+            )
         for output, on in expected.items():
             if on:
                 feedback = self._feedback()
                 if feedback is None or any(
                     feedback[item] for item in self.outputs if not expected[item]
                 ):
-                    raise HomeAssistantError("Conflicting relay output is not confirmed off")
+                    raise HomeAssistantError(
+                        translation_domain=DOMAIN, translation_key="relay_conflict"
+                    )
                 if not await self._call("switch", "turn_on", {"entity_id": output}, still_current):
                     return False
         return True
 
 
-def create_adapter(hass: HomeAssistant, resource_id: str, config: Mapping[str, Any]) -> Adapter:
+def create_adapter(hass: HomeAssistant, resource_id: str, config: ResourceConfig) -> Adapter:
     """Create an adapter without claiming any service result is observed feedback."""
     classes = {
         "cover": CoverAdapter,

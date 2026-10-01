@@ -7,6 +7,8 @@ from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from typing import Any
 
+from .data import ReturnMonitorStateRecord
+
 
 def _finite(value: float, name: str) -> None:
     if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
@@ -55,7 +57,7 @@ class ReturnMonitorState:
     def phase(self) -> str:
         return "overdue" if self.overdue else "waiting" if self.due_at is not None else "idle"
 
-    def to_record(self) -> dict[str, Any]:
+    def to_record(self) -> ReturnMonitorStateRecord:
         return {
             "target_position": self.target_position,
             "due_at": self.due_at,

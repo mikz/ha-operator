@@ -115,10 +115,12 @@ MUTANTS = (
         "queued_mutator_commits_after_close",
         "custom_components/ha_operator/runtime.py",
         "            if self._closed:\n"
-        '                raise HomeAssistantError("HA Operator is unloaded")\n'
+        "                raise HomeAssistantError(translation_domain=DOMAIN, "
+        'translation_key="unloaded")\n'
         '            candidate_revision = state["revision"]',
         "            if False:\n"
-        '                raise HomeAssistantError("HA Operator is unloaded")\n'
+        "                raise HomeAssistantError(translation_domain=DOMAIN, "
+        'translation_key="unloaded")\n'
         '            candidate_revision = state["revision"]',
         (
             "tests/integration/test_policy_inputs_lifecycle.py::"
@@ -128,11 +130,13 @@ MUTANTS = (
     Mutant(
         "pending_source_fact_dispatches_inside_adapter",
         "custom_components/ha_operator/runtime.py",
-        "            def still_current(generation=generation, target=target):\n"
+        "            def still_current(generation: int = generation, "
+        "target: Target = target) -> bool:\n"
         "                if self._input_ingress[resource_id] "
         "!= self._input_processed[resource_id]:\n"
         "                    return False",
-        "            def still_current(generation=generation, target=target):\n"
+        "            def still_current(generation: int = generation, "
+        "target: Target = target) -> bool:\n"
         "                if False:\n"
         "                    return False",
         (

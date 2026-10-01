@@ -2,7 +2,14 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING, Any, cast
+
 import voluptuous as vol
+
+from . import OperatorConfigEntry
+
+if TYPE_CHECKING:
+    from .runtime import OperatorRuntime
 from homeassistant.core import HomeAssistant, ServiceCall, SupportsResponse, callback
 from homeassistant.exceptions import ServiceValidationError
 from homeassistant.helpers import config_validation as cv
@@ -37,7 +44,7 @@ _OCCURRENCE = vol.Schema(
 )
 
 
-def _trace_integer(value):
+def _trace_integer(value: object) -> int:
     if type(value) is not int:
         raise vol.Invalid("Expected an integer")
     return value
@@ -54,38 +61,56 @@ _TRACE = vol.Schema(
 
 @callback
 def async_register_services(hass: HomeAssistant) -> None:
-    def runtime_for(call):
+    def runtime_for(call: ServiceCall) -> OperatorRuntime:
         entry_id = call.data.get("config_entry_id")
         if not entry_id:
             entries = hass.config_entries.async_entries(DOMAIN)
             if len(entries) != 1:
-                raise ServiceValidationError("Configure HA Operator before calling actions")
+                raise ServiceValidationError(
+                    translation_domain=DOMAIN, translation_key="configure_first"
+                )
             entry_id = entries[0].entry_id
-        return service.async_get_config_entry(hass, DOMAIN, entry_id).runtime_data
+        # Native lookup checks the domain and loaded entry before exposing runtime data.
+        entry = cast(OperatorConfigEntry, service.async_get_config_entry(hass, DOMAIN, entry_id))
+        return entry.runtime_data
 
-    def resource_for(call, runtime, *, optional=False):
+    def resource_for(
+        call: ServiceCall, runtime: OperatorRuntime, *, optional: bool = False
+    ) -> str | None:
         key = call.data.get("resource_id")
         entity_ids = call.data.get("entity_id", [])
         if key and entity_ids:
-            raise ServiceValidationError("Choose resource_id or entity_id")
+            raise ServiceValidationError(
+                translation_domain=DOMAIN, translation_key="ambiguous_resource"
+            )
         if entity_ids:
             if len(entity_ids) != 1:
-                raise ServiceValidationError("Target exactly one managed entity")
+                raise ServiceValidationError(
+                    translation_domain=DOMAIN, translation_key="one_managed_entity"
+                )
             entity = er.async_get(hass).async_get(entity_ids[0])
             if (
                 entity is None
                 or entity.platform != DOMAIN
                 or entity.config_entry_id != runtime.entry.entry_id
             ):
-                raise ServiceValidationError("Target is not a managed HA Operator entity")
+                raise ServiceValidationError(
+                    translation_domain=DOMAIN, translation_key="not_managed_entity"
+                )
             key = entity.config_subentry_id
         if key is None and not optional:
-            raise ServiceValidationError("Target a resource_id or managed entity_id")
+            raise ServiceValidationError(
+                translation_domain=DOMAIN, translation_key="resource_required"
+            )
         if key is not None and key not in runtime.resources:
-            raise ServiceValidationError("Unknown resource")
+            raise ServiceValidationError(
+                translation_domain=DOMAIN, translation_key="unknown_resource"
+            )
         return key
 
-    async def handle(call: ServiceCall):
+    async def handle(call: ServiceCall) -> dict[str, Any] | None:
+        # HA encodes native heterogeneous response values (including tuples and
+        # observed attributes); its decoded-JSON alias is narrower than this boundary.
         runtime = runtime_for(call)
         if call.service == "seed_intents":
             await runtime.async_seed_intents(call.data["values"])
@@ -94,24 +119,41 @@ def async_register_services(hass: HomeAssistant) -> None:
             return await runtime.async_export_trace(
                 after=call.data.get("after"), limit=call.data["limit"]
             )
-        if call.service in {"submit_occurrence", "skip_occurrence"}:
-            result = await getattr(runtime, f"async_{call.service}")(
+        if call.service == "submit_occurrence":
+            occurrence = await runtime.async_submit_occurrence(
                 call.data["policy_id"],
                 call.data["occurrence_id"],
                 call.data["expires_at"],
-                **({"context": call.context} if call.service == "submit_occurrence" else {}),
+                context=call.context,
             )
-            return result if call.return_response else None
+            return dict(occurrence) if call.return_response else None
+        if call.service == "skip_occurrence":
+            await runtime.async_skip_occurrence(
+                call.data["policy_id"], call.data["occurrence_id"], call.data["expires_at"]
+            )
+            return None
         key = resource_for(call, runtime, optional=call.service in {"explain", "reconcile"})
         if call.service == "explain":
             return runtime.explain(key)
+        if call.service == "reconcile":
+            await runtime.async_reconcile(key)
+            return None
+        # resource_for requires a resource for the remaining registered actions.
+        resource_id = cast(str, key)
         if call.service == "request":
-            arguments = {
-                name: value for name, value in call.data.items() if name not in _TARGET_KEYS
-            }
-            result = await runtime.async_request(key, **arguments, context=call.context)
-            return result if call.return_response else None
-        await getattr(runtime, f"async_{call.service}")(key)
+            # Native schema-normalized ServiceCall data is the dynamic external boundary.
+            result = await runtime.async_request(
+                resource_id,
+                mode=call.data["mode"],
+                target=call.data.get("target"),
+                duration=call.data.get("duration"),
+                expires_at=call.data.get("expires_at"),
+                indefinite=call.data["indefinite"],
+                request_id=call.data.get("request_id"),
+                context=call.context,
+            )
+            return dict(result) if call.return_response else None
+        await runtime.async_release(resource_id)
         return None
 
     service.async_register_admin_service(
@@ -157,6 +199,3 @@ def async_register_services(hass: HomeAssistant) -> None:
                 else SupportsResponse.NONE
             ),
         )
-
-
-_TARGET_KEYS = {"config_entry_id", "resource_id", "entity_id"}

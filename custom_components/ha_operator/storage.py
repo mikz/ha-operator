@@ -14,11 +14,12 @@ import math
 from copy import deepcopy
 from functools import partial
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, NoReturn, cast
 
 from homeassistant.helpers.json import save_json
 
 from .async_utils import async_settle as _settle
+from .data import JSONObject, JSONValue, StoredSnapshot
 from .policy_inputs import NumericState, TimerState
 from .return_monitor import ReturnMonitorState
 
@@ -48,11 +49,21 @@ class InvalidSnapshot(ValueError):
     """A snapshot does not conform to the supported on-disk schema."""
 
 
-def _empty_state() -> dict[str, Any]:
-    return {"revision": 0, **{key: {} for key in _MAP_KEYS}}
+def _empty_state() -> StoredSnapshot:
+    return {
+        "revision": 0,
+        "manuals": {},
+        "occurrences": {},
+        "modes": {},
+        "policy_enabled": {},
+        "requests": {},
+        "intents": {},
+        "policy_inputs": {},
+        "return_monitors": {},
+    }
 
 
-def _validate_json(value: Any) -> None:
+def _validate_json(value: object) -> None:
     """Reject values whose representation would change or fail in JSON."""
     if value is None or type(value) in (str, bool, int):
         return
@@ -69,7 +80,7 @@ def _validate_json(value: Any) -> None:
     raise InvalidSnapshot("Snapshot values must be finite JSON values with string keys")
 
 
-def _validate_state(state: Any) -> None:
+def _validate_state(state: object) -> StoredSnapshot:
     if not isinstance(state, dict):
         raise InvalidSnapshot("Snapshot data must be an object")
     if type(state.get("revision")) is not int or state["revision"] < 0:
@@ -110,7 +121,11 @@ def _validate_state(state: Any) -> None:
             raise InvalidSnapshot("Invalid policy input fingerprint")
         if not isinstance(item["type"], str):
             raise InvalidSnapshot("Invalid policy input type")
-        model = {"qualified_numeric": NumericState, "timer_episode": TimerState}.get(item["type"])
+        models: dict[str, type[NumericState] | type[TimerState]] = {
+            "qualified_numeric": NumericState,
+            "timer_episode": TimerState,
+        }
+        model = models.get(item["type"])
         if model is None or not isinstance(item["state"], dict):
             raise InvalidSnapshot("Invalid policy input type or state")
         try:
@@ -121,10 +136,13 @@ def _validate_state(state: Any) -> None:
         _validate_json(state)
     except RecursionError as err:
         raise InvalidSnapshot("Snapshot must not contain recursive values") from err
+    # Only envelope/maps/input-state validation has run. Runtime owns the remaining
+    # manual, occurrence and request semantic checks before control admission.
+    return cast(StoredSnapshot, state)
 
 
-def _unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
-    result: dict[str, Any] = {}
+def _unique_object(pairs: list[tuple[str, JSONValue]]) -> JSONObject:
+    result: JSONObject = {}
     for key, value in pairs:
         if key in result:
             raise InvalidSnapshot("Snapshot contains duplicate object keys")
@@ -132,11 +150,11 @@ def _unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     return result
 
 
-def _invalid_constant(value: str) -> Any:
+def _invalid_constant(value: str) -> NoReturn:
     raise InvalidSnapshot(f"Snapshot contains non-finite JSON constant: {value}")
 
 
-def _read_snapshot(path: Path, expected_existing: bool) -> dict[str, Any]:
+def _read_snapshot(path: Path, expected_existing: bool) -> StoredSnapshot:
     try:
         contents = path.read_text(encoding="utf-8")
     except FileNotFoundError:
@@ -155,11 +173,10 @@ def _read_snapshot(path: Path, expected_existing: bool) -> dict[str, Any]:
         state = {**state, "intents": {}}
     if envelope["version"] in (1, 2) and isinstance(state, dict):
         state = {**state, "policy_inputs": {}, "return_monitors": {}}
-    _validate_state(state)
-    return state
+    return _validate_state(state)
 
 
-def _write_snapshot(path: Path, state: dict[str, Any]) -> None:
+def _write_snapshot(path: Path, state: StoredSnapshot) -> None:
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     save_json(str(path), {"version": _VERSION, "data": state}, private=True, atomic_writes=True)
 
@@ -177,7 +194,7 @@ class IntentStore:
         self.fault: str | None = None
 
     @property
-    def state(self) -> dict[str, Any]:
+    def state(self) -> StoredSnapshot:
         """Return a detached view; callers must mutate through async_update."""
         return deepcopy(self._state)
 
@@ -208,8 +225,8 @@ class IntentStore:
                 raise asyncio.CancelledError
 
     async def async_update(
-        self, mutator: Callable[[dict[str, Any]], None], *, skip_unchanged: bool = False
-    ) -> dict[str, Any]:
+        self, mutator: Callable[[StoredSnapshot], None], *, skip_unchanged: bool = False
+    ) -> StoredSnapshot:
         """Save a mutation of the current revision before publishing it.
 
         Caller cancellation cannot undo a committed update. After commit this
