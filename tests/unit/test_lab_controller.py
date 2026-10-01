@@ -123,3 +123,30 @@ def test_timer_kill_requires_saved_accepted_phase(monkeypatch, tmp_path):
     result = lab.wait_saved_request("owned-lab-ha", "SyntheticEntry", expected)
     assert probes == [False, True]
     assert result["identity"] == "episode" and result["expires_at"] == 100
+
+
+def test_sleep_kill_requires_saved_detached_pair(monkeypatch, tmp_path):
+    import subprocess
+    import sys
+
+    expected = {"kind": "sleep_pair", "central": "central", "room": "room"}
+    state = {"intents": {"central": True, "room": True}}
+    path = tmp_path / "ha_operator.SyntheticEntry"
+    path.write_text(json.dumps({"data": state}))
+    probes = []
+
+    def inspect(args):
+        probe = args[5].replace("/config/.storage", str(tmp_path))
+        result = json.loads(subprocess.check_output([sys.executable, "-c", probe, *args[6:]]))
+        probes.append(result)
+        return result
+
+    def ordinary_save(_):
+        state["intents"]["room"] = False
+        path.write_text(json.dumps({"data": state}))
+
+    monkeypatch.setattr(lab, "json_output", inspect)
+    monkeypatch.setattr(lab.time, "sleep", ordinary_save)
+    result = lab.wait_saved_request("owned-lab-ha", "SyntheticEntry", expected)
+    assert probes == [False, True]
+    assert result["central"] == "central" and result["room"] == "room"

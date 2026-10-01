@@ -177,7 +177,7 @@ def select_subnet():
 
 def wait_saved_request(container, entry_id, expected, *, timeout=15):
     """Wait for this lab request's ordinary Store save before SIGKILL."""
-    if not entry_id.isalnum() or expected["kind"] not in {"manual", "timer"}:
+    if not entry_id.isalnum() or expected["kind"] not in {"manual", "timer", "sleep_pair"}:
         raise RuntimeError("Invalid lab Store precondition")
     probe = """import json, sys
 from pathlib import Path
@@ -185,13 +185,17 @@ path = Path('/config/.storage') / ('ha_operator.' + sys.argv[1])
 expected = json.loads(sys.argv[2])
 try:
     state = json.loads(path.read_text())['data']
-    if expected['kind'] == 'manual':
+    if expected['kind'] == 'sleep_pair':
+        ready = (state['intents'].get(expected['central']) is True
+                 and state['intents'].get(expected['room']) is False)
+    elif expected['kind'] == 'manual':
         record = state['manuals'].get(expected['key'], {})
         identity = record.get('request_id')
     else:
         record = state['policy_inputs'].get(expected['key'], {}).get('state', {})
         identity = record.get('episode_id')
-    ready = identity == expected['identity'] and record.get('expires_at') == expected['expires_at']
+    if expected['kind'] != 'sleep_pair':
+        ready = identity == expected['identity'] and record.get('expires_at') == expected['expires_at']
     if expected['kind'] == 'timer':
         ready = ready and record.get('phase') == 'accepted'
 except (OSError, ValueError, KeyError):

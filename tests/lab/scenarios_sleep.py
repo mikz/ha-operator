@@ -225,7 +225,10 @@ async def run_sleep(lab):
         await public("room", False)
         await settled(True, False)
         simulator = (await lab.sim(path="/health"))["instance_id"]
-        await lab.crash("kill")
+        await lab.crash(
+            "kill",
+            saved_request={"kind": "sleep_pair", "central": central, "room": room},
+        )
         await lab.crash("start")
         await lab.ready()
         assert (await lab.sim(path="/health"))["instance_id"] == simulator
