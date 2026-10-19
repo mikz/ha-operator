@@ -12,7 +12,7 @@ from collections.abc import Callable, Iterable, Mapping
 from copy import deepcopy
 from dataclasses import asdict, replace
 from datetime import datetime
-from typing import Any, Literal, TypedDict, TypeGuard, cast
+from typing import TYPE_CHECKING, Any, Literal, TypedDict, TypeGuard, cast
 from uuid import uuid4
 
 from homeassistant.components import persistent_notification
@@ -28,6 +28,8 @@ from homeassistant.core import (
     callback,
 )
 from homeassistant.exceptions import ConfigEntryError, HomeAssistantError, ServiceValidationError
+from homeassistant.helpers import area_registry as ar
+from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.event import (
@@ -98,6 +100,9 @@ from .return_monitor import (
     return_transition,
 )
 from .storage import InvalidSnapshot, empty_state, validate_state
+
+if TYPE_CHECKING:
+    from homeassistant.helpers.script import Script
 
 _LOGGER = logging.getLogger(__name__)
 _UNKNOWN = {"unknown", "unavailable"}
@@ -228,7 +233,13 @@ class OperatorRuntime:
         self._source_availability: dict[str, bool] = {}
         self.decisions: dict[str, Decision] = {}
         self.selections: dict[str, Selection] = {}
+        self._reason_details: dict[str, dict[str, object]] = {}
+        self._explanation_scripts: dict[str, Script] = {}
+        self._explanation_signatures: dict[str, tuple[object, ...]] = {}
+        self._explanation_tasks: dict[str, asyncio.Task[None]] = {}
         self._contexts: dict[ContextKey, Context] = {}
+        self._ingress_details: dict[ContextKey, dict[str, object]] = {}
+        self._notification_contexts: dict[ContextKey, Context] = {}
         self.requirement_results: dict[str, RequirementResult] = {}
         self._requirement_details: dict[str, dict[str, object]] = {}
         self.last_commands: dict[str, LastCommand] = {}
@@ -811,6 +822,13 @@ class OperatorRuntime:
             await asyncio.gather(flush, return_exceptions=True)
         await asyncio.gather(*self._tasks, return_exceptions=True)
         await asyncio.gather(*self._stop_tasks, return_exceptions=True)
+        for task in self._explanation_tasks.values():
+            task.cancel()
+        await asyncio.gather(*self._explanation_tasks.values(), return_exceptions=True)
+        self._explanation_tasks.clear()
+        for script in self._explanation_scripts.values():
+            await script.async_unload()
+        self._explanation_scripts.clear()
         interrupted = []
         demote = self.shadow_locked and self._initialized
         interrupt = self._close_interrupts_timer_inputs and any(
@@ -861,9 +879,18 @@ class OperatorRuntime:
         return lambda: self._listeners.discard(listener)
 
     @callback
-    def _notify(self) -> None:
-        for listener in tuple(self._listeners):
-            listener()
+    def _notify(self, contexts: dict[ContextKey, Context] | None = None) -> None:
+        previous = self._notification_contexts
+        self._notification_contexts = contexts or {}
+        try:
+            for listener in tuple(self._listeners):
+                listener()
+        finally:
+            self._notification_contexts = previous
+
+    def publication_context(self, resource_id: str) -> Context | None:
+        """Link only the selected ingress being published by this notification."""
+        return self._selection_context(resource_id, self._notification_contexts)
 
     def adapter(self, resource_id: str) -> Adapter:
         return self._adapters[resource_id]
@@ -1012,6 +1039,7 @@ class OperatorRuntime:
         context_key: ContextKey | Callable[[], Iterable[ContextKey]] | None = None,
         context: Context | None = None,
         skip_unchanged: bool = False,
+        source_details: dict[str, object] | None = None,
     ) -> RuntimeSnapshot:
         """Apply a synchronous state change, then publish and wake current work."""
         if self._closed:
@@ -1019,12 +1047,15 @@ class OperatorRuntime:
         if self.fault:
             raise HomeAssistantError(translation_domain=DOMAIN, translation_key="storage_inhibited")
         changed = self._mutate_state(mutator, skip_unchanged=skip_unchanged)
+        contexts = {}
         if changed and context_key is not None and context is not None:
             for key in context_key() if callable(context_key) else [context_key]:
-                self._contexts[key] = context
+                contexts[key] = self._contexts[key] = context
+                if source_details is not None:
+                    self._ingress_details[key] = source_details
         self._recompute()
         self._wake_all()
-        self._notify()
+        self._notify(contexts)
         return self._state
 
     async def async_request(
@@ -1040,6 +1071,7 @@ class OperatorRuntime:
         source: str = "service",
         context: Context | None = None,
     ) -> AcceptedRequestReceipt:
+        source_details = self._automation_trigger_details(context)
         self._manual_resource(resource_id)
         config = self._admit(resource_id)
         if mode not in {"target", "hands_off"}:
@@ -1163,6 +1195,7 @@ class OperatorRuntime:
             mutate,
             context_key=lambda: [] if replayed else [("manual", request_id)],
             context=context,
+            source_details=source_details,
         )
         return {**receipt, "accepted": True}
 
@@ -1259,7 +1292,7 @@ class OperatorRuntime:
         if context is not None:
             self._contexts[("manual", stop_id)] = context
         self._recompute()
-        self._notify()
+        self._notify({("manual", stop_id): context} if context is not None else None)
         actuator_lock = self._actuator_locks[resource_id]
         had_inflight_command = actuator_lock.locked()
         stop_error = None
@@ -1414,6 +1447,7 @@ class OperatorRuntime:
         *,
         context: Context | None = None,
     ) -> OccurrenceRecord:
+        source_details = self._automation_trigger_details(context)
         config, key, expiry = self._occurrence(policy_id, occurrence_id, expires_at)
         self._admit(config["resource_id"])
         target = self._policy_target(config)
@@ -1442,6 +1476,7 @@ class OperatorRuntime:
             mutate,
             context_key=lambda: [] if replayed else [("occurrence", policy_id, occurrence_id)],
             context=context,
+            source_details=source_details,
         )
         return self._state["occurrences"][key].copy()
 
@@ -1945,6 +1980,9 @@ class OperatorRuntime:
         self._contexts = {
             key: value for key, value in self._contexts.items() if key in valid_contexts
         }
+        self._ingress_details = {
+            key: value for key, value in self._ingress_details.items() if key in valid_contexts
+        }
         previous_decisions = self.decisions
         previous_selections = self.selections
         # HA state reads and evaluation are synchronous: retain this cause snapshot,
@@ -2017,6 +2055,13 @@ class OperatorRuntime:
                     cancel()
             old = previous_decisions.get(key)
             selection = self.selections[key]
+            if (
+                self._reason_identity(previous_selections.get(key))
+                != self._reason_identity(selection)
+                or old is None
+                or old.target != decision.target
+            ):
+                self._reason_details[key] = self._capture_reason_details(selection, now)
             cause_changed = previous_selections.get(key) != selection
             if (
                 cause_changed
@@ -2128,16 +2173,219 @@ class OperatorRuntime:
                 self.hass, max(0.01, self._next_evaluation - now), self._input_changed
             )
 
-    def _selection_context(self, resource_id: str) -> Context | None:
+    def _selection_context(
+        self, resource_id: str, contexts: dict[ContextKey, Context] | None = None
+    ) -> Context | None:
+        contexts = self._contexts if contexts is None else contexts
         selection = self.selections[resource_id]
         if selection.source_kind == "intent":
-            return self._contexts.get(("intent", selection.source_id))
+            return contexts.get(("intent", selection.source_id))
         key = (
             ("manual", selection.request_id)
             if selection.source_kind == "manual"
             else ("occurrence", selection.source_id, selection.occurrence_id)
         )
-        return self._contexts.get(key)
+        return contexts.get(key)
+
+    @staticmethod
+    def _reason_identity(selection: Selection | None) -> tuple[object, ...]:
+        if selection is None:
+            return ()
+        return (
+            selection.source_kind,
+            selection.source_id,
+            selection.request_id,
+            selection.occurrence_id,
+            selection.expires_at,
+        )
+
+    def _capture_reason_details(self, selection: Selection, now: float) -> dict[str, object]:
+        """Copy source state at selection, never claim the original trigger reading."""
+        details: dict[str, object] = dict.fromkeys(
+            (
+                "source_entity",
+                "source_entity_name",
+                "source_area",
+                "source_value",
+                "source_unit",
+                "source_updated_at",
+                "configured_comparison",
+                "configured_threshold",
+                "qualification_seconds",
+                "source_capture",
+            )
+        )
+        details["captured_at"] = dt_util.utc_from_timestamp(now).isoformat()
+        ingress_key = (
+            ("manual", selection.request_id)
+            if selection.source_kind == "manual"
+            else ("occurrence", selection.source_id, selection.occurrence_id)
+        )
+        if ingress := self._ingress_details.get(ingress_key):
+            return {**details, **ingress}
+        policy = self.policies.get(selection.source_id or "")
+        if policy is None or selection.source_kind not in {"policy", "occurrence"}:
+            return details
+        source = policy.get("input")
+        entity_id = (
+            source["entity_id"]
+            if source
+            else (policy.get("eligibility_entity") if selection.source_kind == "policy" else None)
+        )
+        if source:
+            details["qualification_seconds"] = source["qualification_seconds"]
+            if source["type"] == "qualified_numeric":
+                details["configured_comparison"] = source["comparison"]
+                details["configured_threshold"] = source["threshold"]
+        if entity_id is None:
+            return details
+        details["source_capture"] = "selection"
+        native = self.hass.states.get(entity_id)
+        details["source_entity"] = entity_id
+        if native is None:
+            return details
+        details.update(self._source_details(native))
+        value = self._state_value(entity_id)
+        if source and source["type"] == "qualified_numeric":
+            value = self._numeric_report(source, native).value
+        if value is None:
+            details.update(source_value=None, source_unit=None, source_updated_at=None)
+        else:
+            details["source_value"] = value
+        return details
+
+    def _source_details(self, native: State) -> dict[str, object]:
+        """Copy only source identity and raw State fields, not arbitrary attributes."""
+        name = native.name
+        details: dict[str, object] = {
+            "source_entity": native.entity_id,
+            "source_entity_name": name[:128] if isinstance(name, str) else native.entity_id,
+            "source_area": None,
+            "source_value": native.state,
+            "source_unit": native.attributes["unit_of_measurement"][:32]
+            if isinstance(native.attributes.get("unit_of_measurement"), str)
+            else None,
+            "source_updated_at": native.last_updated.isoformat(),
+        }
+        registered = er.async_get(self.hass).async_get(native.entity_id)
+        if registered:
+            device = (
+                dr.async_get(self.hass).async_get(registered.device_id)
+                if registered.device_id
+                else None
+            )
+            area_id = registered.area_id or (device.area_id if device else None)
+            area = ar.async_get(self.hass).async_get_area(area_id) if area_id else None
+            details["source_area"] = (
+                area.name[:128] if area and isinstance(area.name, str) else None
+            )
+        return details
+
+    def _automation_trigger_details(self, context: Context | None) -> dict[str, object] | None:
+        """Optional enrichment from HA's active trace internals; never control input.
+
+        Only a directly associated state/numeric-state trigger is supported. If
+        HA changes this internal shape, omit evidence rather than reject control.
+        """
+        if context is None:
+            return None
+        try:
+            from homeassistant.components.trace.const import DATA_TRACE
+            from homeassistant.helpers.trace import trace_get, trace_id_get
+
+            identity = trace_id_get()
+            if identity is None or not identity[0].startswith("automation."):
+                return None
+            trace = self.hass.data[DATA_TRACE][identity[0]].runs.get(identity[1])
+            if (
+                trace is None
+                or trace.context.id != context.id
+                or trace.as_short_dict()["state"] != "running"
+            ):
+                return None
+            steps = trace_get(clear=False)
+            if steps is None:
+                return None
+            path, elements = next(iter(steps.items()))
+            if path != "trigger" and not (
+                path.startswith("trigger/") and path.removeprefix("trigger/").isdecimal()
+            ):
+                return None
+            trigger = elements[0].as_dict()["changed_variables"]["trigger"]
+            native = trigger["to_state"]
+            if (
+                trigger["platform"] not in {"state", "numeric_state"}
+                or not isinstance(native, State)
+                or native.entity_id != trigger["entity_id"]
+                or context.parent_id != native.context.id
+            ):
+                return None
+            return {**self._source_details(native), "source_capture": "automation_trigger"}
+        except ImportError, AttributeError, KeyError, TypeError, IndexError, StopIteration:
+            return None
+
+    def begin_reason_publication(
+        self, resource_id: str, entity_id: str, unique_id: str
+    ) -> Context | None:
+        """Explain only a changed selection/target, immediately before Reason writes."""
+        if self._closed or resource_id not in self.selections:
+            return None
+        selection = self.selections[resource_id]
+        decision = self.decisions[resource_id]
+        signature = (self._reason_identity(selection), selection.active_inputs, decision.target)
+        if self._explanation_signatures.get(resource_id) == signature:
+            return None
+        self._explanation_signatures[resource_id] = signature
+        if resource_id in self._explanation_tasks:
+            return None
+        try:
+            from .explanation import create_script, start_trace
+
+            if resource_id not in self._explanation_scripts:
+                self._explanation_scripts[resource_id] = create_script(self.hass)
+            config = self.resources[resource_id]
+            outputs = config.get("outputs", [config["entity_id"]] if "entity_id" in config else [])
+            facts = {
+                "selection": self.selection_attributes(resource_id),
+                "source": dict(self.reason_details(resource_id)),
+                "decision": asdict(decision),
+                "observation": asdict(self.observations[resource_id]),
+                "outputs": {
+                    output: {"state": native.state, "updated_at": native.last_updated.isoformat()}
+                    if (native := self.hass.states.get(output))
+                    else None
+                    for output in outputs
+                },
+            }
+            context, task = start_trace(
+                self.hass,
+                self._explanation_scripts[resource_id],
+                entity_id,
+                unique_id,
+                self.publication_context(resource_id),
+                facts,
+                lambda: (
+                    not self._closed
+                    and self.selections[resource_id] == selection
+                    and self.decisions[resource_id].target == decision.target
+                ),
+            )
+            if not task.done():
+                self._explanation_tasks[resource_id] = task
+
+                def finished(completed: asyncio.Task[None]) -> None:
+                    if self._explanation_tasks.get(resource_id) is completed:
+                        self._explanation_tasks.pop(resource_id)
+
+                task.add_done_callback(finished)
+            return context
+        except Exception:
+            _LOGGER.debug("Native explanation unavailable for %s", resource_id, exc_info=True)
+            return None
+
+    def reason_details(self, resource_id: str) -> dict[str, object]:
+        """Return bounded current selection details without reading live telemetry."""
+        return self._reason_details.get(resource_id, {})
 
     def selection_attributes(self, resource_id: str) -> dict[str, object]:
         """Resolve a desired control's entity name after native registry renames."""

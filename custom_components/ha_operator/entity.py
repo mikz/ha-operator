@@ -87,10 +87,13 @@ class OperatorEntity(Entity):
     def _runtime_updated(self) -> None:
         publication = self._publication_state()
         if publication != self._last_publication:
-            self.async_write_ha_state()
+            self._write_publication()
             # Retain a detached snapshot only after a change. Copying every
             # unchanged entity on every update dominated the sampled burst path.
             self._last_publication = deepcopy(publication)
+
+    def _write_publication(self) -> None:
+        self.async_write_ha_state()
 
     @property
     def linked_entities(self) -> dict[str, str]:

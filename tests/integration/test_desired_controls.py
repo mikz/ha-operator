@@ -2,6 +2,7 @@
 
 import asyncio
 from copy import deepcopy
+from datetime import timedelta
 from unittest.mock import patch
 
 import pytest
@@ -12,6 +13,8 @@ from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.storage import WriteError
 from homeassistant.setup import async_setup_component
+from homeassistant.util import dt as dt_util
+from pytest_homeassistant_custom_component.common import async_fire_time_changed_exact
 
 from custom_components.ha_operator.const import DOMAIN
 
@@ -243,6 +246,10 @@ async def test_coupled_context_and_renamed_source_links(hass, tmp_path):
     assert hass.states.get(source).context.id == context.id
     assert hass.states.get(room).context.id == context.id
     assert dispatched == [context.id, context.id]
+    for key in runtime.resources:
+        for sensor_key in ("desired", "reason"):
+            published = hass.states.get(managed_id(hass, "sensor", key, sensor_key)).context
+            assert (published.parent_id if sensor_key == "reason" else published.id) == context.id
     registry = er.async_get(hass)
     registry.async_update_entity(room, new_entity_id="switch.renamed_room_desired")
     await hass.async_block_till_done()
@@ -253,6 +260,27 @@ async def test_coupled_context_and_renamed_source_links(hass, tmp_path):
         "switch.renamed_room_desired",
     )
     unsubscribe()
+    await hass.config_entries.async_unload(entry.entry_id)
+
+
+async def test_expiry_does_not_reuse_old_intent_context(hass, tmp_path, freezer):
+    entry, _ = await setup(hass, tmp_path, manual=True)
+    runtime = entry.runtime_data
+    await runtime.async_set_mode("central", "live")
+    intent_context = Context()
+    await runtime.async_set_desired("global_mode", True, context=intent_context)
+    manual_context = Context()
+    await runtime.async_request("central", target={"on": False}, duration=1, context=manual_context)
+    reason_id = managed_id(hass, "sensor", "central", "reason")
+    assert hass.states.get(reason_id).context.parent_id == manual_context.id
+    freezer.move_to(dt_util.utcnow() + timedelta(seconds=2))
+    async_fire_time_changed_exact(hass, dt_util.utcnow())
+    await hass.async_block_till_done()
+    assert runtime._selection_context("central") is intent_context
+    for key in ("desired", "reason", "effective_expiry"):
+        state = hass.states.get(managed_id(hass, "sensor", "central", key))
+        assert state.context.id not in {intent_context.id, manual_context.id}
+        assert state.context.parent_id is None
     await hass.config_entries.async_unload(entry.entry_id)
 
 

@@ -517,8 +517,12 @@ async def test_invalid_shadow_locked_start_does_not_save_on_abort(hass, tmp_path
     contents = json.dumps({"version": 1, "data": {"manuals": []}})
     await hass.async_add_executor_job(path.write_text, contents)
 
-    async def forbidden_write(*args, **kwargs):
-        pytest.fail("Failed startup must not save runtime defaults")
+    native_save = runtime_module.Store.async_save
+
+    async def forbidden_write(store, *args, **kwargs):
+        if store.key == f"{DOMAIN}.{entry.entry_id}":
+            pytest.fail("Failed startup must not save runtime defaults")
+        return await native_save(store, *args, **kwargs)
 
     monkeypatch.setattr(runtime_module.Store, "async_save", forbidden_write)
     assert not await hass.config_entries.async_setup(entry.entry_id)

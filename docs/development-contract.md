@@ -131,7 +131,12 @@ Managed entity commands call runtime request methods and report observations onl
 Base entity callback subscribes/unsubscribes runtime and writes state. Resource device
 identifier (DOMAIN, subentry_id). Each subentry owns its independent logical device;
 there is no parent device across subentry boundaries. Policy and requirement devices
-follow the same rule. No private HA trace APIs or global service interception.
+follow the same rule. Meaningful Reason transitions record bounded decision
+snapshots through a real internal native Script, before publishing the matching
+state. Existing caller trigger evidence may be read only from its exact active
+native automation context. No global service interception, caller-trace mutation,
+condition reconstruction, separate trace database, or frontend override.
+
 
 ## Lab
 

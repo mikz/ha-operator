@@ -106,6 +106,26 @@ async def test_admission_context_expiry_and_recovery(hass, tmp_path, freezer):
     assert float(desired.state) == 75
     assert float(hass.states.get(managed_id(hass, "sensor", key="observed")).state) == 0
     assert entry.runtime_data._selection_context("roof") is origin
+    for key in ("desired", "reason", "effective_expiry"):
+        entity_id = managed_id(hass, "sensor", key=key)
+        if key == "reason":
+            assert hass.states.get(entity_id).context.parent_id == origin.id
+        else:
+            assert hass.states.get(entity_id).context.id == origin.id
+        # Framework writes can bypass the runtime callback inside HA's context window.
+        entity = hass.data["sensor"].get_entity(entity_id)
+        entity._attr_icon = "mdi:history"
+        entity.async_write_ha_state()
+        assert hass.states.get(entity_id).context.id != origin.id
+    er.async_get(hass).async_update_entity(
+        managed_id(hass, "sensor", key="observed"), new_entity_id="sensor.renamed_feedback"
+    )
+    await hass.async_block_till_done()
+    assert hass.states.get(managed_id(hass, "sensor", key="reason")).context.id != origin.id
+    stable = hass.states.get(managed_id(hass, "sensor", key="reason"))
+    await entry.runtime_data.async_reconcile()
+    await hass.async_block_till_done()
+    assert hass.states.get(stable.entity_id) is stable
     freezer.move_to(dt_util.utcnow() + timedelta(seconds=31))
     async_fire_time_changed_exact(hass, dt_util.utcnow())
     await hass.async_block_till_done()
@@ -126,10 +146,14 @@ async def test_admission_context_expiry_and_recovery(hass, tmp_path, freezer):
     await hass.config_entries.async_reload(entry.entry_id)
     await hass.async_block_till_done()
     assert entry.runtime_data._selection_context("roof") is None
+    for key in ("desired", "reason", "effective_expiry"):
+        assert hass.states.get(managed_id(hass, "sensor", key=key)).context.id != origin.id
+    replay_context = Context()
     await entry.runtime_data.async_request(
-        "roof", target={"position": 60}, request_id="known-origin", context=Context()
+        "roof", target={"position": 60}, request_id="known-origin", context=replay_context
     )
     assert entry.runtime_data._selection_context("roof") is None
+    assert hass.states.get(managed_id(hass, "sensor", key="reason")).context.id != replay_context.id
     await entry.runtime_data.async_release("roof")
     expiry = dt_util.utcnow().timestamp() + 5
     await entry.runtime_data.async_submit_occurrence(
@@ -231,6 +255,29 @@ async def test_group_cause_snapshot_changes_without_actuation(hass, tmp_path):
     assert raw.commands == before
     reason = hass.states.get(managed_id(hass, "sensor", key="reason")).state
     assert reason == "Airflow: Extraction inlet — Extractor, Other extractor"
+    await hass.config_entries.async_unload(entry.entry_id)
+
+
+async def test_replayed_occurrence_does_not_attribute_expired_overlay(hass, tmp_path, freezer):
+    await async_add_physical_cover(hass)
+    entry = await async_setup_operator(
+        hass,
+        tmp_path,
+        policies={"morning": policy("Morning occurrence", kind="occurrence")},
+    )
+    await async_activate(hass)
+    runtime = entry.runtime_data
+    origin = Context()
+    expiry = dt_util.utcnow().timestamp() + 60
+    await runtime.async_submit_occurrence("morning", "same:episode", expiry, context=origin)
+    await runtime.async_request("roof", target={"position": 20}, duration=1)
+    freezer.move_to(dt_util.utcnow() + timedelta(seconds=2))
+    # One automation can reuse its Context across actions. This replay accepts no new ingress.
+    await runtime.async_submit_occurrence("morning", "same:episode", expiry, context=origin)
+    assert runtime._selection_context("roof") is origin
+    reason = hass.states.get(managed_id(hass, "sensor", key="reason"))
+    assert reason.state == "Morning occurrence"
+    assert reason.context.id != origin.id
     await hass.config_entries.async_unload(entry.entry_id)
 
 

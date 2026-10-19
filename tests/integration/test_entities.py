@@ -81,6 +81,8 @@ def fake_runtime():
         decisions={},
         selections={},
         selection_attributes=lambda key: runtime.selections[key].attributes(),
+        reason_details=lambda key: {},
+        begin_reason_publication=lambda *args: None,
         requirement_results={"air": result},
         next_attempts={},
         attempts={},
@@ -497,3 +499,23 @@ async def test_native_input_and_return_diagnostics_preserve_bounded_state_withou
         hass, SimpleNamespace(runtime_data=fake_runtime)
     )
     assert all(value["input"]["state"] is None for value in result["policies"].values())
+
+
+def test_reason_target_fields_are_stable_and_relay_profile_is_configured(fake_runtime):
+    reason = sensor.ResourceSensor(fake_runtime, "relay", "reason")
+    assert reason.extra_state_attributes == {
+        "target": None,
+        "target_profile": None,
+        "target_percentage": None,
+        "target_direction": None,
+    }
+    fake_runtime.resources["relay"]["profiles"]["low"]["direction"] = "forward"
+    fake_runtime.decisions["relay"] = SimpleNamespace(target=Target(profile="low"))
+    attributes = reason.extra_state_attributes
+    assert attributes["target"] == {"profile": "low"}
+    assert attributes["target_profile"] == "low"
+    assert attributes["target_percentage"] == 50
+    assert attributes["target_direction"] == "forward"
+    assert "target_position" not in attributes
+    fake_runtime.decisions["relay"] = SimpleNamespace(target=None)
+    assert reason.extra_state_attributes["target_percentage"] is None

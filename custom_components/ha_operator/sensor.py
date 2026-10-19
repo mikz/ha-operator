@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 
 from homeassistant.components.sensor import SensorDeviceClass, SensorEntity, SensorStateClass
 from homeassistant.const import PERCENTAGE, EntityCategory
-from homeassistant.core import HomeAssistant
+from homeassistant.core import Context, HomeAssistant, callback
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
 from . import OperatorConfigEntry
@@ -125,6 +125,35 @@ class ResourceSensor(OperatorEntity, SensorEntity):
             self._attr_entity_category = EntityCategory.DIAGNOSTIC
             self._attr_entity_registry_enabled_default = False
 
+    @callback
+    def _async_write_ha_state(self) -> None:
+        if self.key != "reason":
+            super()._async_write_ha_state()
+            return
+        context = self.runtime.publication_context(self.identifier)
+        unique_id = self.unique_id
+        if unique_id is not None:
+            context = (
+                self.runtime.begin_reason_publication(self.identifier, self.entity_id, unique_id)
+                or context
+            )
+        self.async_set_context(context or Context())
+        try:
+            super()._async_write_ha_state()
+        finally:
+            self.async_set_context(Context())
+
+    def _write_publication(self) -> None:
+        if self.key not in {"desired", "effective_expiry"}:
+            super()._write_publication()
+            return
+        self.async_set_context(self.runtime.publication_context(self.identifier) or Context())
+        try:
+            super()._write_publication()
+        finally:
+            # HA otherwise retains ingress attribution for later framework writes.
+            self.async_set_context(Context())
+
     @property
     def available(self) -> bool:
         if self.key == "observed":
@@ -168,11 +197,32 @@ class ResourceSensor(OperatorEntity, SensorEntity):
         if self.key in {"desired", "reason"}:
             decision = self.runtime.decisions.get(self.identifier)
             selection = self.runtime.selections.get(self.identifier)
-            return {
+            attributes = {
                 "target": decision.target.to_dict() if decision and decision.target else None,
                 **(self.runtime.selection_attributes(self.identifier) if selection else {}),
                 **self.linked_entities,
             }
+            if self.key == "reason":
+                attributes.update(self.runtime.reason_details(self.identifier))
+                config = self.runtime.resources[self.identifier]
+                fields = {
+                    "cover": ("position",),
+                    "switch": ("on",),
+                    "fan": ("on", "percentage", "direction"),
+                    "relay_fan": ("profile", "percentage", "direction"),
+                }[config["kind"]]
+                target_values: dict[str, object] = (
+                    dict(decision.target.to_dict()) if decision and decision.target else {}
+                )
+                if config["kind"] == "relay_fan" and isinstance(
+                    profile := target_values.get("profile"), str
+                ):
+                    configured = config["profiles"].get(profile)
+                    if configured:
+                        for field in ("percentage", "direction"):
+                            target_values.setdefault(field, configured.get(field))
+                attributes.update({f"target_{key}": target_values.get(key) for key in fields})
+            return attributes
         if self.key == "observed":
             observation = self.runtime.observations.get(self.identifier)
             target = (

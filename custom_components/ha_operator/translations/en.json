@@ -1443,7 +1443,46 @@
         "name": "Observed"
       },
       "reason": {
-        "name": "Reason"
+        "name": "Reason",
+        "state_attributes": {
+          "source_capture": {
+            "name": "Source capture",
+            "state": {
+              "automation_trigger": "Automation trigger",
+              "selection": "Selected policy input"
+            }
+          },
+          "source_entity": {
+            "name": "Source entity"
+          },
+          "source_entity_name": {
+            "name": "Source entity name"
+          },
+          "source_area": {
+            "name": "Source area"
+          },
+          "source_value": {
+            "name": "Raw source reading"
+          },
+          "source_unit": {
+            "name": "Source unit"
+          },
+          "source_updated_at": {
+            "name": "Source last updated"
+          },
+          "captured_at": {
+            "name": "Snapshot captured"
+          },
+          "configured_comparison": {
+            "name": "Configured comparison"
+          },
+          "configured_threshold": {
+            "name": "Configured threshold"
+          },
+          "qualification_seconds": {
+            "name": "Configured qualification (seconds)"
+          }
+        }
       },
       "control_status": {
         "name": "Control status",
