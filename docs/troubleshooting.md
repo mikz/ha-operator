@@ -16,7 +16,7 @@ convergence require independent feedback.
 | Control status stays pending or waiting | Check the physical integration, restrictions, fault feedback, retry interval, and motion guard. Reconcile does not bypass safety checks or pacing. |
 | Requests fail in observe mode | Select **Live** only after verifying the raw actuator and policies. A shadow lock must be removed through integration options before live control is permitted. |
 | Airflow unmet is on | Check each provider's independent evidence and restrictions. Manual closure remains allowed. Operator never stops extraction as an airflow fallback. |
-| A timer policy no longer qualifies after editing configuration | Add, edit, delete, and entity enablement can reload the entry. Reload intentionally suppresses an active timer episode. Start a new episode; do not replay its old occurrence identity. |
+| A timer policy no longer qualifies after editing configuration | Add, edit, delete, and entity enablement can reload the entry. Native pending waits reset and trigger-owned requests are withdrawn on live reload. Check the configured native trigger and deliberately create a new qualifying transition; do not replay an old occurrence identity. |
 | A desired control does not reattach a child | Repeated ON does not replay an ON edge. Check the child and its attachment configuration; use a deliberate OFF-to-ON transition when needed. |
 
 ## Inspect diagnostics

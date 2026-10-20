@@ -150,7 +150,7 @@ confirmation can follow later or remain blocked.
 Observe mode accepts no new manual requests or occurrences and emits no outputs.
 No custom trigger
 or condition platform is exposed: use native entity state triggers/conditions
-and existing timer events. Native cover, fan, switch, and select actions remain
+and existing timer events. Native cover, fan, switch, number, and select actions remain
 available according to each entity's capabilities. Supported cover STOP uses
 `cover.stop_cover`; see the [STOP contract](architecture.md#manual-control-and-stop).
 
@@ -161,20 +161,21 @@ available according to each entity's capabilities. Supported cover STOP uses
 | `cover` | Position control and independent position feedback. STOP is exposed only when the raw cover supports it. |
 | `fan` | Native speed, power, and supported direction, or a finite relay profile bundle with confirmed break-before-make. Preset modes and oscillation are not exposed. |
 | `switch` | Observed switch control, persistent policy enablement, and authoritative desired controls. Desired state does not claim follower convergence. |
-| `sensor` | Desired, Observed, Reason, fixed control/requirement status, provider, expiry, attempts, and native policy input phase. |
-| `binary_sensor` | Manual ownership, airflow unmet, qualified input, and return overdue. Airflow unmet and return overdue use the native problem class. |
-| `select` | Persistent observe/live mode. Shadow lock prohibits live control. |
+| `sensor` | Desired, Observed, Reason, fixed control/requirement status, provider, expiry, and attempts. |
+| `binary_sensor` | Manual ownership, airflow unmet, and return overdue. Airflow unmet and return overdue use the native problem class. |
+| `number` | Managed numeric setpoint with independent actor feedback, current native bounds/step, and explicit unit binding. |
+| `select` | Managed selection from current native actor options, plus a separate persistent observe/live mode control. Shadow lock prohibits live control. |
 | `button` | Resume automatic ownership and request reconciliation through the runtime. |
 
 All four subentry types support native add, edit, and delete. Loaded entries
-reload automatically after supported changes. An active timer qualification or
-accepted episode is intentionally interrupted by reload. Normal shutdown and
+reload automatically after supported changes. Pending native trigger waits reset,
+and trigger-owned requests are withdrawn on live reload. Normal shutdown and
 restart preserve valid saved intent and absolute deadlines; telemetry cannot
 renew them. See [troubleshooting](troubleshooting.md).
 
-Operator supports manual overrides, native qualified numeric and timer policies,
-held desired controls with ON-only attachments, source followers, and ordered
-airflow handover with independent confirmation. It does not add authentication,
+Operator supports manual overrides, continuous native policy conditions, optional
+native trigger admission for occurrences, held desired controls with ON-only
+attachments, source followers, and ordered airflow handover with independent confirmation. It does not add authentication,
 network discovery, external protocol clients, or a custom automation rule system.
 Use Home Assistant's native state triggers and conditions. Physical feedback,
 restrictions, and actuator capabilities remain requirements of the source

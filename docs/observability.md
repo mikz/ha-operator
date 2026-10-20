@@ -20,14 +20,15 @@ report profile names. Native fans and switches retain their scalar state and
 structured target attributes. Relay feedback does not prove fan rotation or
 measured airflow; requirements still need their configured confirmation evidence.
 
-Native input policies also provide **Input phase** (enum) and **Qualification
-due** (timestamp). Numeric inputs provide **Qualified** (binary sensor), which
-is unknown before recovery evidence. These read-only diagnostic entities start
-disabled. Runtime qualification and deadlines continue while they are disabled.
-Enabling a disabled entity can make Home Assistant reload the entire integration
-entry. This invokes input recovery; enable diagnostics while the ventilation
-timer and its opening request are inactive. Disabling a diagnostic removes its
-view without stopping the input runtime.
+Number Desired uses the bound service unit; Observed uses the actor's current
+unit. Unit drift makes comparison and managed control unavailable without relabeling
+values. Select resources retain exact native option strings. These projections
+confirm an actor's setpoint or option, not a physical result such as room temperature.
+
+Enabling a diagnostic entity can reload the integration. Live reload detaches
+pending native waits and withdraws trigger-owned occurrences. Policies run independently
+of whether diagnostic entities are enabled. Retired Health and custom-input entities
+remain disabled registry records with their existing identities and history.
 
 Desired, Observed, Reason, Effective expiry, and Return overdue are operational
 entities. Policy-enabled switches and operating-mode selectors use `CONFIG`.
@@ -44,7 +45,7 @@ Desired and Reason carry the same bounded selection snapshot:
 - `selection_reason`: the readable cause shown by Reason.
 - `request_id`, `occurrence_id`, and `expires_at`: applicable intent identity and
   absolute UTC deadline; otherwise null.
-- `related_entities`: configured eligibility, native policy input, target, or activation inputs.
+- `related_entities`: known native condition references, target sources, or activation inputs.
 - `active_inputs`: active members of requirement inputs, captured during evaluation.
 - `managed_entity`, `desired_entity`, `observed_entity`, `reason_entity`,
   `status_entity`, and `effective_expiry_entity`: registry-resolved references
@@ -95,14 +96,13 @@ State, not necessarily an attribute or template's evaluated numeric operand.
 Operator does not copy external comparison thresholds, qualification durations,
 or condition readings.
 
-Native numeric inputs also show `configured_comparison`, `configured_threshold`,
-and `qualification_seconds`; the duration is configured, not measured elapsed
-dwell. `target_*` fields make the selected target readable alongside the existing
-`target` and `expires_at` attributes. Unsupported source details are null. External
-occurrence actions supply no readings themselves. Without the narrow active-trigger
-capture above, their source details remain unknown. Replay does not replace captured
-evidence. Reload can capture a new native policy selection-time snapshot; it does not
-recover an automation trigger or original admission evidence.
+Native policy `policy_conditions` and resource command-condition details retain
+their native configuration, result, and bounded source snapshots. Genuine Operator
+state/numeric trigger callbacks can freeze the supplied State at admission
+(`source_capture: native_trigger`). Arbitrary event triggers need not supply an
+entity reading. `target_*` fields expose the selected target alongside `target`
+and `expires_at`; unsupported details remain null. Replay does not replace
+captured evidence. Reload does not reconstruct original callback evidence.
 
 Details shows the current entity attributes, not a historical Activity row's
 snapshot. Recorder retention and inclusion govern stored state attributes;
