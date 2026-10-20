@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Callable
+from copy import deepcopy
 from typing import TYPE_CHECKING, Any
 
 from homeassistant.core import Context, callback
@@ -78,7 +79,7 @@ class PolicyTriggers:
         try:
             for field, cancel in (("triggers", False), ("cancel_triggers", True)):
                 configs = await trigger.async_validate_trigger_config(
-                    runtime.hass, cv.TRIGGER_SCHEMA(config.get(field, []))
+                    runtime.hass, cv.TRIGGER_SCHEMA(deepcopy(config.get(field, [])))
                 )
                 if self.closed:
                     return

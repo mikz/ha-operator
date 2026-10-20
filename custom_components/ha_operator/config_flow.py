@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import date, time, timedelta
+from copy import deepcopy
 from types import MappingProxyType
 from typing import Any, cast
 
@@ -20,7 +20,6 @@ from homeassistant.config_entries import (
 from homeassistant.core import callback
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import selector
-from homeassistant.helpers.template import Template
 from homeassistant.util import dt as dt_util
 
 from .configuration import (
@@ -34,19 +33,20 @@ from .const import DOMAIN, NAME
 from .data import PolicyConfig, ResourceConfig, SubentryConfig
 
 
-def _native_config_value(value: Any) -> Any:
-    """Store native selector output as config, not bound runtime objects."""
-    if isinstance(value, Template):
-        return value.template
-    if isinstance(value, timedelta):
-        return {"seconds": value.total_seconds()}
-    if isinstance(value, (date, time)):
-        return value.isoformat()
-    if isinstance(value, dict):
-        return {key: _native_config_value(item) for key, item in value.items()}
-    if isinstance(value, list):
-        return [_native_config_value(item) for item in value]
-    return value
+class EditableConditionSelector(selector.ConditionSelector):
+    """Validate with HA while retaining the native editor's input representation."""
+
+    def __call__(self, data: Any) -> Any:
+        super().__call__(deepcopy(data))
+        return data
+
+
+class EditableTriggerSelector(selector.TriggerSelector):
+    """Keep native trigger syntax separate from HA's compiled representation."""
+
+    def __call__(self, data: Any) -> Any:
+        super().__call__(deepcopy(data))
+        return data
 
 
 def _entity(*, domains: list[str] | None = None, multiple: bool = False) -> selector.EntitySelector:
@@ -266,7 +266,6 @@ class OperatorSubentryFlow(ConfigSubentryFlow):
         placeholders: dict[str, str] = {}
         if user_input is not None:
             try:
-                user_input = _native_config_value(user_input)
                 data = self._validated_data(user_input, current)
                 if self.kind == "resource":
                     from .native_conditions import NativeConditionList
@@ -298,7 +297,7 @@ class OperatorSubentryFlow(ConfigSubentryFlow):
                     try:
                         for field in ("triggers", "cancel_triggers"):
                             await trigger.async_validate_trigger_config(
-                                self.hass, cv.TRIGGER_SCHEMA(data.get(field, []))
+                                self.hass, cv.TRIGGER_SCHEMA(deepcopy(data.get(field, [])))
                             )
                         policy_data = cast(PolicyConfig, data)
                         native = NativeConditionList(self.hass, policy_data.get("conditions", []))
@@ -433,10 +432,10 @@ class PolicyFlow(OperatorSubentryFlow):
                 vol.Required("kind"): selector.SelectSelector({"options": ["state", "occurrence"]}),
                 vol.Optional("priority", default=0): _number(-1000000, 1000000),
                 vol.Optional("target"): selector.ObjectSelector(),
-                vol.Optional("conditions"): selector.ConditionSelector(),
-                vol.Optional("triggers"): selector.TriggerSelector(),
+                vol.Optional("conditions"): EditableConditionSelector(),
+                vol.Optional("triggers"): EditableTriggerSelector(),
                 vol.Optional("duration"): selector.DurationSelector(),
-                vol.Optional("cancel_triggers"): selector.TriggerSelector(),
+                vol.Optional("cancel_triggers"): EditableTriggerSelector(),
                 vol.Optional("target_entity"): _entity(),
                 vol.Optional("intent_id"): selector.SelectSelector(
                     {

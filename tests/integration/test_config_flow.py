@@ -565,7 +565,7 @@ async def test_native_condition_compile_error_remains_in_native_form(hass, nativ
     assert "ZeroDivisionError" in result["description_placeholders"]["error"]
 
 
-async def test_native_resource_selector_compiled_output_roundtrips_as_json(hass, native_sources):
+async def test_native_resource_selector_output_roundtrips_as_json(hass, native_sources):
     import json
 
     entry = MockConfigEntry(domain=DOMAIN, version=4)
@@ -582,18 +582,8 @@ async def test_native_resource_selector_compiled_output_roundtrips_as_json(hass,
             ]
         },
     }
-    compiled = form["data_schema"](data)
-    result = await hass.config_entries.subentries.async_configure(form["flow_id"], compiled)
+    validated = form["data_schema"](data)
+    result = await hass.config_entries.subentries.async_configure(form["flow_id"], validated)
     assert result["type"] is FlowResultType.CREATE_ENTRY
     saved = json.loads(json.dumps(result["data"]))
     assert saved["command_conditions"] == data["command_conditions"]
-
-
-def test_native_selector_temporal_values_keep_serializable_shapes():
-    from datetime import date, time, timedelta
-
-    from custom_components.ha_operator.config_flow import _native_config_value
-
-    assert _native_config_value(
-        {"date": date(2026, 10, 20), "time": time(6), "for": timedelta(seconds=60)}
-    ) == {"date": "2026-10-20", "time": "06:00:00", "for": {"seconds": 60}}
