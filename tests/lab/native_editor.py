@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from playwright.async_api import expect
+
 from .runner import ARTIFACTS
 
 
@@ -19,10 +21,24 @@ async def save_subentry_editor(lab):
     await lab.ha.reload_entry(lab.entry)
 
 
-async def choose_entity(selector, entity_id):
-    picker = selector.get_by_role("combobox")
-    await picker.fill(entity_id)
-    await picker.press("Enter")
+async def choose_entity(lab, selector, entity_id):
+    # This scalar native picker replaces its value; exact readback rejects an append.
+    field = selector.locator("ha-picker-field").first
+    clear = field.locator("ha-icon-button.clear")
+    if await clear.count():
+        await clear.click()
+    await field.click()
+    search = selector.locator("ha-picker-combo-box").get_by_role("textbox")
+    await search.fill(entity_id)
+    name = (await lab.ha.state(entity_id))["attributes"]["friendly_name"]
+    await selector.locator("ha-picker-combo-box").get_by_text(name, exact=True).click()
+    await expect(selector).to_have_js_property("value", entity_id)
+
+
+async def expand_native_row(selector):
+    panel = selector.locator("ha-expansion-panel")
+    await panel.locator("ha-svg-icon.summary-icon").click()
+    await expect(panel.locator("#summary")).to_have_attribute("aria-expanded", "true")
 
 
 async def exercise_policy_conditions(lab, title, policy_id):
@@ -35,14 +51,22 @@ async def exercise_policy_conditions(lab, title, policy_id):
     await open_subentry_editor(lab, title)
     selector = lab.page.locator("ha-selector-condition")
     await selector.get_by_role("button", name="Add condition", exact=True).click()
-    await lab.page.get_by_role("dialog").last.get_by_text("State", exact=True).click()
+    picker = lab.page.locator("add-automation-element-dialog")
+    await picker.get_by_text("By type", exact=True).click()
+    await picker.get_by_role("button", name="Entity", exact=True).click()
+    await picker.get_by_text("State", exact=True).click()
     condition = selector.locator("ha-automation-condition-state")
     if not await condition.locator("ha-selector-entity").is_visible():
-        await selector.locator("ha-automation-condition-summary").click()
-    await choose_entity(condition.locator("ha-selector-entity"), "binary_sensor.sim_cellar_policy")
-    state = condition.locator("ha-selector-state").get_by_role("combobox")
-    await state.fill("on")
-    await state.press("Enter")
+        await expand_native_row(selector)
+    await choose_entity(
+        lab, condition.locator("ha-selector-entity"), "binary_sensor.sim_cellar_policy"
+    )
+    state = condition.locator("ha-selector-state")
+    await state.locator("ha-picker-field").last.click()
+    search = state.locator("ha-picker-combo-box").get_by_role("textbox")
+    await search.fill("on")
+    await state.locator("ha-picker-combo-box").get_by_text("On", exact=True).click()
+    await expect(state).to_have_js_property("value", ["on"])
     await lab.page.screenshot(
         path=str(ARTIFACTS / "native-policy-condition-added.png"), full_page=True
     )
@@ -50,20 +74,45 @@ async def exercise_policy_conditions(lab, title, policy_id):
 
     await open_subentry_editor(lab, title)
     selector = lab.page.locator("ha-selector-condition")
-    await selector.locator("ha-automation-condition-summary").click()
-    await choose_entity(selector.locator("ha-selector-entity"), "binary_sensor.sim_cellar_demand")
+    await expect(selector).to_have_js_property(
+        "value",
+        [
+            {
+                "condition": "state",
+                "entity_id": "binary_sensor.sim_cellar_policy",
+                "state": ["on"],
+            }
+        ],
+    )
+    await expand_native_row(selector)
+    await choose_entity(
+        lab, selector.locator("ha-selector-entity"), "binary_sensor.sim_cellar_demand"
+    )
     await lab.page.screenshot(
         path=str(ARTIFACTS / "native-policy-condition-reference-edited.png"), full_page=True
     )
     await save_subentry_editor(lab)
 
     await open_subentry_editor(lab, title)
+    await expect(lab.page.locator("ha-selector-condition")).to_have_js_property(
+        "value",
+        [
+            {
+                "condition": "state",
+                "entity_id": "binary_sensor.sim_cellar_demand",
+                "state": ["on"],
+            }
+        ],
+    )
     row = lab.page.locator("ha-selector-condition ha-automation-condition-row")
     await row.get_by_role("button", name="Menu", exact=True).click()
     await row.locator('ha-dropdown-item[value="delete"]').click()
     await lab.page.screenshot(
         path=str(ARTIFACTS / "native-policy-condition-removed.png"), full_page=True
     )
+    await save_subentry_editor(lab)
+    await open_subentry_editor(lab, title)
+    await expect(lab.page.locator("ha-selector-condition")).to_have_js_property("value", [])
     await save_subentry_editor(lab)
     current = {
         row["unique_id"]: row["id"]
@@ -95,10 +144,15 @@ async def clear_v3_migration_fields(lab, policy_title, resource_title):
 
 async def edit_resource_actor(lab, title, entity_id):
     await open_subentry_editor(lab, title)
-    await choose_entity(lab.page.locator("ha-selector-entity").first, entity_id)
+    await choose_entity(lab, lab.page.locator("ha-selector-entity").first, entity_id)
     await lab.page.screenshot(
         path=str(ARTIFACTS / ("native-resource-reference-" + entity_id.replace(".", "-") + ".png")),
         full_page=True,
+    )
+    await save_subentry_editor(lab)
+    await open_subentry_editor(lab, title)
+    await expect(lab.page.locator("ha-selector-entity").first).to_have_js_property(
+        "value", entity_id
     )
     await save_subentry_editor(lab)
 
@@ -122,14 +176,12 @@ async def exercise_occurrence_editor(lab, title, policy_id, event_prefix):
     for index, event in enumerate((event_prefix + "_draft", event_prefix + "_cancel")):
         selector = selectors.nth(index)
         await selector.get_by_role("button", name="Add trigger", exact=True).click()
-        await (
-            lab.page.locator("add-automation-element-dialog")
-            .get_by_text("Manual event received", exact=True)
-            .click()
-        )
+        picker = lab.page.locator("add-automation-element-dialog")
+        await picker.get_by_text("By type", exact=True).click()
+        await picker.get_by_text("Manual event received", exact=True).click()
         body = selector.locator("ha-automation-trigger-event")
         if not await body.get_by_label("Event type", exact=True).is_visible():
-            await selector.locator("ha-automation-trigger-summary").click()
+            await expand_native_row(selector)
         field = body.get_by_label("Event type", exact=True)
         await field.fill(event)
         await field.press("Tab")
@@ -145,7 +197,13 @@ async def exercise_occurrence_editor(lab, title, policy_id, event_prefix):
 
     await open_subentry_editor(lab, title)
     selector = lab.page.locator("ha-selector-trigger").first
-    await selector.locator("ha-automation-trigger-summary").click()
+    await expect(selector).to_have_js_property(
+        "value", [{"trigger": "event", "event_type": event_prefix + "_draft"}]
+    )
+    await expect(lab.page.locator("ha-selector-trigger").nth(1)).to_have_js_property(
+        "value", [{"trigger": "event", "event_type": event_prefix + "_cancel"}]
+    )
+    await expand_native_row(selector)
     field = selector.get_by_label("Event type", exact=True)
     assert await field.input_value() == event_prefix + "_draft"
     await field.fill(event_prefix + "_admit")
@@ -163,7 +221,10 @@ async def exercise_occurrence_editor(lab, title, policy_id, event_prefix):
     await open_subentry_editor(lab, title)
     for index, event in enumerate((event_prefix + "_admit", event_prefix + "_cancel")):
         selector = lab.page.locator("ha-selector-trigger").nth(index)
-        await selector.locator("ha-automation-trigger-summary").click()
+        await expect(selector).to_have_js_property(
+            "value", [{"trigger": "event", "event_type": event}]
+        )
+        await expand_native_row(selector)
         assert await selector.get_by_label("Event type", exact=True).input_value() == event
     assert (
         int(

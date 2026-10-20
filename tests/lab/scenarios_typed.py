@@ -124,8 +124,10 @@ async def run_typed(lab):
         await eventually(
             lambda: lab.physical("operating_mode"), lambda item: item["value"] == "boost"
         )
-        assert float((await ha.state(number_entity))["state"]) == 20.125
-        assert (await ha.state(select_entity))["state"] == "boost"
+        await eventually(
+            lambda: ha.state(number_entity), lambda item: float(item["state"]) == 20.125
+        )
+        await eventually(lambda: ha.state(select_entity), lambda item: item["state"] == "boost")
         assert (await explained(numeric))["selection"]["source_id"] == numeric_policy
         await control("setpoint", refuse_actions=["set_value"], value=-1.25)
         await eventually(
@@ -231,7 +233,9 @@ async def run_typed(lab):
             await lab.page.goto(ha.base + "/config/entities")
             await lab.page.get_by_placeholder(re.compile(r"Search \d+ entities")).fill(identifier)
             await lab.page.get_by_role("rowheader", name=name, exact=True).click()
+            await lab.page.get_by_role("dialog").last.wait_for(state="visible")
             await lab.page.screenshot(
+                animations="disabled",
                 path=str(
                     ARTIFACTS
                     / (
@@ -239,7 +243,7 @@ async def run_typed(lab):
                         if identifier == number_entity
                         else "typed-select-more-info.png"
                     )
-                )
+                ),
             )
     async with lab.scenario("TYPED-RENDERED-NATIVE-POLICY-EDITOR"):
         from .native_editor import exercise_policy_conditions

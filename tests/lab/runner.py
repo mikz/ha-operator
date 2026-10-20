@@ -325,6 +325,9 @@ class Lab:
         except Exception as error:
             item.update(status="failed", error=f"{type(error).__name__}: {error}")
             await self.page.screenshot(path=str(ARTIFACTS / f"failure-{name}.png"))
+            (ARTIFACTS / f"failure-{name}-ui.txt").write_text(
+                await self.page.locator("body").aria_snapshot()
+            )
             if self.ha.token:
                 try:
                     async with asyncio.timeout(10):
