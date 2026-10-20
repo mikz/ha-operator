@@ -37,8 +37,10 @@ async def choose_entity(lab, selector, entity_id):
 
 async def expand_native_row(selector):
     panel = selector.locator("ha-expansion-panel")
-    await panel.locator("ha-svg-icon.summary-icon").click()
-    await expect(panel.locator("#summary")).to_have_attribute("aria-expanded", "true")
+    summary = panel.locator("#summary")
+    if await summary.get_attribute("aria-expanded") != "true":
+        await panel.locator("ha-svg-icon.summary-icon").click()
+    await expect(summary).to_have_attribute("aria-expanded", "true")
 
 
 async def exercise_policy_conditions(lab, title, policy_id):
@@ -56,8 +58,7 @@ async def exercise_policy_conditions(lab, title, policy_id):
     await picker.get_by_role("button", name="Entity", exact=True).click()
     await picker.get_by_text("State", exact=True).click()
     condition = selector.locator("ha-automation-condition-state")
-    if not await condition.locator("ha-selector-entity").is_visible():
-        await expand_native_row(selector)
+    await condition.locator("ha-selector-entity").wait_for(state="visible")
     await choose_entity(
         lab, condition.locator("ha-selector-entity"), "binary_sensor.sim_cellar_policy"
     )
@@ -178,10 +179,17 @@ async def exercise_occurrence_editor(lab, title, policy_id, event_prefix):
         await selector.get_by_role("button", name="Add trigger", exact=True).click()
         picker = lab.page.locator("add-automation-element-dialog")
         await picker.get_by_text("By type", exact=True).click()
-        await picker.get_by_text("Manual event received", exact=True).click()
+        await picker.get_by_role("button", name="Manual event received", exact=True).click()
+        await picker.get_by_role(
+            "button",
+            name=(
+                "Manual event received Triggers when an event is being received "
+                "(events are a building block used across Home Assistant)."
+            ),
+            exact=True,
+        ).click()
         body = selector.locator("ha-automation-trigger-event")
-        if not await body.get_by_label("Event type", exact=True).is_visible():
-            await expand_native_row(selector)
+        await body.get_by_label("Event type", exact=True).wait_for(state="visible")
         field = body.get_by_label("Event type", exact=True)
         await field.fill(event)
         await field.press("Tab")
