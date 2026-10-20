@@ -2,8 +2,17 @@
 
 from typing import Any, Literal, NotRequired, TypedDict
 
-type ResourceKind = Literal["cover", "switch", "fan", "relay_fan", "number", "select"]
-type TargetField = Literal["position", "on", "percentage", "direction", "value", "option"]
+type ResourceKind = Literal["cover", "switch", "fan", "relay_fan", "number", "select", "light"]
+type TargetField = Literal[
+    "position",
+    "on",
+    "percentage",
+    "direction",
+    "value",
+    "option",
+    "brightness",
+    "color_temp_kelvin",
+]
 type Scalar = str | bool | int | float
 type JSONValue = Scalar | None | list[JSONValue] | dict[str, JSONValue]
 type JSONObject = dict[str, JSONValue]
@@ -19,6 +28,15 @@ class TargetData(TypedDict, total=False):
     profile: str
     value: float
     option: str
+    brightness: float
+    white: float
+    color_temp_kelvin: float
+    hs_color: list[float]
+    xy_color: list[float]
+    rgb_color: list[float]
+    rgbw_color: list[float]
+    rgbww_color: list[float]
+    effect: str
 
 
 class RelayProfileConfig(TypedDict):
@@ -40,6 +58,7 @@ class ResourceConfig(TypedDict):
     movement_timeout: float
     tolerance: float
     manual_duration: float
+    manual_duration_entity: NotRequired[str]
     entity_id: NotRequired[str]
     unit_of_measurement: NotRequired[str | None]
     outputs: NotRequired[list[str]]
@@ -63,6 +82,7 @@ class PolicyConfig(TypedDict):
     triggers: NotRequired[list[Any]]
     cancel_triggers: NotRequired[list[Any]]
     duration: NotRequired[dict[str, float]]
+    duration_entity: NotRequired[str]
     target_entity: NotRequired[str]
     target_attribute: NotRequired[str]
     target_field: NotRequired[TargetField]

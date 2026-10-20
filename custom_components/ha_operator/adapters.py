@@ -11,6 +11,14 @@ from typing import TypeGuard, cast
 
 from homeassistant.components.cover import CoverEntityFeature
 from homeassistant.components.fan.const import FanEntityFeature
+from homeassistant.components.light.const import (
+    ColorMode,
+    LightEntityFeature,
+)
+from homeassistant.components.light.helper import (
+    brightness_supported,
+    color_temp_supported,
+)
 from homeassistant.const import STATE_UNAVAILABLE, STATE_UNKNOWN
 from homeassistant.core import Context, Event, EventStateChangedData, HomeAssistant, State, callback
 from homeassistant.exceptions import HomeAssistantError
@@ -381,6 +389,125 @@ class SelectAdapter(Adapter):
             "select_option",
             {"entity_id": self.entity_id, "option": target.option},
             still_current,
+        )
+
+
+LIGHT_COLORS = {
+    "white",
+    "hs_color",
+    "xy_color",
+    "rgb_color",
+    "rgbw_color",
+    "rgbww_color",
+    "color_temp_kelvin",
+}
+LIGHT_FIELDS = {"on", "brightness", "effect"} | LIGHT_COLORS
+
+
+class LightAdapter(Adapter):
+    """Native light commands keep unspecified adaptive attributes unconstrained."""
+
+    @property
+    def supported_features(self) -> int:
+        state = self._state()
+        return int(state.attributes.get(_FEATURES, 0) if state else 0) & LightEntityFeature.EFFECT
+
+    @property
+    def supported_color_modes(self) -> set[ColorMode]:
+        state = self._state()
+        return (
+            {ColorMode(mode) for mode in state.attributes.get("supported_color_modes", [])}
+            if state
+            else set()
+        )
+
+    def read_observation(self, now: float) -> Observation:
+        state = self._state()
+        if not _usable(state) or state.state not in {"on", "off"}:
+            return self._native_observation(None, now)
+        values = {
+            key: state.attributes[key]
+            for key in LIGHT_FIELDS - {"on"}
+            if state.attributes.get(key) is not None
+        }
+        if state.attributes.get("color_mode") == ColorMode.WHITE and "brightness" in values:
+            values["white"] = values["brightness"]
+        try:
+            target = Target.from_dict({"on": state.state == "on", **values})
+        except TargetValidationError:
+            target = Target(on=state.state == "on")
+        return self._native_observation(target, now)
+
+    def normalize(self, target: Target) -> Target:
+        self._validate_fields(target, LIGHT_FIELDS)
+        values = target.to_dict()
+        # Native white mode uses its white value as brightness, including partial dimming.
+        if target.white is not None and target.brightness is not None:
+            values["white"] = target.brightness
+            values.pop("brightness")
+        colors = LIGHT_COLORS & values.keys()
+        modes = self.supported_color_modes
+        if not values or len(colors) > 1:
+            raise TargetValidationError(
+                "unsupported_target_fields",
+                "Use one light color mode",
+                fields=", ".join(sorted(colors)),
+            )
+        if target.brightness is not None and not brightness_supported(modes):
+            raise TargetValidationError(
+                "unsupported_target_fields", "Light brightness unsupported", fields="brightness"
+            )
+        if colors:
+            field = next(iter(colors))
+            mode = field.removesuffix("_color")
+            supported = (
+                color_temp_supported(modes)
+                if field == "color_temp_kelvin"
+                else ColorMode(mode) in modes
+            )
+            if not supported:
+                raise TargetValidationError(
+                    "unsupported_target_fields", "Light color mode unsupported", fields=field
+                )
+            if field == "color_temp_kelvin":
+                state = self._state()
+                low = state.attributes.get("min_color_temp_kelvin", 1) if state else 1
+                high = state.attributes.get("max_color_temp_kelvin", 100000) if state else 100000
+                if not low <= cast(float, target.color_temp_kelvin) <= high:
+                    raise TargetValidationError(
+                        "target_range",
+                        "Color temperature out of range",
+                        field=field,
+                        maximum=str(high),
+                    )
+        if target.effect is not None:
+            state = self._state()
+            if (
+                not self.supported_features
+                or not state
+                or target.effect not in state.attributes.get("effect_list", [])
+            ):
+                raise TargetValidationError(
+                    "unsupported_target_fields", "Light effect unsupported", fields="effect"
+                )
+        zero_brightness = values.get("brightness") == 0 or values.get("white") == 0
+        if target.on is False or zero_brightness:
+            if target.on is True and zero_brightness:
+                return Target(on=False)
+            if target.on is False and any(key != "on" for key in values):
+                raise TargetValidationError(
+                    "unsupported_target_fields", "OFF cannot carry light settings", fields="on"
+                )
+            return Target(on=False)
+        # A partial light setting is a native turn_on; bare ON carries no stored adaptive settings.
+        return Target.from_dict({**values, "on": True})
+
+    async def async_apply(self, target: Target, still_current: Callable[[], bool]) -> bool:
+        target = self.normalize(target)
+        data = {"entity_id": self.entity_id, **target.to_dict()}
+        data.pop("on")
+        return await self._call(
+            "light", "turn_on" if target.on else "turn_off", data, still_current
         )
 
 
@@ -794,6 +921,7 @@ class RelayFanAdapter(Adapter):
 def create_adapter(hass: HomeAssistant, resource_id: str, config: ResourceConfig) -> Adapter:
     """Create an adapter without claiming any service result is observed feedback."""
     classes = {
+        "light": LightAdapter,
         "number": NumberAdapter,
         "select": SelectAdapter,
         "cover": CoverAdapter,

@@ -357,7 +357,7 @@ class ResourceFlow(OperatorSubentryFlow):
             ),
             vol.Optional("unit_of_measurement"): selector.TextSelector(),
             vol.Optional("entity_id"): _entity(
-                domains=["cover", "fan", "switch", "number", "select"]
+                domains=["cover", "fan", "switch", "number", "select", "light"]
             ),
             vol.Optional("outputs"): _entity(domains=["switch"], multiple=True),
             vol.Optional("profiles"): selector.ObjectSelector(),
@@ -366,6 +366,7 @@ class ResourceFlow(OperatorSubentryFlow):
             vol.Optional("restriction_entity"): _entity(),
             vol.Optional("fault_entity"): _entity(),
             vol.Optional("manual_control", default=True): selector.BooleanSelector(),
+            vol.Optional("manual_duration_entity"): _entity(domains=["input_number", "number"]),
             vol.Optional("command_conditions"): selector.ObjectSelector(
                 {
                     "fields": {
@@ -435,6 +436,7 @@ class PolicyFlow(OperatorSubentryFlow):
                 vol.Optional("conditions"): EditableConditionSelector(),
                 vol.Optional("triggers"): EditableTriggerSelector(),
                 vol.Optional("duration"): selector.DurationSelector(),
+                vol.Optional("duration_entity"): _entity(domains=["input_number", "number"]),
                 vol.Optional("cancel_triggers"): EditableTriggerSelector(),
                 vol.Optional("target_entity"): _entity(),
                 vol.Optional("intent_id"): selector.SelectSelector(
@@ -448,7 +450,18 @@ class PolicyFlow(OperatorSubentryFlow):
                 ),
                 vol.Optional("target_attribute"): selector.TextSelector(),
                 vol.Optional("target_field"): selector.SelectSelector(
-                    {"options": ["position", "on", "percentage", "direction", "value", "option"]}
+                    {
+                        "options": [
+                            "position",
+                            "on",
+                            "percentage",
+                            "direction",
+                            "value",
+                            "option",
+                            "brightness",
+                            "color_temp_kelvin",
+                        ]
+                    }
                 ),
             }
         )

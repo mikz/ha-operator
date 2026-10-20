@@ -226,6 +226,18 @@ class ResourceSensor(OperatorEntity, SensorEntity):
                     attributes["conditions"] = checks
                 config = self.runtime.resources[self.identifier]
                 fields = {
+                    "light": (
+                        "on",
+                        "brightness",
+                        "white",
+                        "color_temp_kelvin",
+                        "hs_color",
+                        "xy_color",
+                        "rgb_color",
+                        "rgbw_color",
+                        "rgbww_color",
+                        "effect",
+                    ),
                     "number": ("value",),
                     "select": ("option",),
                     "cover": ("position",),

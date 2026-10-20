@@ -62,7 +62,7 @@ def _target(value: object) -> dict[str, object] | None:
     if not isinstance(value, dict):
         return None
     clean: dict[str, object] = {}
-    for key in ("position", "percentage", "value"):
+    for key in ("position", "percentage", "value", "brightness", "white", "color_temp_kelvin"):
         if _number(value.get(key)) is not None:
             clean[key] = value[key]
     if isinstance(value.get("on"), bool):
@@ -71,6 +71,12 @@ def _target(value: object) -> dict[str, object] | None:
         clean["direction"] = value["direction"]
     if value.get("option") is not None:
         clean["option"] = _identifier(value["option"])
+    for key in ("hs_color", "xy_color", "rgb_color", "rgbw_color", "rgbww_color"):
+        color = value.get(key)
+        if isinstance(color, (list, tuple)) and all(_number(item) is not None for item in color):
+            clean[key] = list(color)
+    if value.get("effect") is not None:
+        clean["effect"] = _identifier(value["effect"])
     if value.get("profile") is not None:
         clean["profile"] = _identifier(value["profile"])
     return clean
@@ -116,7 +122,8 @@ async def async_get_config_entry_diagnostics(
         command = runtime.last_commands.get(identifier)
         resources[_identifier(identifier)] = {
             "kind": config["kind"]
-            if config["kind"] in {"cover", "fan", "relay_fan", "switch", "number", "select"}
+            if config["kind"]
+            in {"cover", "fan", "relay_fan", "switch", "number", "select", "light"}
             else "unknown",
             "mode": "live" if runtime.mode(identifier) == "live" else "observe",
             "status": _status(decision.status if decision else None),

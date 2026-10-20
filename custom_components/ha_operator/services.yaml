@@ -18,7 +18,10 @@ request:
             - cover
             - fan
             - switch
-      description: The managed cover, fan, or switch belonging to one resource. Choose this or Resource ID, not
+            - light
+            - number
+            - select
+      description: The managed entity belonging to one resource. Choose this or Resource ID, not
         both.
     mode:
       name: Mode
@@ -30,7 +33,7 @@ request:
           - hands_off
     target:
       name: Requested target
-      description: Target object with position, on, percentage, direction, a configured fan profile, numeric value, or select option. Required
+      description: Target object with position, on, percentage, direction, a configured fan profile, numeric value, select option, or native light brightness/color/effect. Required
         in target mode; omit for hands-off mode.
       selector:
         object: null
@@ -92,8 +95,11 @@ release:
             - cover
             - fan
             - switch
+            - light
+            - number
+            - select
       name: Managed resource entity
-      description: The managed cover, fan, or switch belonging to one resource. Choose this or Resource ID, not
+      description: The managed entity belonging to one resource. Choose this or Resource ID, not
         both.
     config_entry_id:
       name: Configuration entry
@@ -190,8 +196,11 @@ reconcile:
             - cover
             - fan
             - switch
+            - light
+            - number
+            - select
       name: Managed resource entity
-      description: The managed cover, fan, or switch belonging to one resource. Choose this or Resource ID, not
+      description: The managed entity belonging to one resource. Choose this or Resource ID, not
         both.
     config_entry_id:
       name: Configuration entry
@@ -220,8 +229,11 @@ explain:
             - cover
             - fan
             - switch
+            - light
+            - number
+            - select
       name: Managed resource entity
-      description: The managed cover, fan, or switch belonging to one resource. Choose this or Resource ID, not
+      description: The managed entity belonging to one resource. Choose this or Resource ID, not
         both.
     config_entry_id:
       name: Configuration entry

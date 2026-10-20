@@ -19,7 +19,11 @@ real admission callback data and cannot be used by continuous policies or comman
 gates.
 
 Native trigger admission is optional. Configure `triggers`, a positive static
-`duration`, and optional `cancel_triggers` on an occurrence policy. Cancellation
+`duration` or an existing numeric `duration_entity`, and optional `cancel_triggers`
+on an occurrence policy. A duration source uses its native duration unit and is
+sampled once at admission. Its changes never renew accepted requests; an invalid
+source declines a new admission and preserves any previous request. When both
+fields are configured, the source takes precedence. Cancellation
 requires trigger-owned admission configuration. The following is policy subentry
 data, not a YAML integration loader:
 
@@ -43,6 +47,10 @@ cancel_triggers:
     event_data:
       entity_id: timer.example_ventilation
 ```
+
+For an externally configured duration helper, replace `duration` above with
+`duration_entity: input_number.example_ventilation_minutes` and configure that
+helper's unit as `min`. Operator references the helper; it does not create it.
 
 One stored trigger-owned request per policy is replaced on a new qualifying
 callback and retired on cancellation/expiry. Rejected callbacks leave the previous

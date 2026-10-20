@@ -50,6 +50,15 @@ class Target:
     profile: str | None = None
     value: float | None = None
     option: str | None = None
+    brightness: float | None = None
+    white: float | None = None
+    color_temp_kelvin: float | None = None
+    hs_color: tuple[float, float] | None = None
+    xy_color: tuple[float, float] | None = None
+    rgb_color: tuple[float, float, float] | None = None
+    rgbw_color: tuple[float, float, float, float] | None = None
+    rgbww_color: tuple[float, float, float, float, float] | None = None
+    effect: str | None = None
 
     def __post_init__(self) -> None:
         for name in ("position", "percentage"):
@@ -63,6 +72,43 @@ class Target:
                         field=name,
                         maximum="100",
                     )
+        for name, maximum in (("brightness", 255), ("white", 255)):
+            value = getattr(self, name)
+            if value is not None:
+                _finite(value, name)
+                if not 0 <= value <= maximum:
+                    raise TargetValidationError(
+                        "target_range", f"{name} out of range", field=name, maximum=str(maximum)
+                    )
+        if self.color_temp_kelvin is not None:
+            _finite(self.color_temp_kelvin, "color_temp_kelvin")
+            if self.color_temp_kelvin <= 0:
+                raise TargetValidationError(
+                    "finite_number", "Color temperature must be positive", field="color_temp_kelvin"
+                )
+        for name, bounds in (
+            ("hs_color", (360, 100)),
+            ("xy_color", (1, 1)),
+            ("rgb_color", (255,) * 3),
+            ("rgbw_color", (255,) * 4),
+            ("rgbww_color", (255,) * 5),
+        ):
+            value = getattr(self, name)
+            if value is None:
+                continue
+            if not isinstance(value, (tuple, list)) or len(value) != len(bounds):
+                raise TargetValidationError(
+                    "unsupported_target_fields", f"Invalid {name}", fields=name
+                )
+            for component, maximum in zip(value, bounds, strict=True):
+                _finite(component, name)
+                if not 0 <= component <= maximum:
+                    raise TargetValidationError(
+                        "target_range", f"{name} out of range", field=name, maximum=str(maximum)
+                    )
+            object.__setattr__(self, name, tuple(value))
+        if self.effect is not None and (not isinstance(self.effect, str) or not self.effect):
+            raise TargetValidationError("string_target", "effect must be nonempty", field="effect")
         if self.value is not None:
             _finite(self.value, "value")
         if self.on is not None and not isinstance(self.on, bool):
@@ -92,6 +138,15 @@ class Target:
             "profile",
             "value",
             "option",
+            "brightness",
+            "white",
+            "color_temp_kelvin",
+            "hs_color",
+            "xy_color",
+            "rgb_color",
+            "rgbw_color",
+            "rgbww_color",
+            "effect",
         }
         if extra:
             fields = ", ".join(sorted(map(str, extra)))
@@ -116,6 +171,20 @@ class Target:
             fields["value"] = self.value
         if self.option is not None:
             fields["option"] = self.option
+        for name in (
+            "brightness",
+            "white",
+            "color_temp_kelvin",
+            "hs_color",
+            "xy_color",
+            "rgb_color",
+            "rgbw_color",
+            "rgbww_color",
+            "effect",
+        ):
+            value = getattr(self, name)
+            if value is not None:
+                fields[name] = list(value) if isinstance(value, tuple) else value
         return fields
 
 
@@ -350,9 +419,28 @@ def matches(target: Target, observed: Observation | Target | None, tolerance: fl
         actual = getattr(observed, key)
         if actual is None:
             return False
-        if key in {"position", "percentage", "value"}:
+        if key == "color_temp_kelvin":
+            # Native lights can round a requested Kelvin value through whole mireds.
+            if abs(1000000 / cast(float, desired) - 1000000 / actual) > 1 + 1e-9:
+                return False
+        elif key in {"position", "percentage", "value", "brightness", "white"}:
             # These serialized keys contain only Target's validated numeric fields.
             if abs(cast(float, desired) - actual) > tolerance:
+                return False
+        elif key == "hs_color":
+            hue, saturation = cast(list[float], desired)
+            if abs(saturation - actual[1]) > tolerance:
+                return False
+            # Achromatic feedback has no meaningful hue; red wraps around at 360 degrees.
+            if max(saturation, actual[1]) > tolerance:
+                distance = abs(hue - actual[0]) % 360
+                if min(distance, 360 - distance) > tolerance:
+                    return False
+        elif isinstance(actual, tuple):
+            if any(
+                abs(a - b) > (tolerance / 100 if key == "xy_color" else tolerance)
+                for a, b in zip(actual, cast(list[float], desired), strict=True)
+            ):
                 return False
         elif actual != desired:
             return False

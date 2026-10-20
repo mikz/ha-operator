@@ -9,9 +9,10 @@ owner reviews the changes and runs final acceptance.
 ## Configuration
 
 One singleton config entry, native subentries of type `resource`, `policy`, `requirement`, `intent`.
-IDs are the HA subentry_id. Resource data: `name`, `kind` (cover/switch/fan/relay_fan/number/select),
+IDs are the HA subentry_id. Resource data: `name`, `kind` (cover/switch/fan/relay_fan/number/select/light),
 `entity_id` (native adapters), `retry_interval` (300), `command_interval` (30),
 `movement_timeout` (120), `tolerance` (2), `manual_duration` (1800), optional
+`manual_duration_entity` (existing numeric entity with a native duration unit),
 `restriction_entity` (on blocks), `fault_entity` (on inhibits), and `default_target`.
 Relay fan data: `outputs` list of switch entity IDs, `profiles` mapping of profile
 name to {outputs: {entity_id: bool}, percentage?: number, direction?: str},
@@ -28,6 +29,7 @@ positive `warning_after_seconds`. It uses the existing resource tolerance.
 
 Resource `command_conditions` optionally maps supported command names to native HA
 condition lists. Keys are `turn_on`/`turn_off` for switch and relay fan,
+and native light (see [native lights](native-lights.md)),
 `set_cover_position` for cover, and `turn_on`/`turn_off`/`set_direction`/
 `set_percentage` for native fan. Fan ON/OFF guards also apply when HA requires the
 percentage-service fallback. An ON guard applies before a fan or relay transaction
@@ -75,11 +77,19 @@ Policy data: `name`, `resource_id`, `kind` (state/occurrence), `priority` (0),
 `target`, optional `target_entity`/`target_attribute`/`target_field`, or switch state
 `intent_id`. Canonical `conditions` use NativeConditionList/ConditionSelector.
 State policies evaluate continuously, occurrences only at admission. Optional
-native `triggers` and positive static `duration` admit one bounded stored
+native `triggers` and positive static `duration` or `duration_entity` admit one bounded stored
 trigger-owned occurrence per policy; optional `cancel_triggers` withdraw only it.
 Use Core validators/TriggerSelector and native registrations, not another detector.
 See [native policy lifecycle and incompatible migration](native-policies.md).
 The removed custom input machines are not retained behind compatibility aliases.
+
+Optional duration sources reference existing `input_number`/`number` entities and
+use HA's native DurationConverter. Sample a finite positive value once at admission,
+freeze its absolute expiry, and capture parameter evidence in existing Reason/trace
+details. Source changes add no subscription and do not renew accepted intent.
+Explicit manual expiry parameters and external occurrence expiry remain authoritative.
+Invalid sources reject new admission without replacing accepted intent. STOP remains
+unconditional and falls back to fixed `manual_duration` if its source is invalid.
 
 Requirement data: `name`, `activation_entities` (all on; unknown stays unknown),
 `providers` list of {id, resource_id?: str, target?: Target, evidence: list of

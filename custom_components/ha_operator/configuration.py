@@ -35,8 +35,9 @@ RESOURCE_DEFAULTS = {
     "tolerance": 2.0,
     "manual_duration": 1800.0,
 }
-KINDS = ("cover", "switch", "fan", "relay_fan", "number", "select")
+KINDS = ("cover", "switch", "fan", "relay_fan", "number", "select", "light")
 COMMANDS = {
+    "light": ("turn_on", "turn_off"),
     "number": ("set_value",),
     "select": ("select_option",),
     "cover": ("set_cover_position",),
@@ -44,7 +45,24 @@ COMMANDS = {
     "fan": ("turn_on", "turn_off", "set_direction", "set_percentage"),
     "relay_fan": ("turn_on", "turn_off"),
 }
-TARGET_FIELDS = {"position", "on", "percentage", "direction", "profile", "value", "option"}
+TARGET_FIELDS = {
+    "position",
+    "on",
+    "percentage",
+    "direction",
+    "profile",
+    "value",
+    "option",
+    "brightness",
+    "color_temp_kelvin",
+    "hs_color",
+    "xy_color",
+    "rgb_color",
+    "rgbw_color",
+    "rgbww_color",
+    "effect",
+    "white",
+}
 _ENTITY_ID = re.compile(r"^[a-z_]+\.[a-z0-9_]+$")
 
 
@@ -237,6 +255,18 @@ def validate_target(
         )
     kind = resource["kind"]
     allowed = {
+        "light": {
+            "on",
+            "brightness",
+            "color_temp_kelvin",
+            "hs_color",
+            "xy_color",
+            "rgb_color",
+            "rgbw_color",
+            "rgbww_color",
+            "effect",
+            "white",
+        },
         "number": {"value"},
         "select": {"option"},
         "cover": {"position"},
@@ -250,6 +280,24 @@ def validate_target(
             translation_key="config_target_fields_are_not_supported_by",
             placeholders={"kind": str(kind)},
         )
+    if kind == "light":
+        from .core import Target, TargetValidationError
+
+        try:
+            target = Target.from_dict(data)
+            if hass is not None:
+                from .adapters import LightAdapter
+
+                target = LightAdapter(hass, "validation", cast(ResourceConfig, resource)).normalize(
+                    target
+                )
+            return target.to_dict()
+        except TargetValidationError as err:
+            _fail(
+                str(err),
+                translation_key=err.translation_key,
+                placeholders=err.translation_placeholders,
+            )
     for field in ("position", "percentage"):
         if field in data:
             data[field] = _number(data[field], field, 0, 100)
@@ -304,6 +352,17 @@ def _positive_duration(value: Any, field: str) -> float:
     return duration
 
 
+def _duration_entity(value: Any, field: str, hass: HomeAssistant | None) -> str:
+    entity_id = _entity(value, field, hass=hass)
+    if entity_id.split(".")[0] not in {"input_number", "number"}:
+        _fail(
+            f"{field} must reference an input_number or number entity",
+            translation_key="config_entity_domain",
+            placeholders={"field": field, "domain": "input_number/number"},
+        )
+    return entity_id
+
+
 def _return_monitor(value: Any, kind: str) -> ReturnMonitorConfig:
     try:
         if kind != "cover":
@@ -351,6 +410,7 @@ def validate_resource(
             "fault_entity",
             "default_target",
             "manual_control",
+            "manual_duration_entity",
             "return_monitor",
             "command_conditions",
             *RESOURCE_DEFAULTS,
@@ -359,7 +419,7 @@ def validate_resource(
     data["name"] = _text(data.get("name"), "name")
     if data.get("kind") not in KINDS:
         _fail(
-            "kind must be cover, switch, fan, or relay_fan",
+            "kind must be cover, switch, fan, relay_fan, number, select, or light",
             translation_key="config_kind_must_be_cover_switch_fan_or_relay_fan",
         )
     kind = data["kind"]
@@ -403,6 +463,10 @@ def validate_resource(
     for field in ("restriction_entity", "fault_entity"):
         if field in data:
             data[field] = _entity(data[field], field, hass=hass)
+    if "manual_duration_entity" in data:
+        data["manual_duration_entity"] = _duration_entity(
+            data["manual_duration_entity"], "manual_duration_entity", hass
+        )
     if kind == "relay_fan":
         if "entity_id" in data:
             _fail(
@@ -527,6 +591,7 @@ def validate_policy(
             "conditions",
             "triggers",
             "duration",
+            "duration_entity",
             "cancel_triggers",
             "target_entity",
             "target_attribute",
@@ -560,6 +625,8 @@ def validate_policy(
         data["conditions"] = _conditions(
             data["conditions"], "conditions", allow_trigger=data["kind"] == "occurrence"
         )
+    if "duration_entity" in data:
+        data["duration_entity"] = _duration_entity(data["duration_entity"], "duration_entity", hass)
     if "triggers" in data:
         if data["kind"] != "occurrence":
             invalid_native("Native triggers require an occurrence policy")
@@ -567,15 +634,18 @@ def validate_policy(
 
         try:
             cv.TRIGGER_SCHEMA(deepcopy(data["triggers"]))
-            duration = cv.positive_time_period(data["duration"]).total_seconds()
-            if duration <= 0:
-                invalid_native("duration must be positive")
+            if "duration" in data:
+                duration = cv.positive_time_period(data["duration"]).total_seconds()
+                if duration <= 0:
+                    invalid_native("duration must be positive")
+            elif "duration_entity" not in data:
+                invalid_native("Native triggers require duration or duration_entity")
             if "cancel_triggers" in data:
                 cv.TRIGGER_SCHEMA(deepcopy(data["cancel_triggers"]))
         except (ValueError, TypeError, KeyError) as err:
             invalid_native(f"Invalid native trigger configuration: {err}")
-    elif "duration" in data or "cancel_triggers" in data:
-        invalid_native("duration and cancel_triggers require native triggers")
+    elif any(key in data for key in ("duration", "duration_entity", "cancel_triggers")):
+        invalid_native("duration, duration_entity and cancel_triggers require native triggers")
     priority = _number(data.get("priority", 0), "priority", -1000000, 1000000)
     if not priority.is_integer():
         _fail("priority must be an integer", translation_key="config_priority_must_be_an_integer")
@@ -611,13 +681,18 @@ def validate_policy(
             "direction": "forward",
             "value": 0,
             "option": "example",
+            "brightness": 128,
+            "color_temp_kelvin": 3000,
         }
         if field not in probe:
             _fail(
-                "target_field must be position, on, percentage, or direction",
+                "target_field must be position, on, percentage, direction, value, option, "
+                "brightness, or color_temp_kelvin",
                 translation_key="config_target_field_must_be_position_on_percentage_or_direction",
             )
-        validate_target({field: probe[field]}, resource, hass)
+        validate_target(
+            {field: probe[field]}, resource, None if resource["kind"] == "light" else hass
+        )
         if "target_attribute" in data:
             data["target_attribute"] = _text(data["target_attribute"], "target_attribute")
     elif "target" not in data or "target_attribute" in data or "target_field" in data:

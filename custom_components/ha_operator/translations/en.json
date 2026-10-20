@@ -41,17 +41,18 @@
             "command_interval": "Minimum command interval (seconds)",
             "movement_timeout": "Movement timeout (seconds)",
             "tolerance": "Position tolerance (percentage points)",
-            "manual_duration": "Default manual duration (seconds)",
+            "manual_duration": "Fixed manual duration (seconds)",
             "manual_control": "Allow manual control",
             "return_monitor": "Return confirmation",
             "command_conditions": "Command conditions",
-            "unit_of_measurement": "Bound number unit"
+            "unit_of_measurement": "Bound number unit",
+            "manual_duration_entity": "Default manual duration source"
           },
           "data_description": {
             "manual_control": "Turn off for a follower controlled by a source. Removes managed command entities, manual status, expiry, and resume controls; manual request actions are rejected.",
             "return_monitor": "For covers, warn when raw position has not reached the effective return target. Uses the configured position tolerance.",
             "kind": "Choose the source integration adapter. A relay fan owns every listed switch output exclusively.",
-            "entity_id": "Use the raw cover, switch, or fan from its source integration. Covers need non-optimistic position feedback and position control.",
+            "entity_id": "Use the raw cover, switch, fan, light, number, or select from its source integration. Covers need non-optimistic position feedback and position control.",
             "outputs": "For relay fans only. Every profile must specify true or false for every listed switch. No other resource can own these outputs.",
             "profiles": "Map profile names to an outputs object containing switch entity IDs and boolean states. Include an all-off profile and an on profile.",
             "default_target": "Native fans require an on target, optionally with a percentage. Relay fans require an on profile target. This is the fan ON command default, not an automatic baseline policy.",
@@ -61,10 +62,11 @@
             "retry_interval": "Positive seconds between retries when the device does not reach the target. Defaults to 300. Source updates do not renew an accepted expiry.",
             "command_interval": "Positive seconds between normal commands for one resource. Defaults to 30. A supported STOP invalidates pending commands and bypasses this interval.",
             "movement_timeout": "Positive seconds to defer another command while raw feedback reports movement. Defaults to 120. A target-not-reached decision can already exist; this guard bounds the wait before retry.",
-            "manual_duration": "Positive seconds for a manual lease when no duration or absolute expiry is supplied. Defaults to 1800. Expiry withdraws the override; a policy must supply any return target.",
+            "manual_duration": "Positive fixed seconds when no duration source or explicit expiry is supplied. Also the STOP fallback if its source is invalid. Defaults to 1800. Expiry withdraws the override; a policy must supply any return target.",
             "tolerance": "Allowed cover-position difference from the target, from 0 to 100 percentage points. Defaults to 2. Independent physical feedback remains required.",
             "command_conditions": "Conditions for individual supported commands. Blocked commands retain the selected target. STOP and relay interlock shutdown keep their safety behavior.",
-            "unit_of_measurement": "Captured from the number actor on creation. Leave empty for unitless. Rebinding requires releasing numeric requests and removing fixed numeric targets."
+            "unit_of_measurement": "Captured from the number actor on creation. Leave empty for unitless. Rebinding requires releasing numeric requests and removing fixed numeric targets.",
+            "manual_duration_entity": "Optional existing input_number or number with a native duration unit (s, min, h, d, w, ms or μs). Sampled once for each new default-duration manual request; changes do not renew accepted requests. Invalid values reject admission. STOP still acts and uses fixed manual duration if this source is invalid."
           }
         },
         "reconfigure": {
@@ -84,17 +86,18 @@
             "command_interval": "Minimum command interval (seconds)",
             "movement_timeout": "Movement timeout (seconds)",
             "tolerance": "Position tolerance (percentage points)",
-            "manual_duration": "Default manual duration (seconds)",
+            "manual_duration": "Fixed manual duration (seconds)",
             "manual_control": "Allow manual control",
             "return_monitor": "Return confirmation",
             "command_conditions": "Command conditions",
-            "unit_of_measurement": "Bound number unit"
+            "unit_of_measurement": "Bound number unit",
+            "manual_duration_entity": "Default manual duration source"
           },
           "data_description": {
             "manual_control": "Turn off for a follower controlled by a source. Removes managed command entities, manual status, expiry, and resume controls; manual request actions are rejected.",
             "return_monitor": "For covers, warn when raw position has not reached the effective return target. Uses the configured position tolerance.",
             "kind": "Choose the source integration adapter. A relay fan owns every listed switch output exclusively.",
-            "entity_id": "Use the raw cover, switch, or fan from its source integration. Covers need non-optimistic position feedback and position control.",
+            "entity_id": "Use the raw cover, switch, fan, light, number, or select from its source integration. Covers need non-optimistic position feedback and position control.",
             "outputs": "For relay fans only. Every profile must specify true or false for every listed switch. No other resource can own these outputs.",
             "profiles": "Map profile names to an outputs object containing switch entity IDs and boolean states. Include an all-off profile and an on profile.",
             "default_target": "Native fans require an on target, optionally with a percentage. Relay fans require an on profile target. This is the fan ON command default, not an automatic baseline policy.",
@@ -104,10 +107,11 @@
             "retry_interval": "Positive seconds between retries when the device does not reach the target. Defaults to 300. Source updates do not renew an accepted expiry.",
             "command_interval": "Positive seconds between normal commands for one resource. Defaults to 30. A supported STOP invalidates pending commands and bypasses this interval.",
             "movement_timeout": "Positive seconds to defer another command while raw feedback reports movement. Defaults to 120. A target-not-reached decision can already exist; this guard bounds the wait before retry.",
-            "manual_duration": "Positive seconds for a manual lease when no duration or absolute expiry is supplied. Defaults to 1800. Expiry withdraws the override; a policy must supply any return target.",
+            "manual_duration": "Positive fixed seconds when no duration source or explicit expiry is supplied. Also the STOP fallback if its source is invalid. Defaults to 1800. Expiry withdraws the override; a policy must supply any return target.",
             "tolerance": "Allowed cover-position difference from the target, from 0 to 100 percentage points. Defaults to 2. Independent physical feedback remains required.",
             "command_conditions": "Conditions for individual supported commands. Blocked commands retain the selected target. STOP and relay interlock shutdown keep their safety behavior.",
-            "unit_of_measurement": "Captured from the number actor on creation. Leave empty for unitless. Rebinding requires releasing numeric requests and removing fixed numeric targets."
+            "unit_of_measurement": "Captured from the number actor on creation. Leave empty for unitless. Rebinding requires releasing numeric requests and removing fixed numeric targets.",
+            "manual_duration_entity": "Optional existing input_number or number with a native duration unit (s, min, h, d, w, ms or μs). Sampled once for each new default-duration manual request; changes do not renew accepted requests. Invalid values reject admission. STOP still acts and uses fixed manual duration if this source is invalid."
           }
         }
       },
@@ -127,7 +131,7 @@
         "config_on_must_be_true_or_false": "on must be true or false",
         "config_direction_must_be_forward_or_reverse": "direction must be forward or reverse",
         "config_must_be_positive": "{field} must be positive",
-        "config_kind_must_be_cover_switch_fan_or_relay_fan": "Resource kind must be cover, switch, fan, relay_fan, number, or select",
+        "config_kind_must_be_cover_switch_fan_or_relay_fan": "Resource kind must be cover, switch, fan, relay_fan, number, select, or light",
         "config_manual_control_must_be_true_or_false": "manual_control must be true or false",
         "config_policy_must_reference_an_existing_resource": "policy must reference an existing resource",
         "config_policy_kind_must_be_state_or_occurrence": "policy kind must be state or occurrence",
@@ -157,7 +161,7 @@
         "config_profile_direction_must_be_forward_or_reverse": "profile direction must be forward or reverse",
         "config_native_fan_requires_a_configured_default_target": "native fan requires a configured default_target",
         "config_cover_requires_non_optimistic_position_control": "cover requires non-optimistic position control",
-        "config_target_field_must_be_position_on_percentage_or_direction": "Target field must be position, on, percentage, direction, value, or option",
+        "config_target_field_must_be_position_on_percentage_or_direction": "Target field must be position, on, percentage, direction, value, option, brightness, or color_temp_kelvin",
         "config_provide_target_or_target_entity_target_attributes_require_target_entity": "provide target or target_entity; target attributes require target_entity",
         "config_provider_must_reference_an_existing_resource": "provider must reference an existing resource",
         "config_passive_providers_cannot_have_actuator_targets": "passive providers cannot have actuator targets",
@@ -203,7 +207,8 @@
             "conditions": "Conditions",
             "triggers": "Native admission triggers",
             "duration": "Request duration",
-            "cancel_triggers": "Native cancellation triggers"
+            "cancel_triggers": "Native cancellation triggers",
+            "duration_entity": "Request duration source"
           },
           "data_description": {
             "resource_id": "Subentry ID of the existing resource that owns this output.",
@@ -212,10 +217,11 @@
             "target": "Target object for the resource, such as position set to 0 or on set to true. A target source or desired control can supply a dynamic target instead.",
             "target_entity": "Read the target from this source entity state or its configured attribute. Telemetry does not create manual ownership.",
             "target_attribute": "Optional source attribute. Omit to read the source state; requires a target entity.",
-            "target_field": "Target field to populate: position, on, percentage, direction, value, or option. Defaults to position; requires a target entity and matching resource capability.",
+            "target_field": "Target field to populate: position, on, percentage, direction, value, option, brightness, or color_temp_kelvin. Defaults to position; requires a target entity and matching resource capability.",
             "intent_id": "Desired control subentry ID for a state policy controlling a switch. Replaces all other target fields; uses the current Boolean value.",
             "conditions": "State policies evaluate continuously. Occurrence conditions are checked only at admission; external submissions have no trigger variables.",
-            "duration": "Positive fixed lifetime from native trigger admission. Not required for externally submitted occurrences."
+            "duration": "Positive fixed lifetime from native trigger admission when no duration source is configured. Not required for externally submitted occurrences.",
+            "duration_entity": "Optional existing input_number or number with a native duration unit. Overrides fixed duration for native trigger admission. A finite positive value is sampled once and its expiry is frozen; invalid values decline the new request and preserve an accepted request."
           }
         },
         "reconfigure": {
@@ -234,7 +240,8 @@
             "conditions": "Conditions",
             "triggers": "Native admission triggers",
             "duration": "Request duration",
-            "cancel_triggers": "Native cancellation triggers"
+            "cancel_triggers": "Native cancellation triggers",
+            "duration_entity": "Request duration source"
           },
           "data_description": {
             "resource_id": "Subentry ID of the existing resource that owns this output.",
@@ -243,10 +250,11 @@
             "target": "Target object for the resource, such as position set to 0 or on set to true. A target source or desired control can supply a dynamic target instead.",
             "target_entity": "Read the target from this source entity state or its configured attribute. Telemetry does not create manual ownership.",
             "target_attribute": "Optional source attribute. Omit to read the source state; requires a target entity.",
-            "target_field": "Target field to populate: position, on, percentage, direction, value, or option. Defaults to position; requires a target entity and matching resource capability.",
+            "target_field": "Target field to populate: position, on, percentage, direction, value, option, brightness, or color_temp_kelvin. Defaults to position; requires a target entity and matching resource capability.",
             "intent_id": "Desired control subentry ID for a state policy controlling a switch. Replaces all other target fields; uses the current Boolean value.",
             "conditions": "State policies evaluate continuously. Occurrence conditions are checked only at admission; external submissions have no trigger variables.",
-            "duration": "Positive fixed lifetime from native trigger admission. Not required for externally submitted occurrences."
+            "duration": "Positive fixed lifetime from native trigger admission when no duration source is configured. Not required for externally submitted occurrences.",
+            "duration_entity": "Optional existing input_number or number with a native duration unit. Overrides fixed duration for native trigger admission. A finite positive value is sampled once and its expiry is frozen; invalid values decline the new request and preserve an accepted request."
           }
         }
       },
@@ -266,7 +274,7 @@
         "config_on_must_be_true_or_false": "on must be true or false",
         "config_direction_must_be_forward_or_reverse": "direction must be forward or reverse",
         "config_must_be_positive": "{field} must be positive",
-        "config_kind_must_be_cover_switch_fan_or_relay_fan": "Resource kind must be cover, switch, fan, relay_fan, number, or select",
+        "config_kind_must_be_cover_switch_fan_or_relay_fan": "Resource kind must be cover, switch, fan, relay_fan, number, select, or light",
         "config_manual_control_must_be_true_or_false": "manual_control must be true or false",
         "config_policy_must_reference_an_existing_resource": "policy must reference an existing resource",
         "config_policy_kind_must_be_state_or_occurrence": "policy kind must be state or occurrence",
@@ -296,7 +304,7 @@
         "config_profile_direction_must_be_forward_or_reverse": "profile direction must be forward or reverse",
         "config_native_fan_requires_a_configured_default_target": "native fan requires a configured default_target",
         "config_cover_requires_non_optimistic_position_control": "cover requires non-optimistic position control",
-        "config_target_field_must_be_position_on_percentage_or_direction": "Target field must be position, on, percentage, direction, value, or option",
+        "config_target_field_must_be_position_on_percentage_or_direction": "Target field must be position, on, percentage, direction, value, option, brightness, or color_temp_kelvin",
         "config_provide_target_or_target_entity_target_attributes_require_target_entity": "provide target or target_entity; target attributes require target_entity",
         "config_provider_must_reference_an_existing_resource": "provider must reference an existing resource",
         "config_passive_providers_cannot_have_actuator_targets": "passive providers cannot have actuator targets",
@@ -372,7 +380,7 @@
         "config_on_must_be_true_or_false": "on must be true or false",
         "config_direction_must_be_forward_or_reverse": "direction must be forward or reverse",
         "config_must_be_positive": "{field} must be positive",
-        "config_kind_must_be_cover_switch_fan_or_relay_fan": "Resource kind must be cover, switch, fan, relay_fan, number, or select",
+        "config_kind_must_be_cover_switch_fan_or_relay_fan": "Resource kind must be cover, switch, fan, relay_fan, number, select, or light",
         "config_manual_control_must_be_true_or_false": "manual_control must be true or false",
         "config_policy_must_reference_an_existing_resource": "policy must reference an existing resource",
         "config_policy_kind_must_be_state_or_occurrence": "policy kind must be state or occurrence",
@@ -402,7 +410,7 @@
         "config_profile_direction_must_be_forward_or_reverse": "profile direction must be forward or reverse",
         "config_native_fan_requires_a_configured_default_target": "native fan requires a configured default_target",
         "config_cover_requires_non_optimistic_position_control": "cover requires non-optimistic position control",
-        "config_target_field_must_be_position_on_percentage_or_direction": "Target field must be position, on, percentage, direction, value, or option",
+        "config_target_field_must_be_position_on_percentage_or_direction": "Target field must be position, on, percentage, direction, value, option, brightness, or color_temp_kelvin",
         "config_provide_target_or_target_entity_target_attributes_require_target_entity": "provide target or target_entity; target attributes require target_entity",
         "config_provider_must_reference_an_existing_resource": "provider must reference an existing resource",
         "config_passive_providers_cannot_have_actuator_targets": "passive providers cannot have actuator targets",
@@ -474,7 +482,7 @@
         "config_on_must_be_true_or_false": "on must be true or false",
         "config_direction_must_be_forward_or_reverse": "direction must be forward or reverse",
         "config_must_be_positive": "{field} must be positive",
-        "config_kind_must_be_cover_switch_fan_or_relay_fan": "Resource kind must be cover, switch, fan, relay_fan, number, or select",
+        "config_kind_must_be_cover_switch_fan_or_relay_fan": "Resource kind must be cover, switch, fan, relay_fan, number, select, or light",
         "config_manual_control_must_be_true_or_false": "manual_control must be true or false",
         "config_policy_must_reference_an_existing_resource": "policy must reference an existing resource",
         "config_policy_kind_must_be_state_or_occurrence": "policy kind must be state or occurrence",
@@ -504,7 +512,7 @@
         "config_profile_direction_must_be_forward_or_reverse": "profile direction must be forward or reverse",
         "config_native_fan_requires_a_configured_default_target": "native fan requires a configured default_target",
         "config_cover_requires_non_optimistic_position_control": "cover requires non-optimistic position control",
-        "config_target_field_must_be_position_on_percentage_or_direction": "Target field must be position, on, percentage, direction, value, or option",
+        "config_target_field_must_be_position_on_percentage_or_direction": "Target field must be position, on, percentage, direction, value, option, brightness, or color_temp_kelvin",
         "config_provide_target_or_target_entity_target_attributes_require_target_entity": "provide target or target_entity; target attributes require target_entity",
         "config_provider_must_reference_an_existing_resource": "provider must reference an existing resource",
         "config_passive_providers_cannot_have_actuator_targets": "passive providers cannot have actuator targets",
@@ -594,7 +602,7 @@
     },
     "config_kind_must_be_cover_switch_fan_or_relay_fan": {
       "title": "Invalid HA Operator configuration",
-      "description": "Resource kind must be cover, switch, fan, relay_fan, number, or select. Correct the configuration, then reload the integration. No actuator worker runs until setup succeeds."
+      "description": "Resource kind must be cover, switch, fan, relay_fan, number, select, or light. Correct the configuration, then reload the integration. No actuator worker runs until setup succeeds."
     },
     "config_manual_control_must_be_true_or_false": {
       "title": "Invalid HA Operator configuration",
@@ -714,7 +722,7 @@
     },
     "config_target_field_must_be_position_on_percentage_or_direction": {
       "title": "Invalid HA Operator configuration",
-      "description": "Target field must be position, on, percentage, direction, value, or option. Correct the configuration, then reload the integration. No actuator worker runs until setup succeeds."
+      "description": "Target field must be position, on, percentage, direction, value, option, brightness, or color_temp_kelvin. Correct the configuration, then reload the integration. No actuator worker runs until setup succeeds."
     },
     "config_provide_target_or_target_entity_target_attributes_require_target_entity": {
       "title": "Invalid HA Operator configuration",
@@ -1024,7 +1032,7 @@
       "message": "{field} must be positive"
     },
     "config_kind_must_be_cover_switch_fan_or_relay_fan": {
-      "message": "Resource kind must be cover, switch, fan, relay_fan, number, or select."
+      "message": "Resource kind must be cover, switch, fan, relay_fan, number, select, or light."
     },
     "config_manual_control_must_be_true_or_false": {
       "message": "manual_control must be true or false"
@@ -1114,7 +1122,7 @@
       "message": "cover requires non-optimistic position control"
     },
     "config_target_field_must_be_position_on_percentage_or_direction": {
-      "message": "Target field must be position, on, percentage, direction, value, or option."
+      "message": "Target field must be position, on, percentage, direction, value, option, brightness, or color_temp_kelvin."
     },
     "config_provide_target_or_target_entity_target_attributes_require_target_entity": {
       "message": "provide target or target_entity; target attributes require target_entity"
@@ -1181,6 +1189,9 @@
     },
     "config_select_option_type": {
       "message": "Select option must be a string of at most 255 characters."
+    },
+    "duration_source_unavailable": {
+      "message": "Duration source {entity_id} must have an available finite positive value and a supported native duration unit"
     }
   },
   "services": {
@@ -1194,18 +1205,18 @@
         },
         "entity_id": {
           "name": "Managed resource entity",
-          "description": "The managed cover, fan, switch, number, or select belonging to one resource. Choose this or Resource ID, not both."
+          "description": "The managed cover, fan, switch, light, number, or select belonging to one resource. Choose this or Resource ID, not both."
         },
         "mode": {
           "name": "Mode"
         },
         "target": {
           "name": "Requested target",
-          "description": "Target object with position, on, percentage, direction, profile, value, or option. Fields must match the resource capability. Required in target mode; omit for hands-off mode."
+          "description": "Target object with position, on, percentage, direction, profile, value, option, or native light brightness/color/effect fields. Fields must match the resource capability. Required in target mode; omit for hands-off mode."
         },
         "duration": {
           "name": "Duration",
-          "description": "Lease duration in seconds. Omit to use the resource manual duration; choose only one of duration, absolute expiry, or until released."
+          "description": "Lease duration in seconds. Omit to use the resource duration source when configured, otherwise its fixed manual duration; choose only one of duration, absolute expiry, or until released."
         },
         "expires_at": {
           "name": "Absolute expiry",
@@ -1235,7 +1246,7 @@
         },
         "entity_id": {
           "name": "Managed resource entity",
-          "description": "The managed cover, fan, switch, number, or select belonging to one resource. Choose this or Resource ID, not both."
+          "description": "The managed cover, fan, switch, light, number, or select belonging to one resource. Choose this or Resource ID, not both."
         },
         "config_entry_id": {
           "name": "Configuration entry",
@@ -1297,7 +1308,7 @@
         },
         "entity_id": {
           "name": "Managed resource entity",
-          "description": "The managed cover, fan, switch, number, or select belonging to one resource. Choose this or Resource ID, not both."
+          "description": "The managed cover, fan, switch, light, number, or select belonging to one resource. Choose this or Resource ID, not both."
         },
         "config_entry_id": {
           "name": "Configuration entry",
@@ -1315,7 +1326,7 @@
         },
         "entity_id": {
           "name": "Managed resource entity",
-          "description": "The managed cover, fan, switch, number, or select belonging to one resource. Choose this or Resource ID, not both."
+          "description": "The managed cover, fan, switch, light, number, or select belonging to one resource. Choose this or Resource ID, not both."
         },
         "config_entry_id": {
           "name": "Configuration entry",

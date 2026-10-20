@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING, Any, Literal, TypedDict, TypeGuard, cast
 from uuid import uuid4
 
 from homeassistant.components import persistent_notification
-from homeassistant.const import EVENT_STATE_CHANGED, EVENT_STATE_REPORTED
+from homeassistant.const import EVENT_STATE_CHANGED, EVENT_STATE_REPORTED, UnitOfTime
 from homeassistant.core import (
     Context,
     Event,
@@ -40,6 +40,7 @@ from homeassistant.helpers.event import (
 )
 from homeassistant.helpers.storage import Store
 from homeassistant.util import dt as dt_util
+from homeassistant.util.unit_conversion import DurationConverter
 
 from . import OperatorConfigEntry
 from .adapters import DISPATCH_PARENT, Adapter, NumberAdapter, create_adapter
@@ -293,6 +294,7 @@ class OperatorRuntime:
             for key, config in self.policies.items()
         }
         self._policy_results: dict[str, ConditionEvaluation] = {}
+        self._duration_errors: dict[str, str] = {}
         self._trigger_owners: dict[str, PolicyTriggers] = {}
         self._trigger_epochs: set[PolicyTriggers] = set()
         self._return_dirty: set[str] = set()
@@ -446,6 +448,20 @@ class OperatorRuntime:
             target = self._policy_target(config)
             if target is None:
                 return
+            duration_details: dict[str, object] = {}
+            try:
+                if entity_id := config.get("duration_entity"):
+                    duration, duration_details = self._duration_from_entity(entity_id)
+                else:
+                    duration = cv.positive_time_period(config["duration"]).total_seconds()
+            except ServiceValidationError:
+                if policy_id not in self._duration_errors:
+                    _LOGGER.warning(
+                        "Policy %s duration source is unavailable or invalid", policy_id
+                    )
+                self._duration_errors[policy_id] = "duration_source_unavailable"
+                return
+            self._duration_errors.pop(policy_id, None)
             occurrence_id = "native:" + uuid4().hex
             key = json.dumps([policy_id, occurrence_id])
 
@@ -454,8 +470,7 @@ class OperatorRuntime:
                 state["occurrences"][key] = {
                     "policy_id": policy_id,
                     "occurrence_id": occurrence_id,
-                    "expires_at": captured_at
-                    + cv.positive_time_period(config["duration"]).total_seconds(),
+                    "expires_at": captured_at + duration,
                     "target": target.to_dict(),
                     "trigger_owned": True,
                 }
@@ -463,6 +478,7 @@ class OperatorRuntime:
             self._mutate_state(replace_owned)
             self._ingress_details[("occurrence", policy_id, occurrence_id)] = {
                 "captured_at": dt_util.utc_from_timestamp(captured_at).isoformat(),
+                **duration_details,
                 "policy_conditions": {
                     "status": result.status,
                     "conditions": deepcopy(result.conditions),
@@ -979,7 +995,7 @@ class OperatorRuntime:
         source: str = "service",
         context: Context | None = None,
     ) -> AcceptedRequestReceipt:
-        source_details = self._automation_trigger_details(context)
+        source_details = self._automation_trigger_details(context) or {}
         self._manual_resource(resource_id)
         config = self._admit(resource_id)
         if mode not in {"target", "hands_off"}:
@@ -1024,6 +1040,11 @@ class OperatorRuntime:
         if expires_at is not None:
             expires_at = _number(expires_at, "expires_at")
         actual_duration = duration if duration is not None else config["manual_duration"]
+        duration_entity = (
+            config.get("manual_duration_entity")
+            if duration is None and expires_at is None and not indefinite
+            else None
+        )
         expiry = (
             None
             if indefinite
@@ -1042,7 +1063,9 @@ class OperatorRuntime:
                         "resource_id": resource_id,
                         "mode": mode,
                         "target": value.to_dict() if value else None,
-                        "duration": actual_duration,
+                        "duration": {"entity_id": duration_entity}
+                        if duration_entity
+                        else actual_duration,
                         "expires_at": expires_at,
                         "indefinite": indefinite,
                     },
@@ -1059,7 +1082,7 @@ class OperatorRuntime:
         replayed = False
 
         def mutate(state: RuntimeSnapshot) -> None:
-            nonlocal replayed
+            nonlocal replayed, expiry
             # Admission can wait behind another write; observe mode or unload
             # may have changed while the request was queued.
             self._admit(resource_id)
@@ -1072,15 +1095,23 @@ class OperatorRuntime:
                 receipt.update(existing["receipt"])
                 replayed = True
                 return
+            if duration_entity:
+                sampled_duration, details = self._duration_from_entity(duration_entity)
+                source_details.update(details)
+                expiry = now + sampled_duration
+                receipt["expires_at"] = expiry
             if expiry is not None and expiry <= _now():
                 raise ServiceValidationError(
                     translation_domain=DOMAIN, translation_key="future_expiry"
                 )
             accepted = normalized
             settings = None
-            if fan_command and requested is not None:
+            if requested is not None and (fan_command or config["kind"] == "light"):
                 try:
-                    accepted, settings = self._fan_command(resource_id, requested, state)
+                    if fan_command:
+                        accepted, settings = self._fan_command(resource_id, requested, state)
+                    else:
+                        accepted = self._light_command(resource_id, requested, state)
                 except TargetValidationError as err:
                     raise ServiceValidationError(
                         translation_domain=DOMAIN,
@@ -1103,9 +1134,57 @@ class OperatorRuntime:
             mutate,
             context_key=lambda: [] if replayed else [("manual", request_id)],
             context=context,
-            source_details=source_details,
+            source_details=source_details if source_details or duration_entity else None,
         )
         return {**receipt, "accepted": True}
+
+    def _duration_from_entity(self, entity_id: str) -> tuple[float, dict[str, object]]:
+        """Sample one existing HA duration value; callers freeze its expiry."""
+        native = self.hass.states.get(entity_id)
+        try:
+            if native is None or native.state in _UNKNOWN or native.attributes.get("restored"):
+                raise ValueError
+            value = float(native.state)
+            unit = native.attributes.get("unit_of_measurement")
+            if unit not in DurationConverter.VALID_UNITS or not math.isfinite(value) or value <= 0:
+                raise ValueError
+            seconds = DurationConverter.convert(value, unit, UnitOfTime.SECONDS)
+            if not math.isfinite(seconds) or seconds <= 0:
+                raise ValueError
+            dt_util.utc_from_timestamp(_now() + seconds)
+        except (ValueError, TypeError, OverflowError) as err:
+            raise ServiceValidationError(
+                translation_domain=DOMAIN,
+                translation_key="duration_source_unavailable",
+                translation_placeholders={"entity_id": entity_id},
+            ) from err
+        return seconds, {"duration_source": {**self._source_details(native), "seconds": seconds}}
+
+    def _light_command(self, resource_id: str, requested: Target, state: RuntimeSnapshot) -> Target:
+        """Keep accepted manual settings across partial native light commands."""
+        from .adapters import LIGHT_COLORS
+
+        adapter = self.adapter(resource_id)
+        command = adapter.normalize(requested)
+        values = command.to_dict()
+        # Bare ON deliberately releases old brightness/color constraints for adaptation.
+        if values == {"on": True} or command.on is False:
+            return command
+        prior = state["manuals"].get(resource_id)
+        if (
+            prior
+            and prior["mode"] == "target"
+            and ((expiry := prior.get("expires_at")) is None or expiry > _now())
+        ):
+            base = Target.from_dict(prior["target"])
+            if base.on:
+                previous = dict(base.to_dict())
+                if LIGHT_COLORS & values.keys():
+                    previous = {
+                        key: value for key, value in previous.items() if key not in LIGHT_COLORS
+                    }
+                values = cast(TargetData, {**previous, **values})
+        return adapter.normalize(Target.from_dict(values))
 
     def _fan_command(
         self, resource_id: str, requested: Target, state: RuntimeSnapshot
@@ -1193,7 +1272,22 @@ class OperatorRuntime:
             raise ServiceValidationError(translation_domain=DOMAIN, translation_key="observe_stop")
         self._generation[resource_id] += 1
         stop_id = str(uuid4())
-        expiry = _now() + config["manual_duration"]
+        duration_details: dict[str, object] = {}
+        duration = config["manual_duration"]
+        if entity_id := config.get("manual_duration_entity"):
+            try:
+                duration, duration_details = self._duration_from_entity(entity_id)
+            except ServiceValidationError:
+                duration_details = {
+                    "duration_source": {
+                        "source_entity": entity_id,
+                        "error": "duration_source_unavailable",
+                        "fallback_seconds": duration,
+                    }
+                }
+        expiry = _now() + duration
+        if duration_details:
+            self._ingress_details[("manual", stop_id)] = duration_details
         self._emergency_hands_off[resource_id] = ManualLease(
             resource_id, "hands_off", expires_at=expiry, request_id=stop_id, source="stop"
         )
@@ -1435,7 +1529,7 @@ class OperatorRuntime:
             if value is None:
                 return None
             field = config.get("target_field", "position")
-            if field in {"position", "percentage", "value"}:
+            if field in {"position", "percentage", "value", "brightness", "color_temp_kelvin"}:
                 if isinstance(value, bool):
                     return None
                 try:
@@ -2507,6 +2601,11 @@ class OperatorRuntime:
                     "status": result.status,
                     "conditions": deepcopy(result.conditions),
                     "error": result.error,
+                    **(
+                        {"duration_error": self._duration_errors[key]}
+                        if key in self._duration_errors
+                        else {}
+                    ),
                 }
                 for key, result in self._policy_results.items()
             },

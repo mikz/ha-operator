@@ -38,6 +38,7 @@ Names are your labels; references use stable subentry IDs.
 | --- | --- | --- |
 | `cover` | `entity_id` | Raw cover with non-optimistic `current_position` and position control. STOP exists only if the source supports it. |
 | `switch` | `entity_id` | Raw switch with on/off feedback. |
+| `light` | `entity_id` | Native light with on/off feedback and supported brightness/color/effect fields. See [native lights](native-lights.md). |
 | `number` | `entity_id`, explicit `tolerance`, captured `unit_of_measurement` | Finite values in current native bounds and the bound service unit. Step remains native metadata. |
 | `select` | `entity_id` | Exact current native options; no substitute option. |
 | `fan` | `entity_id`, `default_target` | Native fan with on/off feedback. Speed and direction require the corresponding source features. |
@@ -68,6 +69,7 @@ The following optional fields apply to resources.
 | `movement_timeout` | 120 seconds | Positive time to defer another command while physical feedback reports movement. A decision can already report target not reached; this guard bounds the wait before retry. |
 | `tolerance` | 2 percentage points | Cover position tolerance from 0 to 100. |
 | `manual_duration` | 1800 seconds | Positive lease duration when a request supplies no expiry. |
+| `manual_duration_entity` | Optional | Existing `input_number` or `number` whose state and duration unit supply the default manual lease at admission. |
 | `manual_control` | `true` | `false` removes managed command entities and manual controls; manual request, release, and STOP are rejected. Source-following policy intent still runs. |
 | `restriction_entity` | None | On blocks dispatch; unknown or missing usable feedback also blocks. It does not erase intent. |
 | `fault_entity` | None | On or unknown/missing usable feedback inhibits dispatch. |
@@ -87,13 +89,13 @@ requirements have separate precedence.
 
 | Target source | Fields | Contract |
 | --- | --- | --- |
-| Fixed target | `target` | Capability-valid object with `position`, `on`, `percentage`, `direction`, or configured `profile`, according to the adapter. |
-| Native source | `target_entity`, optional `target_attribute`, `target_field` | Read a source state or attribute into `position` (default), `on`, `percentage`, `direction`, `value`, or `option`. Missing/unknown values do not provide a usable target. |
+| Fixed target | `target` | Capability-valid object with `position`, `on`, `percentage`, `direction`, configured `profile`, `value`, `option`, or the [native light fields](native-lights.md), according to the adapter. |
+| Native source | `target_entity`, optional `target_attribute`, `target_field` | Read a source state or attribute into `position` (default), `on`, `percentage`, `direction`, `value`, `option`, `brightness`, or `color_temp_kelvin`. Missing/unknown values do not provide a usable target. |
 | Desired control | `intent_id` | Existing desired control subentry ID. Only for a state policy and a switch resource; excludes all other target fields. |
 
 Policy `conditions` use HA's native condition list. State policies evaluate it
 continuously; all occurrences evaluate it only at admission. Optional native
-`triggers` require positive `duration`; `cancel_triggers` withdraw only the policy's
+`triggers` require positive `duration` or `duration_entity`; `cancel_triggers` withdraw only the policy's
 trigger-owned request. External submission IDs/deduplication/expiry remain.
 See [native policy semantics and migration](native-policies.md).
 
@@ -139,10 +141,26 @@ native subentry IDs, not user labels or raw physical source entities.
 
 For manual expiry, choose at most one of positive `duration` in seconds, future
 `expires_at` in UTC Unix seconds, or `indefinite: true`. Omit all three to use the
-resource's `manual_duration`. Optional `request_id` and required `occurrence_id`
+resource's `manual_duration_entity` when configured, otherwise `manual_duration`.
+Optional `request_id` and required `occurrence_id`
 have 1–128 characters. Reuse a request ID only for identical intent. A repeated
 occurrence ID cannot replay a skipped, canceled, or expired occurrence. Source
 updates do not extend absolute deadlines.
+
+Duration sources reference existing `input_number` or `number` entities. Set their
+native unit to `s`, `min`, `h`, `d`, `w`, `ms`, or `μs`. Operator samples a finite
+positive value once at admission and records its source, value, unit and converted
+seconds in the existing Reason/native trace. Changing the source affects the next
+request, not an accepted deadline. Request-ID replay returns the original receipt
+without resampling. Explicit action expiry parameters override the configured
+source. Missing, unavailable, invalid or nonpositive source values reject a new
+default-duration manual request. STOP always acts: it uses a valid source, or the
+fixed `manual_duration` fallback with explanation if that source is invalid.
+
+An occurrence policy's `duration_entity` similarly overrides its fixed `duration`
+for new native trigger admissions. Invalid sources decline admission without
+replacing an accepted occurrence. External `submit_occurrence` keeps its explicit
+absolute expiry. Duration sources add no subscriptions, rules or periodic work.
 
 Success means the runtime accepted the command. Home Assistant Store saves
 state through its normal delayed lifecycle. Physical movement and independent
@@ -150,7 +168,7 @@ confirmation can follow later or remain blocked.
 Observe mode accepts no new manual requests or occurrences and emits no outputs.
 No custom trigger
 or condition platform is exposed: use native entity state triggers/conditions
-and existing timer events. Native cover, fan, switch, number, and select actions remain
+and existing timer events. Native cover, fan, switch, light, number, and select actions remain
 available according to each entity's capabilities. Supported cover STOP uses
 `cover.stop_cover`; see the [STOP contract](architecture.md#manual-control-and-stop).
 
