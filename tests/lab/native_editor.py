@@ -1,0 +1,242 @@
+"""Interact with HA's rendered subentry and embedded native condition editors."""
+
+from __future__ import annotations
+
+from .runner import ARTIFACTS
+
+
+async def open_subentry_editor(lab, title):
+    await lab.page.goto(lab.ha.base + "/config/integrations/integration/ha_operator")
+    row = lab.page.locator("ha-config-sub-entry-row").filter(has_text=title)
+    await row.get_by_role("button", name="Configure", exact=True).click()
+    await lab.page.get_by_role("button", name="Submit", exact=True).wait_for()
+
+
+async def save_subentry_editor(lab):
+    submit = lab.page.get_by_role("button", name="Submit", exact=True)
+    await submit.click()
+    await submit.wait_for(state="hidden")
+    await lab.ha.reload_entry(lab.entry)
+
+
+async def choose_entity(selector, entity_id):
+    picker = selector.get_by_role("combobox")
+    await picker.fill(entity_id)
+    await picker.press("Enter")
+
+
+async def exercise_policy_conditions(lab, title, policy_id):
+    """Add, save, edit, and remove a native state condition on the same policy."""
+    original = {
+        row["unique_id"]: row["id"]
+        for row in await lab.ha.ws("config/entity_registry/list")
+        if row.get("config_subentry_id") == policy_id
+    }
+    await open_subentry_editor(lab, title)
+    selector = lab.page.locator("ha-selector-condition")
+    await selector.get_by_role("button", name="Add condition", exact=True).click()
+    await lab.page.get_by_role("dialog").last.get_by_text("State", exact=True).click()
+    condition = selector.locator("ha-automation-condition-state")
+    if not await condition.locator("ha-selector-entity").is_visible():
+        await selector.locator("ha-automation-condition-summary").click()
+    await choose_entity(condition.locator("ha-selector-entity"), "binary_sensor.sim_cellar_policy")
+    state = condition.locator("ha-selector-state").get_by_role("combobox")
+    await state.fill("on")
+    await state.press("Enter")
+    await lab.page.screenshot(
+        path=str(ARTIFACTS / "native-policy-condition-added.png"), full_page=True
+    )
+    await save_subentry_editor(lab)
+
+    await open_subentry_editor(lab, title)
+    selector = lab.page.locator("ha-selector-condition")
+    await selector.locator("ha-automation-condition-summary").click()
+    await choose_entity(selector.locator("ha-selector-entity"), "binary_sensor.sim_cellar_demand")
+    await lab.page.screenshot(
+        path=str(ARTIFACTS / "native-policy-condition-reference-edited.png"), full_page=True
+    )
+    await save_subentry_editor(lab)
+
+    await open_subentry_editor(lab, title)
+    row = lab.page.locator("ha-selector-condition ha-automation-condition-row")
+    await row.get_by_role("button", name="Menu", exact=True).click()
+    await row.locator('ha-dropdown-item[value="delete"]').click()
+    await lab.page.screenshot(
+        path=str(ARTIFACTS / "native-policy-condition-removed.png"), full_page=True
+    )
+    await save_subentry_editor(lab)
+    current = {
+        row["unique_id"]: row["id"]
+        for row in await lab.ha.ws("config/entity_registry/list")
+        if row.get("config_subentry_id") == policy_id
+    }
+    assert current == original
+    subentries = await lab.ha.ws("config_entries/subentries/list", entry_id=lab.entry)
+    assert any(row["subentry_id"] == policy_id and row["title"] == title for row in subentries)
+
+
+async def clear_v3_migration_fields(lab, policy_title, resource_title):
+    """Use the released 0.3 selectors before the incompatible upgrade."""
+    await open_subentry_editor(lab, policy_title)
+    await lab.page.get_by_label("Policy input", exact=True).click()
+    await lab.page.get_by_text("Existing state or submitted occurrence", exact=True).click()
+    await lab.page.screenshot(
+        path=str(ARTIFACTS / "migration-v3-legacy-input-selected.png"), full_page=True
+    )
+    await save_subentry_editor(lab)
+    await open_subentry_editor(lab, resource_title)
+    check = lab.page.locator("ha-selector-object").filter(has_text="Synthetic telemetry")
+    await check.get_by_role("button", name="Delete", exact=True).click()
+    await lab.page.screenshot(
+        path=str(ARTIFACTS / "migration-v3-health-check-removed.png"), full_page=True
+    )
+    await save_subentry_editor(lab)
+
+
+async def edit_resource_actor(lab, title, entity_id):
+    await open_subentry_editor(lab, title)
+    await choose_entity(lab.page.locator("ha-selector-entity").first, entity_id)
+    await lab.page.screenshot(
+        path=str(ARTIFACTS / ("native-resource-reference-" + entity_id.replace(".", "-") + ".png")),
+        full_page=True,
+    )
+    await save_subentry_editor(lab)
+
+
+async def delete_subentry(lab, title):
+    await lab.page.goto(lab.ha.base + "/config/integrations/integration/ha_operator")
+    row = lab.page.locator("ha-config-sub-entry-row").filter(has_text=title)
+    await row.get_by_role("button", name="Menu", exact=True).click()
+    await row.locator('ha-dropdown-item[value="delete"]').click()
+    await lab.page.get_by_role("dialog").get_by_role("button", name="Delete", exact=True).click()
+    await row.wait_for(state="hidden")
+    await lab.ha.reload_entry(lab.entry)
+
+
+async def exercise_occurrence_editor(lab, title, policy_id, event_prefix):
+    """Edit real native trigger/duration selectors while the occurrence is disabled."""
+    enabled = await lab.ha.managed(policy_id, "switch")
+    assert (await lab.ha.state(enabled))["state"] == "off"
+    await open_subentry_editor(lab, title)
+    selectors = lab.page.locator("ha-selector-trigger")
+    for index, event in enumerate((event_prefix + "_draft", event_prefix + "_cancel")):
+        selector = selectors.nth(index)
+        await selector.get_by_role("button", name="Add trigger", exact=True).click()
+        await (
+            lab.page.locator("add-automation-element-dialog")
+            .get_by_text("Manual event received", exact=True)
+            .click()
+        )
+        body = selector.locator("ha-automation-trigger-event")
+        if not await body.get_by_label("Event type", exact=True).is_visible():
+            await selector.locator("ha-automation-trigger-summary").click()
+        field = body.get_by_label("Event type", exact=True)
+        await field.fill(event)
+        await field.press("Tab")
+    duration = lab.page.locator("ha-selector-duration ha-input[name='seconds']").get_by_role(
+        "spinbutton"
+    )
+    await duration.fill("3")
+    await duration.press("Tab")
+    await lab.page.screenshot(
+        path=str(ARTIFACTS / "native-occurrence-triggers-added.png"), full_page=True
+    )
+    await save_subentry_editor(lab)
+
+    await open_subentry_editor(lab, title)
+    selector = lab.page.locator("ha-selector-trigger").first
+    await selector.locator("ha-automation-trigger-summary").click()
+    field = selector.get_by_label("Event type", exact=True)
+    assert await field.input_value() == event_prefix + "_draft"
+    await field.fill(event_prefix + "_admit")
+    await field.press("Tab")
+    duration = lab.page.locator("ha-selector-duration ha-input[name='seconds']").get_by_role(
+        "spinbutton"
+    )
+    await duration.fill("4")
+    await duration.press("Tab")
+    await lab.page.screenshot(
+        path=str(ARTIFACTS / "native-occurrence-triggers-edited.png"), full_page=True
+    )
+    await save_subentry_editor(lab)
+
+    await open_subentry_editor(lab, title)
+    for index, event in enumerate((event_prefix + "_admit", event_prefix + "_cancel")):
+        selector = lab.page.locator("ha-selector-trigger").nth(index)
+        await selector.locator("ha-automation-trigger-summary").click()
+        assert await selector.get_by_label("Event type", exact=True).input_value() == event
+    assert (
+        int(
+            await lab.page.locator("ha-selector-duration ha-input[name='seconds']")
+            .get_by_role("spinbutton")
+            .input_value()
+        )
+        == 4
+    )
+    await save_subentry_editor(lab)
+    assert (await lab.ha.state(enabled))["state"] == "off"
+    rows = await lab.ha.ws("config_entries/subentries/list", entry_id=lab.entry)
+    assert any(row["subentry_id"] == policy_id and row["title"] == title for row in rows)
+
+
+async def prove_native_occurrence(lab, resource, policy_id, event_prefix):
+    """Prove native admission, absolute expiry, and cancellation without automation entities."""
+    from .runner import eventually
+
+    async def selection():
+        result = await lab.ha.service(
+            "ha_operator", "explain", {"resource_id": resource}, response=True
+        )
+        return result["service_response"]["resources"][resource]["selection"]
+
+    async def automation_entities():
+        return {
+            row["entity_id"]
+            for row in await lab.ha.request("GET", "/api/states")
+            if row["entity_id"].startswith(("automation.", "script."))
+        }
+
+    before = await automation_entities()
+    enabled = await lab.ha.managed(policy_id, "switch")
+    await lab.ha.service("switch", "turn_on", {"entity_id": enabled})
+    await lab.ha.reload_entry(lab.entry)
+    await lab.ha.request("POST", "/api/events/" + event_prefix + "_admit", {})
+    accepted = await eventually(
+        selection, lambda row: row.get("source_id") == policy_id and row.get("occurrence_id")
+    )
+    await eventually(selection, lambda row: row.get("source_id") != policy_id, timeout=12)
+    await lab.ha.request("POST", "/api/events/" + event_prefix + "_admit", {})
+    second = await eventually(selection, lambda row: row.get("source_id") == policy_id)
+    assert second["occurrence_id"] != accepted["occurrence_id"]
+    await lab.ha.request("POST", "/api/events/" + event_prefix + "_cancel", {})
+    await eventually(selection, lambda row: row.get("source_id") != policy_id)
+    assert await automation_entities() == before
+    await lab.ha.service("switch", "turn_off", {"entity_id": enabled})
+    return {"first": accepted, "second": second, "automation_entities": sorted(before)}
+
+
+async def clear_v3_timer_input(lab, title):
+    await open_subentry_editor(lab, title)
+    await lab.page.get_by_label("Policy input", exact=True).click()
+    await lab.page.get_by_text("Existing state or submitted occurrence", exact=True).click()
+    await lab.page.screenshot(
+        path=str(ARTIFACTS / "migration-v3-timer-input-cleared.png"), full_page=True
+    )
+    await save_subentry_editor(lab)
+
+
+async def clear_v3_occurrence_eligibility(lab, title):
+    await open_subentry_editor(lab, title)
+    # The released form has eligibility first, target source second.
+    await (
+        lab.page.locator("ha-selector-entity")
+        .first.get_by_role("button", name="Clear", exact=True)
+        .click()
+    )
+    field = lab.page.get_by_label("Eligible state", exact=True)
+    await field.fill("")
+    await field.press("Tab")
+    await lab.page.screenshot(
+        path=str(ARTIFACTS / "migration-v3-occurrence-eligibility-cleared.png"), full_page=True
+    )
+    await save_subentry_editor(lab)

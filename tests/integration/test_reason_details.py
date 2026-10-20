@@ -59,18 +59,14 @@ async def test_numeric_selection_snapshot_and_native_area(
         policies={
             "cold": policy(
                 "Cold policy",
-                input={
-                    "type": "qualified_numeric",
-                    "entity_id": registered.entity_id,
-                    "comparison": "below",
-                    "threshold": 16,
-                    "unit": "°C",
-                    "qualification_seconds": 60,
-                },
+                conditions=[
+                    {"condition": "numeric_state", "entity_id": registered.entity_id, "below": 16}
+                ],
             )
         },
     )
     await async_activate(hass)
+    await entry.runtime_data.async_request("roof", target={"position": 60}, duration=60)
     hass.states.async_set(registered.entity_id, "14", attributes)
     await hass.async_block_till_done()
     await advance(hass, freezer, 30)
@@ -89,13 +85,12 @@ async def test_numeric_selection_snapshot_and_native_area(
     assert snapshot.attributes["source_area"] == (
         "Sensor room" if entity_override else "Device room"
     )
-    assert snapshot.attributes["source_value"] == 13
+    assert snapshot.attributes["source_value"] == "13"
     assert snapshot.attributes["source_unit"] == "°C"
     assert snapshot.attributes["source_updated_at"] == source_updated
     assert snapshot.attributes["captured_at"] != source_updated
-    assert snapshot.attributes["configured_comparison"] == "below"
-    assert snapshot.attributes["configured_threshold"] == 16
-    assert snapshot.attributes["qualification_seconds"] == 60
+    assert snapshot.attributes["policy_conditions"]["conditions"][0]["config"]["below"] == 16
+    assert snapshot.attributes["qualification_seconds"] is None
     assert snapshot.attributes["target_position"] == 40
     assert snapshot.attributes["target"] == {"position": 40}
     assert (
@@ -113,14 +108,15 @@ async def test_numeric_selection_snapshot_and_native_area(
     await advance(hass, freezer, 6)
     assert reason(hass).state == "Cold policy"
     assert reason(hass).attributes["source_entity"] == registered.entity_id
-    assert reason(hass).attributes["source_value"] is None
-    assert reason(hass).attributes["source_updated_at"] is None
+    assert reason(hass).attributes["source_value"] == "12"
+    assert reason(hass).attributes["source_unit"] == "°F"
+    # Native numeric conditions do not impose an extra unit veto.
     # A new evaluation after reload is not reconstructed admission evidence.
     await hass.config_entries.async_reload(entry.entry_id)
     await hass.async_block_till_done()
     hass.states.async_set(registered.entity_id, "11", attributes)
     await hass.async_block_till_done()
-    assert reason(hass).attributes["source_value"] == 11
+    assert reason(hass).attributes["source_value"] == "12"
     assert reason(hass).attributes["captured_at"] != snapshot.attributes["captured_at"]
     hass.states.async_set(registered.entity_id, "20", attributes)
     await hass.async_block_till_done()
@@ -136,7 +132,12 @@ async def test_state_policy_occurrence_replay_expiry_and_invalid_source(hass, tm
         hass,
         tmp_path,
         policies={
-            "evening": policy("Evening", eligibility_entity="input_boolean.evening"),
+            "evening": policy(
+                "Evening",
+                conditions=[
+                    {"condition": "state", "entity_id": "input_boolean.evening", "state": "on"}
+                ],
+            ),
             "external": policy("External", 10, kind="occurrence"),
         },
     )
@@ -173,10 +174,10 @@ async def test_state_policy_occurrence_replay_expiry_and_invalid_source(hass, tm
     assert reason(hass).attributes["source_value"] == "on"
     assert reason(hass).attributes["captured_at"] != first.attributes["captured_at"]
     assert reason(hass).attributes["expires_at"] is None
-    # An optimistic state may not serve as captured source evidence.
+    # Condition evidence follows native truth; it is not actuator confirmation.
     hass.states.async_set("input_boolean.evening", "on", {"optimistic": True})
     await hass.async_block_till_done()
-    assert reason(hass).attributes["source_value"] is None
+    assert reason(hass).attributes["source_value"] == "on"
     await hass.config_entries.async_unload(entry.entry_id)
 
 
@@ -285,7 +286,8 @@ async def test_native_trigger_snapshot_diverges_from_later_state(
     assert all(
         value is None or isinstance(value, (str, int, float, bool))
         for details in runtime._ingress_details.values()
-        for value in details.values()
+        for key, value in details.items()
+        if key != "policy_conditions"
     )
     # The actual completed native trace remains in this copied context, but is stopped.
     assert (

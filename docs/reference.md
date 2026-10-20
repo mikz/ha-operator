@@ -15,7 +15,7 @@ mode until explicitly activated.
 
 Adding, editing, or removing a subentry reloads the entry automatically after a
 healthy setup. Reload and entity enablement can interrupt active native timer
-qualification or accepted episodes. Ordinary manual leases, desired controls,
+qualification and withdraw trigger-owned requests. Ordinary manual leases, desired controls,
 and valid absolute deadlines survive reload. Home Assistant shutdown and restart
 have separate timer recovery behavior. See [window control](window-control.md).
 
@@ -26,11 +26,10 @@ recovery. Offline downstream devices do not make the whole integration fail setu
 
 ## Configure a resource
 
-Optional [command conditions and health checks](conditions-health.md) use native
-condition editors in the resource form. `command_conditions` maps supported command
-names to condition lists. `health_checks` contains named `alias`/`conditions` objects
-with optional startup `qualification` conditions. Health reports evidence separately
-from the observed device state, selected target, and command permission.
+Optional [command conditions](conditions-health.md) use native condition editors
+in the resource form. `command_conditions` maps supported command names to native
+condition lists. Independent observations come from existing HA entities; Operator
+does not provision or own their configuration.
 
 Each resource needs `name` and `kind`. Choose one of the following adapters.
 Names are your labels; references use stable subentry IDs.
@@ -39,13 +38,15 @@ Names are your labels; references use stable subentry IDs.
 | --- | --- | --- |
 | `cover` | `entity_id` | Raw cover with non-optimistic `current_position` and position control. STOP exists only if the source supports it. |
 | `switch` | `entity_id` | Raw switch with on/off feedback. |
+| `number` | `entity_id`, explicit `tolerance`, captured `unit_of_measurement` | Finite values in current native bounds and the bound service unit. Step remains native metadata. |
+| `select` | `entity_id` | Exact current native options; no substitute option. |
 | `fan` | `entity_id`, `default_target` | Native fan with on/off feedback. Speed and direction require the corresponding source features. |
 | `relay_fan` | `outputs`, `profiles`, `default_target`, `reversal_dead_time` | Exclusive raw switch outputs, complete profiles, and an all-off profile. Relay feedback confirms switches, not physical airflow. |
 
 Minimal cover and switch objects are
 `{"name": "Vent", "kind": "cover", "entity_id": "cover.vent"}` and
 `{"name": "Light", "kind": "switch", "entity_id": "switch.light"}`.
-A native fan also needs a default target, for example
+See [number/select units and lifecycle](typed-resources.md). A native fan also needs a default target, for example
 `{"name": "Supply", "kind": "fan", "entity_id": "fan.supply", "default_target": {"on": true}}`.
 Only add `percentage` or `direction` when the source supports those commands.
 
@@ -87,21 +88,14 @@ requirements have separate precedence.
 | Target source | Fields | Contract |
 | --- | --- | --- |
 | Fixed target | `target` | Capability-valid object with `position`, `on`, `percentage`, `direction`, or configured `profile`, according to the adapter. |
-| Native source | `target_entity`, optional `target_attribute`, `target_field` | Read a source state or attribute into `position` (default), `on`, `percentage`, or `direction`. Missing/unknown values do not provide a usable target. |
+| Native source | `target_entity`, optional `target_attribute`, `target_field` | Read a source state or attribute into `position` (default), `on`, `percentage`, `direction`, `value`, or `option`. Missing/unknown values do not provide a usable target. |
 | Desired control | `intent_id` | Existing desired control subentry ID. Only for a state policy and a switch resource; excludes all other target fields. |
 
-A state policy stays eligible while its source qualifies. Optional
-`eligibility_entity` must match `eligibility_state`, which defaults to `on`.
-An occurrence policy needs a bounded, distinct event submitted by an action or
-native timer input. Disabling a policy suppresses pending occurrences; it does
-not suppress future distinct events after re-enabling.
-
-Optional `input` replaces the eligibility fields. It has one of these shapes:
-
-| Input | Required fields | Behavior |
-| --- | --- | --- |
-| `qualified_numeric` | `type`, sensor `entity_id`, `comparison: "below"`, finite `threshold`, exact native `unit`, positive `qualification_seconds` | State policy only. Cold reports start qualification; warm reports reset it. Unknown feedback preserves the episode and deadline but cannot qualify without fresh valid recovery evidence. |
-| `timer_episode` | `type`, timer `entity_id`, positive `qualification_seconds`, positive `request_seconds` | Occurrence policy only. One native timer episode produces at most one bounded accepted occurrence. Reload interrupts the episode; diagnostics do not own it. |
+Policy `conditions` use HA's native condition list. State policies evaluate it
+continuously; all occurrences evaluate it only at admission. Optional native
+`triggers` require positive `duration`; `cancel_triggers` withdraw only the policy's
+trigger-owned request. External submission IDs/deduplication/expiry remain.
+See [native policy semantics and migration](native-policies.md).
 
 ## Configure an airflow requirement
 

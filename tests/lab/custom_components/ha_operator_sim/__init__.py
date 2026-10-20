@@ -19,7 +19,15 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, Upda
 
 DOMAIN = "ha_operator_sim"
 _LOGGER = logging.getLogger(__name__)
-PLATFORMS = [Platform.COVER, Platform.SWITCH, Platform.FAN, Platform.BINARY_SENSOR, Platform.SENSOR]
+PLATFORMS = [
+    Platform.COVER,
+    Platform.SWITCH,
+    Platform.FAN,
+    Platform.BINARY_SENSOR,
+    Platform.SENSOR,
+    Platform.NUMBER,
+    Platform.SELECT,
+]
 CONFIG_SCHEMA = vol.Schema(
     {
         DOMAIN: vol.Schema(

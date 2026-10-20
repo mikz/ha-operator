@@ -72,3 +72,59 @@ def test_followers_compare_both_archives_with_three_alternating_repetitions(tmp_
             len(row["baseline"]["counts_per_run"]) == len(row["candidate"]["counts_per_run"]) == 3
         )
         assert row["baseline"]["counts_per_run"] == row["candidate"]["counts_per_run"]
+
+
+def test_new_native_probe_is_candidate_only_without_comparative_speed_claim(tmp_path, monkeypatch):
+    package = tmp_path / "candidate.zip"
+    with zipfile.ZipFile(package, "w") as archive:
+        archive.writestr("__init__.py", "ready = True\n")
+    calls = []
+
+    def execute(command, *, env, cwd, **kwargs):
+        calls.append(env["OPERATOR_PROFILE_VARIANT"])
+        assert env["OPERATOR_PROFILE_WORKLOAD"] == "native-conditions"
+        assert "NativeConditionList" in (Path(cwd) / "test_event_profile.py").read_text()
+        Path(env["OPERATOR_PROFILE_OUTPUT"]).with_suffix(".json").write_text(
+            json.dumps(
+                {"cpu_seconds": 1, "wall_seconds": 1, "counts": {"condition_evaluations": 20}}
+            )
+        )
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr("scripts.profile_event_load.subprocess.run", execute)
+    destination = tmp_path / "probe"
+    run(
+        SimpleNamespace(
+            output=destination,
+            suite="native-conditions",
+            workloads=None,
+            measurements=["timing"],
+            repeats=2,
+            baseline=None,
+            candidate=package,
+            batches=3,
+            warmup_batches=1,
+        )
+    )
+    evidence = json.loads((destination / "comparison.json").read_text())
+    assert calls == ["candidate", "candidate"]
+    assert evidence["baseline_sha256"] is None
+    assert evidence["comparison"] == []
+    assert evidence["comparison_scope"] == "candidate-only native-policy probe"
+
+
+def test_legacy_detector_probe_refuses_incompatible_native_candidate(tmp_path):
+    import pytest
+
+    package = tmp_path / "new.zip"
+    with zipfile.ZipFile(package, "w") as archive:
+        archive.writestr("manifest.json", json.dumps({"version": "0.4.0"}))
+    with pytest.raises(ValueError, match="not comparable"):
+        run(
+            SimpleNamespace(
+                output=tmp_path / "result",
+                suite="native-policies",
+                baseline=package,
+                candidate=package,
+            )
+        )

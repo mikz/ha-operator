@@ -6,13 +6,11 @@ from typing import TYPE_CHECKING
 
 from homeassistant.components.binary_sensor import BinarySensorEntity
 from homeassistant.components.binary_sensor.const import BinarySensorDeviceClass
-from homeassistant.const import EntityCategory
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
 from . import OperatorConfigEntry
 from .entity import OperatorEntity
-from .policy_inputs import NumericState
 
 if TYPE_CHECKING:
     from .runtime import OperatorRuntime
@@ -37,27 +35,6 @@ async def async_setup_entry(
             async_add_entities(entities, config_subentry_id=identifier)
     for identifier in runtime.requirements:
         async_add_entities([UnmetSensor(runtime, identifier)], config_subentry_id=identifier)
-    for identifier, policy in runtime.policies.items():
-        if (source := policy.get("input")) is not None and source["type"] == "qualified_numeric":
-            async_add_entities(
-                [QualifiedSensor(runtime, identifier)], config_subentry_id=identifier
-            )
-
-
-class QualifiedSensor(OperatorEntity, BinarySensorEntity):
-    """Expose qualification without becoming a policy source or scheduling owner."""
-
-    def __init__(self, runtime: OperatorRuntime, identifier: str) -> None:
-        super().__init__(runtime, identifier, "qualified")
-        self._attr_entity_category = EntityCategory.DIAGNOSTIC
-        self._attr_entity_registry_enabled_default = False
-
-    @property
-    def is_on(self) -> bool | None:
-        state = self.runtime.policy_input(self.identifier)
-        if not isinstance(state, NumericState) or state.recovery_pending:
-            return None
-        return state.qualified
 
 
 class ReturnOverdueSensor(OperatorEntity, BinarySensorEntity):

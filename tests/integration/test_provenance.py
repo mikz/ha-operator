@@ -35,7 +35,11 @@ async def test_same_target_changes_reason_without_dispatch_and_rename(hass, tmp_
         policies={
             "baseline": policy("Background ventilation"),
             "evening": policy(
-                "Evening ventilation", 10, eligibility_entity="input_boolean.evening"
+                "Evening ventilation",
+                10,
+                conditions=[
+                    {"condition": "state", "entity_id": "input_boolean.evening", "state": "on"}
+                ],
             ),
         },
     )

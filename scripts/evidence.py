@@ -30,19 +30,59 @@ LAB_CASES = {
     ("2026.10.2", "observability"),
     ("2026.10.2", "sleep"),
     ("2026.10.2", "windows"),
-    ("2026.10.2", "conditions"),
+    ("2026.10.2", "migration"),
 }
 INITIAL_SCENARIOS = {"LAB-ONBOARDING", "LAB-NATIVE-CONFIG-FLOW", "LAB-RESOURCE-CONFIGURATION"}
 CONDITION_SCENARIOS = INITIAL_SCENARIOS | {
     "CONDITIONS-NATIVE-CONFIGURATION",
     "CONDITIONS-BLOCKED-ON-RETAINS-DESIRED",
-    "CONDITIONS-HEALTH-DOES-NOT-ACTUATE",
+    "CONDITIONS-UNCHANGED-TRUTH-NO-DUPLICATE-COMMAND",
     "CONDITIONS-OFF-WITH-FALSE-START-GATE",
-    "CONDITIONS-NATIVE-HEALTH-MORE-INFO",
     "CONDITIONS-RECONFIGURE-IDENTITY",
     "LAB-DIAGNOSTICS",
 }
-CONDITION_FILES = {"conditions-evidence.json", "conditions-health-more-info.png"}
+CONDITION_FILES = {"conditions-evidence.json"}
+TYPED_SCENARIOS = {
+    "TYPED-NATIVE-RESOURCES",
+    "TYPED-INDEPENDENT-OBSERVATION",
+    "TYPED-UNIT-DRIFT-INHIBITS-DISPATCH",
+    "TYPED-DYNAMIC-OPTIONS-ARBITRATION",
+    "TYPED-INVALID-ACCEPTED-MANUAL-RETAINS-LEASE",
+    "TYPED-AWAITED-NATIVE-ACTOR-SUPERSESSION",
+    "TYPED-NATIVE-MORE-INFO",
+    "TYPED-RENDERED-NATIVE-POLICY-EDITOR",
+    "TYPED-REFERENCED-ACTORS-AND-CONSUMERS-SURVIVE",
+    "TYPED-RENDERED-NATIVE-TRIGGER-EDITOR",
+    "TYPED-UNCHANGED-RECORDER-ROWS",
+}
+TYPED_FILES = {
+    "typed-evidence.json",
+    "recorder-unchanged-evidence.json",
+    "typed-number-more-info.png",
+    "typed-select-more-info.png",
+    "native-policy-condition-added.png",
+    "native-policy-condition-reference-edited.png",
+    "native-policy-condition-removed.png",
+    "native-occurrence-triggers-added.png",
+    "native-occurrence-triggers-edited.png",
+}
+MIGRATION_SCENARIOS = INITIAL_SCENARIOS | {
+    "MIGRATION-GENUINE-V3-FORMS",
+    "MIGRATION-UNCLEARED-REFUSED-WITHOUT-MUTATION",
+    "MIGRATION-CLEAR-THROUGH-V3-SUPPORTED-FORMS",
+    "MIGRATION-SAME-ID-ACCEPTED-PRESERVES-STORE",
+    "MIGRATION-NATIVE-OCCURRENCE-ENABLED",
+    "MIGRATION-NATIVE-BACKUP-ROLLBACK",
+}
+MIGRATION_FILES = {
+    "migration-evidence.json",
+    "migration-v3-legacy-input-selected.png",
+    "migration-v3-health-check-removed.png",
+    "migration-v3-timer-input-cleared.png",
+    "migration-v3-occurrence-eligibility-cleared.png",
+    "native-occurrence-triggers-added.png",
+    "native-occurrence-triggers-edited.png",
+}
 SLEEP_SCENARIOS = INITIAL_SCENARIOS | {
     "SLEEP-EXISTING-GROUPS-HAP",
     "SLEEP-NATIVE-SETUP-OBSERVE",
@@ -143,6 +183,8 @@ ALL_SCENARIOS = (
     INITIAL_SCENARIOS
     | OBSERVE_SCENARIOS
     | CELLAR_SCENARIOS
+    | CONDITION_SCENARIOS
+    | TYPED_SCENARIOS
     | {
         "OBSERVE-ZERO",
         "COVER-RAIN-RETRY",
@@ -172,6 +214,8 @@ LAB_FILES = (
     | SLEEP_FILES
     | WINDOW_FILES
     | CONDITION_FILES
+    | TYPED_FILES
+    | MIGRATION_FILES
     | {
         "summary.json",
         "sanitized.json",
@@ -633,6 +677,59 @@ def validate_static(directory: Path, manifest: dict, root: Path) -> str:
     return version
 
 
+def validate_native_composition(directory: Path) -> None:
+    """Require the independent native composition evidence from the common runtime."""
+    for name in CONDITION_FILES | TYPED_FILES:
+        require((directory / name).is_file(), f"Missing {name}")
+    conditions = read_json(directory / "conditions-evidence.json")
+    require(
+        conditions.get("schema") == 2
+        and conditions.get("status") == "passed"
+        and conditions.get("provenance") == "simulator_generated"
+        and conditions.get("physical_effects") == "simulator_observed"
+        and isinstance(conditions.get("events"), list)
+        and isinstance(conditions.get("blocked"), dict),
+        "Conditions evidence must identify independent effects and retained blocked intent",
+    )
+    typed = read_json(directory / "typed-evidence.json")
+    require(
+        typed.get("schema") == 1
+        and typed.get("status") == "passed"
+        and typed.get("physical_effects") == "simulator_observed"
+        and isinstance(typed.get("snapshots"), list)
+        and bool(typed["snapshots"])
+        and isinstance(typed.get("events"), list)
+        and bool(typed.get("awaited_supersession_commands"))
+        and bool(typed.get("preserved_external_registry")),
+        "Typed evidence must preserve independent feedback, awaited actions and external entities",
+    )
+    recorder = read_json(directory / "recorder-unchanged-evidence.json")
+    entities = recorder.get("entities", [])
+    baseline = recorder.get("baseline_counts", {})
+    current = recorder.get("current_counts", {})
+    window = recorder.get("window", {})
+    require(
+        recorder.get("schema") == 1
+        and recorder.get("status") == "passed"
+        and isinstance(entities, list)
+        and bool(entities)
+        and len(entities) == len(set(entities))
+        and isinstance(baseline, dict)
+        and isinstance(current, dict)
+        and set(baseline) == set(current) == set(entities)
+        and all(type(count) is int and count >= 0 for count in baseline.values())
+        and current == baseline
+        and type(recorder.get("additional_rows")) is int
+        and recorder["additional_rows"] == 0
+        and window.get("start")
+        and window.get("end")
+        and window["start"] < window["end"]
+        and window.get("settle_seconds") == 6
+        and window.get("input_updates") == 3,
+        "Unchanged Recorder evidence must compare the same closed window without new rows",
+    )
+
+
 def validate_lab(directory: Path, manifest: dict, manifest_sha256: str) -> tuple[str, str]:
     summary = read_json(directory / "summary.json")
     prepared = read_json(directory / "prepared.json")
@@ -704,16 +801,31 @@ def validate_lab(directory: Path, manifest: dict, manifest_sha256: str) -> tuple
         ):
             require((directory / name).is_file(), f"Missing {name}")
         validate_observe_effects(directory, manifest)
-    elif case[1] == "conditions":
-        required = CONDITION_SCENARIOS
-        for name in CONDITION_FILES:
+        validate_native_composition(directory)
+    elif case[1] == "migration":
+        required = MIGRATION_SCENARIOS
+        for name in MIGRATION_FILES:
             require((directory / name).is_file(), f"Missing {name}")
-        conditions = read_json(directory / "conditions-evidence.json")
+        migration = read_json(directory / "migration-evidence.json")
         require(
-            conditions.get("schema") == 1
-            and conditions.get("provenance") == "simulator_generated"
-            and conditions.get("physical_effects") == "simulator_observed",
-            "Conditions evidence must identify independent simulator observations",
+            migration.get("schema") == 1
+            and migration.get("status") == "passed"
+            and isinstance(migration.get("snapshots"), dict)
+            and all(
+                isinstance(migration.get(key), str) and migration[key]
+                for key in ("resource_id", "policy_id", "native_backup_id")
+            )
+            and {
+                "genuine_v3_form_configuration",
+                "uncleared_preflight_rejection_without_persisted_mutation",
+                "same_id_v3_clearing",
+                "version_four_migration",
+                "manual_store_preservation",
+                "refused_upgrade_rollback",
+                "native_backup_successful_migration_rollback",
+            }
+            <= set(migration.get("proven", [])),
+            "Migration evidence must prove same-ID preflight, native UI and backup rollback",
         )
     elif case[1] == "observability":
         required = OBSERVABILITY_SCENARIOS

@@ -499,7 +499,7 @@ async def test_programming_error_during_initialization_is_not_storage_fault(
     async def bug(runtime):
         raise KeyError("programming error")
 
-    monkeypatch.setattr(runtime_module.OperatorRuntime, "_recover_policy_inputs", bug)
+    monkeypatch.setattr(runtime_module.OperatorRuntime, "_async_setup_conditions", bug)
     with pytest.raises(KeyError, match="programming error"):
         await async_setup_entry(hass, entry)
     assert entry.runtime_data._closed and entry.runtime_data.fault is None
@@ -571,8 +571,8 @@ async def test_migration_and_device_removal_contract(hass, tmp_path):
     assert await async_remove_config_entry_device(
         hass, entry, SimpleNamespace(config_entry_id="other")
     )
-    assert await async_migrate_entry(hass, entry) and entry.version == 3
-    assert not await async_migrate_entry(hass, operator_entry(version=4))
+    assert await async_migrate_entry(hass, entry) and entry.version == 4
+    assert not await async_migrate_entry(hass, operator_entry(version=5))
     assert raw.commands == []
     assert await hass.config_entries.async_unload(entry.entry_id)
 
@@ -619,7 +619,7 @@ async def test_upgrade_discards_runtime_keeps_config_ids_and_scopes_cleanup(
     retained_trace = unrelated_trace / "trace-0.jsonl"
     retained_trace.write_text("retain trace")
     assert await hass.config_entries.async_setup(entry.entry_id)
-    assert entry.version == 3 and entry.minor_version == 1
+    assert entry.version == 4 and entry.minor_version == 1
     assert entry.data == {"custom": "preserved"}
     assert entry.options == {"shadow_lock": True, "custom": 42}
     assert entry.subentries is subentries
@@ -724,7 +724,7 @@ async def test_upgrade_unlinks_trace_symlink_without_deleting_target(hass, tmp_p
     obsolete = tmp_path / f"ha_operator_trace.{entry.entry_id}"
     obsolete.symlink_to(target, target_is_directory=True)
     assert await async_migrate_entry(hass, entry)
-    assert entry.version == 3 and not obsolete.is_symlink()
+    assert entry.version == 4 and not obsolete.is_symlink()
     assert retained.read_text() == "retain"
 
 

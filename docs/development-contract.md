@@ -9,7 +9,7 @@ owner reviews the changes and runs final acceptance.
 ## Configuration
 
 One singleton config entry, native subentries of type `resource`, `policy`, `requirement`, `intent`.
-IDs are the HA subentry_id. Resource data: `name`, `kind` (cover/switch/fan/relay_fan),
+IDs are the HA subentry_id. Resource data: `name`, `kind` (cover/switch/fan/relay_fan/number/select),
 `entity_id` (native adapters), `retry_interval` (300), `command_interval` (30),
 `movement_timeout` (120), `tolerance` (2), `manual_duration` (1800), optional
 `restriction_entity` (on blocks), `fault_entity` (on inhibits), and `default_target`.
@@ -46,30 +46,23 @@ Native empty or disabled top-level condition lists permit commands.
 Recheck command permission, restrictions,
 and generation immediately before physical dispatch and generation after awaits.
 
-Resource `health_checks` optionally contains objects with a unique `alias`, native
-`conditions`, and optional native `qualification` conditions. Native repeatable
-object selectors expose the condition editors in resource add/reconfigure forms.
-Persist the original serializable HA condition configuration. Native compiled
-checkers own evaluation, dependency tracking, and cleanup; bounded polling covers
-checkers whose native `needs_polling` is true. Reject `condition: trigger`, including
-inside compounds: reconciliation has no automation trigger context. Core 2026.10.2
-is the minimum; there is no earlier condition implementation fallback.
+Persist original serializable HA condition configurations. Native compiled checkers
+own evaluation, dependency tracking, and cleanup; bounded polling covers native
+`needs_polling`. Command conditions reject `condition: trigger`, including inside
+compounds, because reconciliation has no trigger context. Occurrence admission
+conditions can use the genuine callback context. Core 2026.10.2 is the minimum.
 
-Qualification that is false means waiting, errors mean unknown, and disabled or
-empty qualification means skipped. A qualified check reports healthy, unhealthy,
-unknown, or skipped; disabled/empty checks never establish health. Native compound
-truth remains authoritative, including OR conditions that handle optional inputs.
-A known unhealthy check remains visible alongside unknown or waiting checks.
-Health never changes selected targets or command permission and never dispatches
-STOP/restart. Only resources with configured health checks gain a diagnostic,
-read-only Health entity; existing entity identities and histories remain intact.
+Health calculations belong to independently configured native HA sensors/helpers.
+Operator neither provisions those entities nor evaluates a health-check framework.
+Migration rejects residual nonempty `health_checks` before any entry or Store
+mutation. Retired Health entity registry entries/history are preserved and disabled.
 
 Check evidence reports the native config, results/errors, and bounded factual source
 snapshots, never a device diagnosis. Native static entity extraction is incomplete
 for templates, expanded targets, and some entity-valued bounds; label its provenance
 without claiming complete dependencies or that every referenced branch ran. An
 unchanged sensor's `last_changed` is not proof of stale data. Publish frozen evidence
-only on meaningful health/permission transitions, while `explain` may refresh source
+only on meaningful permission transitions, while `explain` may refresh source
 facts. Do not rerun native conditions for explanation traces or mutate a caller's
 native automation trace. Downloadable diagnostics retain their privacy allowlist.
 
@@ -79,19 +72,14 @@ updates attached controls as one in-memory state change. Repeated ON and source 
 do not change dependents. Graph references must exist and remain acyclic.
 
 Policy data: `name`, `resource_id`, `kind` (state/occurrence), `priority` (0),
-`target` (Target dictionary), optional `eligibility_entity` and `eligibility_state`
-(on), optional `target_entity`/`target_attribute`/`target_field` (position default).
-Switch state policies can instead use `intent_id`, an internal stable reference
-to the desired boolean; it is exclusive with other target fields.
-Native attributes are subscribed as well as state changes. Runtime enabled state is
-persisted; disabling tombstones all pending occurrences, not future occurrences.
-
-Optional policy `input` replaces helper eligibility fields. `qualified_numeric`
-requires a state policy, sensor `entity_id`, `comparison: below`, finite
-`threshold`, exact native `unit`, and positive `qualification_seconds`.
-`timer_episode` requires an occurrence policy, timer `entity_id`, positive
-`qualification_seconds`, and positive `request_seconds`. Legacy policy data
-remains supported. Config entry version 2 preserves existing data and subentry IDs.
+`target`, optional `target_entity`/`target_attribute`/`target_field`, or switch state
+`intent_id`. Canonical `conditions` use NativeConditionList/ConditionSelector.
+State policies evaluate continuously, occurrences only at admission. Optional
+native `triggers` and positive static `duration` admit one bounded stored
+trigger-owned occurrence per policy; optional `cancel_triggers` withdraw only it.
+Use Core validators/TriggerSelector and native registrations, not another detector.
+See [native policy lifecycle and incompatible migration](native-policies.md).
+The removed custom input machines are not retained behind compatibility aliases.
 
 Requirement data: `name`, `activation_entities` (all on; unknown stays unknown),
 `providers` list of {id, resource_id?: str, target?: Target, evidence: list of
@@ -102,6 +90,8 @@ list order. Passive providers have no resource_id. No extractor output is config
 
 ## Core models
 
+Frozen Target fields additionally include numeric value and string option.
+Number/select contracts are in [typed resources](typed-resources.md).
 Frozen Target fields: position: float|None; on: bool|None; percentage: float|None;
 direction: str|None; profile: str|None. from_dict/to_dict helpers, omit None values.
 Observation: target: Target|None, available: bool, moving: bool, restriction:
@@ -126,7 +116,6 @@ async_submit_occurrence(policy_id, occurrence_id, expires_at);
 async_skip_occurrence(policy_id, occurrence_id, expires_at);
 async_reconcile(resource_id: str|None=None); explain(resource_id: str|None=None)->dict.
 `mode(id)` -> observe/live; `manual(id)` -> ManualLease|None; `policy_enabled(id)` bool.
-`policy_input(id)` returns `NumericState`/`TimerState` or None;
 `return_monitor(id)` returns `ReturnMonitorState`. Read-only entity
 views never schedule or own these transitions.
 `adapter(id)` returns adapter object, exposes supported_features, read_observation(now),
@@ -146,7 +135,7 @@ data fails setup with an actionable Repair.
 
 The runtime maintains modes, policy enablement, held desired values, manual
 leases, absolute deadlines, occurrence suppression, duplicate-request records,
-policy inputs, and return monitors. Preserve request method signatures and
+bounded trigger ownership, and return monitors. Preserve request method signatures and
 duplicate-request behavior, but remove commit revision and durable receipt
 semantics. Read-only entity views do not mutate this state.
 

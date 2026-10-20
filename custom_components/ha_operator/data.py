@@ -2,8 +2,8 @@
 
 from typing import Any, Literal, NotRequired, TypedDict
 
-type ResourceKind = Literal["cover", "switch", "fan", "relay_fan"]
-type TargetField = Literal["position", "on", "percentage", "direction"]
+type ResourceKind = Literal["cover", "switch", "fan", "relay_fan", "number", "select"]
+type TargetField = Literal["position", "on", "percentage", "direction", "value", "option"]
 type Scalar = str | bool | int | float
 type JSONValue = Scalar | None | list[JSONValue] | dict[str, JSONValue]
 type JSONObject = dict[str, JSONValue]
@@ -17,6 +17,8 @@ class TargetData(TypedDict, total=False):
     percentage: float
     direction: str
     profile: str
+    value: float
+    option: str
 
 
 class RelayProfileConfig(TypedDict):
@@ -30,31 +32,6 @@ class ReturnMonitorConfig(TypedDict):
     warning_after_seconds: float
 
 
-class HealthCheckConfig(TypedDict):
-    alias: str
-    conditions: list[Any]
-    qualification: NotRequired[list[Any]]
-
-
-class NumericInputConfig(TypedDict):
-    type: Literal["qualified_numeric"]
-    entity_id: str
-    comparison: Literal["below"]
-    threshold: float
-    unit: str
-    qualification_seconds: float
-
-
-class TimerInputConfig(TypedDict):
-    type: Literal["timer_episode"]
-    entity_id: str
-    qualification_seconds: float
-    request_seconds: float
-
-
-type PolicyInputConfig = NumericInputConfig | TimerInputConfig
-
-
 class ResourceConfig(TypedDict):
     name: str
     kind: ResourceKind
@@ -64,6 +41,7 @@ class ResourceConfig(TypedDict):
     tolerance: float
     manual_duration: float
     entity_id: NotRequired[str]
+    unit_of_measurement: NotRequired[str | None]
     outputs: NotRequired[list[str]]
     profiles: NotRequired[dict[str, RelayProfileConfig]]
     reversal_dead_time: NotRequired[float]
@@ -73,7 +51,6 @@ class ResourceConfig(TypedDict):
     manual_control: NotRequired[bool]
     return_monitor: NotRequired[ReturnMonitorConfig]
     command_conditions: NotRequired[dict[str, list[Any]]]
-    health_checks: NotRequired[list[HealthCheckConfig]]
 
 
 class PolicyConfig(TypedDict):
@@ -82,13 +59,14 @@ class PolicyConfig(TypedDict):
     kind: Literal["state", "occurrence"]
     priority: int
     target: NotRequired[TargetData]
-    eligibility_entity: NotRequired[str]
-    eligibility_state: NotRequired[str]
+    conditions: NotRequired[list[Any]]
+    triggers: NotRequired[list[Any]]
+    cancel_triggers: NotRequired[list[Any]]
+    duration: NotRequired[dict[str, float]]
     target_entity: NotRequired[str]
     target_attribute: NotRequired[str]
     target_field: NotRequired[TargetField]
     intent_id: NotRequired[str]
-    input: NotRequired[PolicyInputConfig]
 
 
 class EvidenceConfig(TypedDict):
@@ -131,42 +109,10 @@ class OperatorConfiguration(TypedDict):
 type SubentryConfig = ResourceConfig | PolicyConfig | RequirementConfig | IntentConfig
 
 
-class NumericStateRecord(TypedDict, total=False):
-    """Input state fields with model defaults."""
-
-    due_at: float | None
-    qualified: bool
-    source_quality: Literal["numeric", "unknown"]
-    recovery_pending: bool
-
-
-class TimerStateRecord(TypedDict, total=False):
-    episode_id: str | None
-    phase: Literal["idle", "qualifying", "accepted", "suppressed", "expired"]
-    due_at: float | None
-    expires_at: float | None
-    finish_at: float | None
-
-
 class ReturnMonitorStateRecord(TypedDict):
     target_position: float | None
     due_at: float | None
     overdue: bool
-
-
-class NumericInputRecord(TypedDict):
-    type: Literal["qualified_numeric"]
-    fingerprint: str
-    state: NumericStateRecord
-
-
-class TimerInputRecord(TypedDict):
-    type: Literal["timer_episode"]
-    fingerprint: str
-    state: TimerStateRecord
-
-
-type PolicyInputRecord = NumericInputRecord | TimerInputRecord
 
 
 class ReturnMonitorRecord(TypedDict):
@@ -188,6 +134,7 @@ class OccurrenceRecord(TypedDict):
     occurrence_id: str
     expires_at: float
     skipped: NotRequired[bool]
+    trigger_owned: NotRequired[bool]
     target: NotRequired[TargetData | JSONValue]
 
 
@@ -210,7 +157,6 @@ class _SnapshotMaps(TypedDict):
     modes: dict[str, Literal["observe", "live"]]
     policy_enabled: dict[str, bool]
     intents: dict[str, bool]
-    policy_inputs: dict[str, PolicyInputRecord]
     return_monitors: dict[str, ReturnMonitorRecord]
 
 

@@ -48,6 +48,8 @@ class Target:
     percentage: float | None = None
     direction: str | None = None
     profile: str | None = None
+    value: float | None = None
+    option: str | None = None
 
     def __post_init__(self) -> None:
         for name in ("position", "percentage"):
@@ -61,6 +63,8 @@ class Target:
                         field=name,
                         maximum="100",
                     )
+        if self.value is not None:
+            _finite(self.value, "value")
         if self.on is not None and not isinstance(self.on, bool):
             raise TargetValidationError("boolean_target", "on must be a boolean", field="on")
         for name in ("direction", "profile"):
@@ -70,12 +74,25 @@ class Target:
                     "string_target", f"{name} must be a nonempty string", field=name
                 )
 
+        if self.option is not None and not isinstance(self.option, str):
+            raise TargetValidationError(
+                "select_option_type", "Select target requires a string option"
+            )
+
     @classmethod
     def from_dict(cls, value: object) -> Target:
         """Reject misspelled fields instead of silently admitting empty intent."""
         if not isinstance(value, Mapping):
             raise TargetFieldError("target_object", "Target must be an object")
-        extra = value.keys() - {"position", "on", "percentage", "direction", "profile"}
+        extra = value.keys() - {
+            "position",
+            "on",
+            "percentage",
+            "direction",
+            "profile",
+            "value",
+            "option",
+        }
         if extra:
             fields = ", ".join(sorted(map(str, extra)))
             raise TargetFieldError(
@@ -95,6 +112,10 @@ class Target:
             fields["direction"] = self.direction
         if self.profile is not None:
             fields["profile"] = self.profile
+        if self.value is not None:
+            fields["value"] = self.value
+        if self.option is not None:
+            fields["option"] = self.option
         return fields
 
 
@@ -329,7 +350,7 @@ def matches(target: Target, observed: Observation | Target | None, tolerance: fl
         actual = getattr(observed, key)
         if actual is None:
             return False
-        if key in {"position", "percentage"}:
+        if key in {"position", "percentage", "value"}:
             # These serialized keys contain only Target's validated numeric fields.
             if abs(cast(float, desired) - actual) > tolerance:
                 return False

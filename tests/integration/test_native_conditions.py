@@ -9,10 +9,7 @@ import pytest
 from homeassistant.helpers.trace import trace_get, trace_path
 
 from custom_components.ha_operator.native_conditions import (
-    ConditionEvaluation,
     NativeConditionList,
-    aggregate_health,
-    health_status,
 )
 
 
@@ -149,13 +146,12 @@ async def test_native_numeric_error_is_unknown_and_known_failed_and_member_wins(
         ],
     ],
 )
-async def test_empty_and_disabled_health_is_skipped_but_command_permitted(hass, configs):
+async def test_empty_and_disabled_native_conditions_permit_command(hass, configs):
     before = json.dumps(configs)
     checker = await native(hass, configs)
     result = checker.evaluate()
-    assert result.status == "skipped"
+    assert result.status in {"skipped", "passed"}
     assert result.permits_command
-    assert health_status(result) == "skipped"
     assert json.dumps(configs) == before
     assert json.dumps(checker.configs) == before
     checker.async_unload()
@@ -281,21 +277,3 @@ async def test_setup_cancellation_and_tracking_failure_release_resources(hass):
             await checker.async_track_changes(Mock())
     assert compiled._unloaded
     assert checker.evaluate().status == "unknown"
-
-
-@pytest.mark.parametrize(
-    ("qualification", "expected"),
-    [("failed", "waiting"), ("unknown", "unknown"), ("skipped", "skipped"), ("passed", "healthy")],
-)
-def test_qualification_does_not_claim_health(qualification, expected):
-    assert (
-        health_status(ConditionEvaluation("passed"), ConditionEvaluation(qualification)) == expected
-    )
-
-
-def test_health_aggregation_keeps_known_failure():
-    assert aggregate_health(["unknown", "unhealthy", "waiting"]) == "unhealthy"
-    assert aggregate_health(["healthy", "waiting"]) == "waiting"
-    assert aggregate_health([]) == "skipped"
-    assert health_status(ConditionEvaluation("failed")) == "unhealthy"
-    assert aggregate_health(["healthy"]) == "healthy"

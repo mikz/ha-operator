@@ -11,8 +11,9 @@ from homeassistant.exceptions import ServiceValidationError
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
 from . import OperatorConfigEntry
+from .adapters import SelectAdapter
 from .const import DOMAIN
-from .entity import OperatorEntity
+from .entity import OperatorEntity, ResourceEntity
 
 if TYPE_CHECKING:
     from .runtime import OperatorRuntime
@@ -26,7 +27,11 @@ async def async_setup_entry(
     entry: OperatorConfigEntry,
     async_add_entities: AddConfigEntryEntitiesCallback,
 ) -> None:
-    for identifier in entry.runtime_data.resources:
+    for identifier, config in entry.runtime_data.resources.items():
+        if config["kind"] == "select" and entry.runtime_data.manual_control(identifier):
+            async_add_entities(
+                [OperatorSelect(entry.runtime_data, identifier)], config_subentry_id=identifier
+            )
         async_add_entities(
             [ModeSelect(entry.runtime_data, identifier)], config_subentry_id=identifier
         )
@@ -51,3 +56,25 @@ class ModeSelect(OperatorEntity, SelectEntity):
                 translation_domain=DOMAIN, translation_key="invalid_select_option"
             )
         await self.runtime.async_set_mode(self.identifier, option)
+
+
+class OperatorSelect(ResourceEntity, SelectEntity):
+    """Native options and observed selection, with ordinary manual ownership."""
+
+    def __init__(self, runtime: OperatorRuntime, identifier: str) -> None:
+        super().__init__(runtime, identifier, "managed")
+
+    @property
+    def options(self) -> list[str]:
+        adapter = self.runtime.adapter(self.identifier)
+        assert isinstance(adapter, SelectAdapter)
+        return adapter.options
+
+    @property
+    def current_option(self) -> str | None:
+        return self.observed_target.option if self.observed_target else None
+
+    async def async_select_option(self, option: str) -> None:
+        await self.runtime.async_request(
+            self.identifier, target={"option": option}, source="managed", context=self._context
+        )

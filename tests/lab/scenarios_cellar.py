@@ -230,7 +230,13 @@ class _CellarScenarios(_AirflowScenarios):
                     "target": {"on": True, "direction": "forward"},
                     "target_entity": "sensor.sim_cellar_target",
                     "target_field": "percentage",
-                    "eligibility_entity": "binary_sensor.sim_cellar_policy",
+                    "conditions": [
+                        {
+                            "condition": "state",
+                            "entity_id": "binary_sensor.sim_cellar_policy",
+                            "state": "on",
+                        }
+                    ],
                 },
             )
             airflow = {

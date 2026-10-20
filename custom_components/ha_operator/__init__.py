@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import shutil
+from copy import deepcopy
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -70,7 +71,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: OperatorConfigEntry) -> 
                 ("binary_sensor", "manual", runtime.manual_control(identifier)),
                 ("sensor", "expiry", runtime.manual_control(identifier)),
                 ("button", "release", runtime.manual_control(identifier)),
-                ("sensor", "health", bool(resource.get("health_checks"))),
+                ("sensor", "health", False),
             ):
                 entity_id = registry.async_get_entity_id(platform, DOMAIN, f"{identifier}_{suffix}")
                 if entity_id is None:
@@ -87,6 +88,21 @@ async def async_setup_entry(hass: HomeAssistant, entry: OperatorConfigEntry) -> 
                 if not enabled:
                     # HA retains an unavailable placeholder when unloading an entity;
                     # disabling a registry entry does not clear that restored state.
+                    if (state := hass.states.get(entity_id)) and state.attributes.get("restored"):
+                        hass.states.async_remove(entity_id)
+        # Retain historical detector identities and user settings without active entities.
+        for identifier in runtime.policies:
+            for platform, suffix in (
+                ("sensor", "input_phase"),
+                ("sensor", "qualification_due"),
+                ("binary_sensor", "qualified"),
+            ):
+                entity_id = registry.async_get_entity_id(platform, DOMAIN, f"{identifier}_{suffix}")
+                if entity_id and (registered := registry.async_get(entity_id)):
+                    if registered.disabled_by is None:
+                        registry.async_update_entity(
+                            entity_id, disabled_by=er.RegistryEntryDisabler.INTEGRATION
+                        )
                     if (state := hass.states.get(entity_id)) and state.attributes.get("restored"):
                         hass.states.async_remove(entity_id)
         ir.async_delete_issue(hass, DOMAIN, f"storage_{entry.entry_id}")
@@ -107,7 +123,7 @@ async def _async_updated(hass: HomeAssistant, entry: OperatorConfigEntry) -> Non
 
 async def async_unload_entry(hass: HomeAssistant, entry: OperatorConfigEntry) -> bool:
     interrupt = not hass.is_stopping
-    if not await entry.runtime_data.async_close(interrupt_timer_inputs=interrupt):
+    if not await entry.runtime_data.async_close(withdraw_trigger_requests=interrupt):
         return False
     return await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
 
@@ -118,14 +134,57 @@ async def async_remove_entry(hass: HomeAssistant, entry: OperatorConfigEntry) ->
 
 
 async def async_migrate_entry(hass: HomeAssistant, entry: OperatorConfigEntry) -> bool:
-    """Retain configuration and discard obsolete runtime files without loading them.
+    """Preflight all subentries, then migrate configuration without runtime import.
 
-    Back up the deployment before upgrading to 0.2.0. Runtime state starts from
-    configured defaults through native Store; subentries and registry IDs remain.
+    Versions 1/2 additionally remove their obsolete pre-Store files. Version 3
+    retains native Store intent and registry IDs; only cleared legacy detector
+    records are pruned when the runtime loads its existing snapshot.
     """
+    if entry.version == 4:
+        return True
     if entry.version not in (1, 2, 3):
         return False
+    # Preflight the complete entry before touching subentries, version, or Store.
+    for subentry in entry.subentries.values():
+        data = subentry.data
+        if (
+            data.get("input")
+            or data.get("health_checks")
+            or (
+                subentry.subentry_type == "policy"
+                and data.get("kind") == "occurrence"
+                and ("eligibility_entity" in data or "eligibility_state" in data)
+            )
+            or (
+                "conditions" in data
+                and ("eligibility_entity" in data or "eligibility_state" in data)
+            )
+        ):
+            ir.async_create_issue(
+                hass,
+                DOMAIN,
+                f"native_policy_migration_{entry.entry_id}",
+                is_fixable=False,
+                severity=ir.IssueSeverity.ERROR,
+                translation_key="native_policy_migration",
+            )
+            return False
+    for subentry in entry.subentries.values():
+        updated_data = deepcopy(dict(subentry.data))
+        updated_data.pop("input", None)
+        updated_data.pop("health_checks", None)
+        if subentry.subentry_type == "policy" and "eligibility_entity" in updated_data:
+            updated_data["conditions"] = [
+                {
+                    "condition": "state",
+                    "entity_id": updated_data.pop("eligibility_entity"),
+                    "state": updated_data.pop("eligibility_state", "on"),
+                }
+            ]
+        hass.config_entries.async_update_subentry(entry, subentry, data=updated_data)
+    ir.async_delete_issue(hass, DOMAIN, f"native_policy_migration_{entry.entry_id}")
     if entry.version == 3:
+        hass.config_entries.async_update_entry(entry, version=4)
         return True
 
     def remove_obsolete_files() -> None:
@@ -145,7 +204,7 @@ async def async_migrate_entry(hass: HomeAssistant, entry: OperatorConfigEntry) -
             for key, value in entry.options.items()
             if key not in {"trace_enabled", "trace_entities"}
         },
-        version=3,
+        version=4,
         minor_version=1,
     )
     _LOGGER.info("Removed obsolete HA Operator runtime files for entry %s", entry.entry_id)

@@ -5,9 +5,9 @@ manual overrides, scheduled occurrences, and requirements shared by several
 devices. It separates a request from the effective target, the last command, and
 the device's observed state.
 
-The [0.1.5 release notes](docs/releases/0.1.5.md) and
+The [0.4.0 candidate notes](docs/releases/0.4.0.md) and
 [validation record](docs/scenarios.md#release-validation-record) identify the
-released behavior, tested archive, and evidence limits. Automated results are
+intended behavior, tested archive, and evidence limits. Automated results are
 available in [GitHub Actions](https://github.com/mikz/ha-operator/actions/workflows/validate.yml).
 Development requires Python 3.14.2 or later within Python 3.14.
 
@@ -16,10 +16,14 @@ all six integration actions, and request acceptance. Follow the
 [removal instructions](docs/removal.md) to transfer ownership before uninstalling.
 For recovery steps, see [Troubleshooting](docs/troubleshooting.md).
 
-[Command conditions and health checks](docs/conditions-health.md) explains native
-command permission, named health observations, and startup qualification. A blocked
-command retains its selected target; health checks report evidence without issuing
-device commands. These optional settings require Home Assistant 2026.10.2 or later.
+[Native policies](docs/native-policies.md) use HA conditions and optional native
+triggers. [Typed resources](docs/typed-resources.md) cover number/select actors,
+units, and independent feedback. [Command conditions](docs/conditions-health.md)
+retain selected intent while a command is blocked. Sources, helpers, and Template
+actors are configured independently in HA. Home Assistant 2026.10.2 is the minimum.
+
+Version 0.4.0 requires [pre-upgrade preparation](docs/native-policies.md#upgrade-from-030)
+for old policy inputs and Health checks; unresolved configuration blocks migration.
 
 The [quality checklist](docs/quality-scale.md) is a custom-integration
 self-assessment, not an official Home Assistant medal.
@@ -98,7 +102,7 @@ Follow the [migration runbook](docs/migration.md) before enabling live control.
    mode. Complete the [scenario catalog](docs/scenarios.md) in an isolated lab
    before taking over actuator ownership.
 
-Use native Home Assistant actions for managed covers, fans, and switches. Change
+Use native Home Assistant actions for managed covers, fans, switches, numbers, and selects. Change
 resource mode through `select.select_option`. The underlying adapter's features
 govern supported commands; a virtual entity cannot add STOP or speed control to
 an actuator that lacks it.

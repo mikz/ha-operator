@@ -17,7 +17,6 @@ from .data import (
     IntentConfig,
     OperatorConfiguration,
     PolicyConfig,
-    PolicyInputConfig,
     RequirementConfig,
     ResourceConfig,
     ReturnMonitorConfig,
@@ -36,14 +35,16 @@ RESOURCE_DEFAULTS = {
     "tolerance": 2.0,
     "manual_duration": 1800.0,
 }
-KINDS = ("cover", "switch", "fan", "relay_fan")
+KINDS = ("cover", "switch", "fan", "relay_fan", "number", "select")
 COMMANDS = {
+    "number": ("set_value",),
+    "select": ("select_option",),
     "cover": ("set_cover_position",),
     "switch": ("turn_on", "turn_off"),
     "fan": ("turn_on", "turn_off", "set_direction", "set_percentage"),
     "relay_fan": ("turn_on", "turn_off"),
 }
-TARGET_FIELDS = {"position", "on", "percentage", "direction", "profile"}
+TARGET_FIELDS = {"position", "on", "percentage", "direction", "profile", "value", "option"}
 _ENTITY_ID = re.compile(r"^[a-z_]+\.[a-z0-9_]+$")
 
 
@@ -99,15 +100,15 @@ def _object(value: Any, field: str, allowed: set[str]) -> dict[str, Any]:
     return deepcopy(dict(value))
 
 
-def _conditions(value: Any, field: str) -> list[Any]:
+def _conditions(value: Any, field: str, *, allow_trigger: bool = False) -> list[Any]:
     """Validate native syntax without storing HA's non-JSON compiled templates."""
     from homeassistant.helpers import config_validation as cv
 
     def check(items: list[Any]) -> None:
         for item in items:
             if isinstance(item, Mapping):
-                if item.get("condition") == "trigger":
-                    raise ValueError("Trigger conditions require an automation run")
+                if not allow_trigger and item.get("condition") == "trigger":
+                    raise ValueError("Trigger conditions require a real native trigger context")
                 check(item.get("conditions", []))
 
     try:
@@ -236,6 +237,8 @@ def validate_target(
         )
     kind = resource["kind"]
     allowed = {
+        "number": {"value"},
+        "select": {"option"},
         "cover": {"position"},
         "switch": {"on"},
         "fan": {"on", "percentage", "direction"},
@@ -250,6 +253,13 @@ def validate_target(
     for field in ("position", "percentage"):
         if field in data:
             data[field] = _number(data[field], field, 0, 100)
+    if "value" in data:
+        data["value"] = _number(data["value"], "value", -math.inf)
+    if "option" in data and (not isinstance(data["option"], str) or len(data["option"]) > 255):
+        _fail(
+            "Select option must be a string of at most 255 characters",
+            translation_key="config_select_option_type",
+        )
     if "on" in data and not isinstance(data["on"], bool):
         _fail("on must be true or false", translation_key="config_on_must_be_true_or_false")
     if "direction" in data and data["direction"] not in ("forward", "reverse"):
@@ -294,107 +304,6 @@ def _positive_duration(value: Any, field: str) -> float:
     return duration
 
 
-def _policy_input(value: Any, kind: str, hass: HomeAssistant | None = None) -> PolicyInputConfig:
-    """Validate the two bounded native inputs without reading helper state."""
-    try:
-        data = _object(
-            value,
-            "input",
-            {
-                "type",
-                "entity_id",
-                "comparison",
-                "threshold",
-                "unit",
-                "qualification_seconds",
-                "request_seconds",
-            },
-        )
-        input_type = data.get("type")
-        if input_type not in ("qualified_numeric", "timer_episode"):
-            _fail(
-                "input.type must be qualified_numeric or timer_episode",
-                translation_key="config_input_type_must_be_qualified_numeric_or_timer_episode",
-            )
-        expected_kind = "state" if input_type == "qualified_numeric" else "occurrence"
-        if kind != expected_kind:
-            _fail(
-                f"{input_type} input requires a {expected_kind} policy",
-                translation_key="config_input_policy_kind",
-                placeholders={"input_type": str(input_type), "expected_kind": str(expected_kind)},
-            )
-        domain = "sensor" if input_type == "qualified_numeric" else "timer"
-        try:
-            data["entity_id"] = _entity(data.get("entity_id"), "input.entity_id", domain, hass)
-        except ConfigurationError as err:
-            if err.code == "invalid_configuration":
-                _fail(
-                    err.detail,
-                    "invalid_input_source",
-                    translation_key=err.translation_key,
-                    placeholders=err.translation_placeholders,
-                )
-            raise
-        data["qualification_seconds"] = _positive_duration(
-            data.get("qualification_seconds"), "input.qualification_seconds"
-        )
-        if input_type == "timer_episode":
-            if any(key in data for key in ("comparison", "threshold", "unit")):
-                _fail(
-                    "timer_episode input cannot contain numeric comparison settings",
-                    translation_key="config_timer_episode_input_cannot_contain_numeric_comparison_settings",
-                )
-            data["request_seconds"] = _positive_duration(
-                data.get("request_seconds"), "input.request_seconds"
-            )
-        else:
-            if "request_seconds" in data:
-                _fail(
-                    "qualified_numeric input cannot contain request_seconds",
-                    translation_key="config_qualified_numeric_input_cannot_contain_request_seconds",
-                )
-            if data.get("comparison") != "below":
-                _fail(
-                    "input.comparison must be below",
-                    translation_key="config_input_comparison_must_be_below",
-                )
-            data["threshold"] = _number(data.get("threshold"), "input.threshold", -math.inf)
-            data["unit"] = _text(data.get("unit"), "input.unit")
-            if hass is not None:
-                state = _entity_state(hass, data["entity_id"], "input.entity_id")
-                if state.attributes.get("unit_of_measurement") != data["unit"]:
-                    _fail(
-                        "input.unit must match the sensor unit",
-                        "input_unit_mismatch",
-                        translation_key="config_input_unit_must_match_the_sensor_unit",
-                    )
-                if state.state not in ("unknown", "unavailable"):
-                    try:
-                        numeric = float(state.state)
-                    except TypeError, ValueError:
-                        _fail(
-                            "input source must report a finite number",
-                            "invalid_input_value",
-                            translation_key="config_input_source_must_report_a_finite_number",
-                        )
-                    if not math.isfinite(numeric):
-                        _fail(
-                            "input source must report a finite number",
-                            "invalid_input_value",
-                            translation_key="config_input_source_must_report_a_finite_number",
-                        )
-        return cast(PolicyInputConfig, data)
-    except ConfigurationError as err:
-        if err.code == "invalid_configuration":
-            _fail(
-                err.detail,
-                "invalid_policy_input",
-                translation_key=err.translation_key,
-                placeholders=err.translation_placeholders,
-            )
-        raise
-
-
 def _return_monitor(value: Any, kind: str) -> ReturnMonitorConfig:
     try:
         if kind != "cover":
@@ -434,6 +343,7 @@ def validate_resource(
             "name",
             "kind",
             "entity_id",
+            "unit_of_measurement",
             "outputs",
             "profiles",
             "reversal_dead_time",
@@ -443,7 +353,6 @@ def validate_resource(
             "manual_control",
             "return_monitor",
             "command_conditions",
-            "health_checks",
             *RESOURCE_DEFAULTS,
         },
     )
@@ -459,25 +368,6 @@ def validate_resource(
         data["command_conditions"] = {
             key: _conditions(value, f"command_conditions.{key}") for key, value in commands.items()
         }
-    if "health_checks" in data:
-        if not isinstance(data["health_checks"], list):
-            _fail("health_checks must be a list", translation_key="config_invalid_health_checks")
-        aliases: set[str] = set()
-        checks = []
-        for raw in data["health_checks"]:
-            check = _object(raw, "health check", {"alias", "conditions", "qualification"})
-            check["alias"] = _text(check.get("alias"), "health check alias", 255)
-            if check["alias"] in aliases:
-                _fail(
-                    "Health check aliases must be unique",
-                    translation_key="config_invalid_health_checks",
-                )
-            aliases.add(check["alias"])
-            check["conditions"] = _conditions(check.get("conditions"), "health check conditions")
-            if "qualification" in check:
-                check["qualification"] = _conditions(check["qualification"], "qualification")
-            checks.append(check)
-        data["health_checks"] = checks
     if "return_monitor" in data:
         data["return_monitor"] = _return_monitor(data["return_monitor"], kind)
     if "manual_control" in data and type(data["manual_control"]) is not bool:
@@ -485,12 +375,30 @@ def validate_resource(
             "manual_control must be true or false",
             translation_key="config_manual_control_must_be_true_or_false",
         )
+    if kind == "number":
+        if "unit_of_measurement" not in data or (
+            data["unit_of_measurement"] is not None
+            and not isinstance(data["unit_of_measurement"], str)
+        ):
+            _fail(
+                "Number resource requires a bound unit (null for unitless)",
+                translation_key="config_number_binding",
+            )
+        if "tolerance" not in data:
+            _fail(
+                "Number tolerance must be explicit in its bound unit",
+                translation_key="config_number_binding",
+            )
+    elif "unit_of_measurement" in data:
+        _fail(
+            "Unit binding applies only to number resources", translation_key="config_number_binding"
+        )
     for field, default in RESOURCE_DEFAULTS.items():
         data[field] = _number(
             data.get(field, default),
             field,
             0 if field == "tolerance" else 0.001,
-            100 if field == "tolerance" else None,
+            100 if field == "tolerance" and kind != "number" else None,
         )
     for field in ("restriction_entity", "fault_entity"):
         if field in data:
@@ -616,13 +524,14 @@ def validate_policy(
             "kind",
             "priority",
             "target",
-            "eligibility_entity",
-            "eligibility_state",
+            "conditions",
+            "triggers",
+            "duration",
+            "cancel_triggers",
             "target_entity",
             "target_attribute",
             "target_field",
             "intent_id",
-            "input",
         },
     )
     data["name"] = _text(data.get("name"), "name")
@@ -639,30 +548,40 @@ def validate_policy(
             "policy kind must be state or occurrence",
             translation_key="config_policy_kind_must_be_state_or_occurrence",
         )
-    if "input" in data:
-        if "eligibility_entity" in data or "eligibility_state" in data:
-            _fail(
-                "input replaces eligibility_entity and eligibility_state",
-                "input_eligibility_conflict",
-                translation_key="config_input_replaces_eligibility_entity_and_eligibility_state",
-            )
-        data["input"] = _policy_input(data["input"], data["kind"], hass)
+
+    def invalid_native(message: str) -> NoReturn:
+        _fail(
+            message,
+            translation_key="config_invalid_conditions",
+            placeholders={"field": "policy", "error": message},
+        )
+
+    if "conditions" in data:
+        data["conditions"] = _conditions(
+            data["conditions"], "conditions", allow_trigger=data["kind"] == "occurrence"
+        )
+    if "triggers" in data:
+        if data["kind"] != "occurrence":
+            invalid_native("Native triggers require an occurrence policy")
+        from homeassistant.helpers import config_validation as cv
+
+        try:
+            cv.TRIGGER_SCHEMA(deepcopy(data["triggers"]))
+            duration = cv.positive_time_period(data["duration"]).total_seconds()
+            if duration <= 0:
+                invalid_native("duration must be positive")
+            if "cancel_triggers" in data:
+                cv.TRIGGER_SCHEMA(deepcopy(data["cancel_triggers"]))
+        except (ValueError, TypeError, KeyError) as err:
+            invalid_native(f"Invalid native trigger configuration: {err}")
+    elif "duration" in data or "cancel_triggers" in data:
+        invalid_native("duration and cancel_triggers require native triggers")
     priority = _number(data.get("priority", 0), "priority", -1000000, 1000000)
     if not priority.is_integer():
         _fail("priority must be an integer", translation_key="config_priority_must_be_an_integer")
     data["priority"] = int(priority)
     if "target" in data:
         data["target"] = validate_target(data["target"], resource, hass)
-    if "eligibility_entity" in data:
-        data["eligibility_entity"] = _entity(
-            data["eligibility_entity"], "eligibility_entity", hass=hass
-        )
-        data["eligibility_state"] = _text(data.get("eligibility_state", "on"), "eligibility_state")
-    elif "eligibility_state" in data:
-        _fail(
-            "eligibility_state requires eligibility_entity",
-            translation_key="config_eligibility_state_requires_eligibility_entity",
-        )
     if "intent_id" in data:
         if (
             data["kind"] != "state"
@@ -685,7 +604,14 @@ def validate_policy(
     elif "target_entity" in data:
         data["target_entity"] = _entity(data["target_entity"], "target_entity", hass=hass)
         field = data["target_field"] = _text(data.get("target_field", "position"), "target_field")
-        probe = {"on": True, "position": 0, "percentage": 0, "direction": "forward"}
+        probe = {
+            "on": True,
+            "position": 0,
+            "percentage": 0,
+            "direction": "forward",
+            "value": 0,
+            "option": "example",
+        }
         if field not in probe:
             _fail(
                 "target_field must be position, on, percentage, or direction",

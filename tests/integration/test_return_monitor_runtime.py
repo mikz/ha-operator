@@ -43,7 +43,15 @@ async def setup_monitor(
                 "kind": "state",
                 "resource_id": "roof",
                 "target": {"position": 7},
-                **({"eligibility_entity": eligibility_entity} if eligibility_entity else {}),
+                **(
+                    {
+                        "conditions": [
+                            {"condition": "state", "entity_id": eligibility_entity, "state": "on"}
+                        ]
+                    }
+                    if eligibility_entity
+                    else {}
+                ),
             }
         }
         if policy

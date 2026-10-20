@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable
+from collections.abc import Callable
 from contextvars import Context
 from copy import deepcopy
 from dataclasses import dataclass
@@ -11,11 +11,9 @@ from typing import Any, Literal
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers import condition
 from homeassistant.helpers import config_validation as cv
-from homeassistant.helpers.template import Template
 from homeassistant.helpers.trace import trace_path
 
 type ConditionStatus = Literal["passed", "failed", "unknown", "skipped"]
-type HealthStatus = Literal["healthy", "unhealthy", "unknown", "waiting", "skipped"]
 
 
 @dataclass(frozen=True)
@@ -39,7 +37,6 @@ class NativeConditionList:
         self.configs = deepcopy(configs)
         self._checkers: list[condition.ConditionChecker] = []
         self._validated: list[dict[str, Any]] = []
-        self._enabled: list[bool] = []
         self._unsubscribers: list[Callable[[], None]] = []
         self._error: str | None = None
         self._closed = False
@@ -50,17 +47,14 @@ class NativeConditionList:
         try:
             for config in cv.CONDITIONS_SCHEMA(deepcopy(self.configs)):
                 validated = await condition.async_validate_condition_config(self.hass, config)
-                enabled = _prepare_enabled(validated)
                 self._checkers.append(await condition.async_from_config(self.hass, validated))
                 self._validated.append(validated)
-                self._enabled.append(enabled)
             self._ready = True
         except BaseException as err:
             for checker in self._checkers:
                 checker.async_unload()
             self._checkers.clear()
             self._validated.clear()
-            self._enabled.clear()
             if not isinstance(err, Exception):
                 raise
             self._error = f"{type(err).__name__}: {err}"
@@ -93,7 +87,7 @@ class NativeConditionList:
         self._checkers.clear()
 
     @callback
-    def evaluate(self) -> ConditionEvaluation:
+    def evaluate(self, variables: dict[str, Any] | None = None) -> ConditionEvaluation:
         """Use HA's condition semantics, including native compound short-circuiting."""
         if self._closed or self._error or not self._ready:
             return ConditionEvaluation("unknown", error=self._error or "Condition list not ready")
@@ -110,17 +104,11 @@ class NativeConditionList:
                     checker: condition.ConditionChecker = checker, index: int = index
                 ) -> bool | None:
                     with trace_path(str(index)):
-                        return checker.async_check()
+                        return checker.async_check(variables=variables)
 
                 result = Context().run(check)
                 status: ConditionStatus = (
-                    "skipped"
-                    if result is None
-                    else "failed"
-                    if result is False
-                    else "skipped"
-                    if not self._enabled[index]
-                    else "passed"
+                    "skipped" if result is None else "failed" if result is False else "passed"
                 )
                 if (
                     status == "failed"
@@ -186,42 +174,3 @@ class NativeConditionList:
 
         capture(config)
         return sources
-
-
-def _prepare_enabled(config: dict[str, Any]) -> bool:
-    """Match HA's setup-time enabled handling and count enabled evidence leaves."""
-    enabled = config.get("enabled", True)
-    if isinstance(enabled, Template):
-        enabled = config["enabled"] = enabled.async_render(limited=True)
-    if not enabled:
-        return False
-    if config.get("condition") in {"and", "or", "not"}:
-        # Visit every child: short-circuiting here would leave enabled templates unresolved.
-        children = [_prepare_enabled(child) for child in config["conditions"]]
-        return any(children)
-    return True
-
-
-def health_status(
-    conditions: ConditionEvaluation, qualification: ConditionEvaluation | None = None
-) -> HealthStatus:
-    """Qualification defers a check; it never supplies positive health evidence."""
-    if qualification is not None:
-        if qualification.status == "failed":
-            return "waiting"
-        if qualification.status in {"unknown", "skipped"}:
-            return qualification.status
-    if conditions.status == "passed":
-        return "healthy"
-    if conditions.status == "failed":
-        return "unhealthy"
-    return conditions.status
-
-
-def aggregate_health(statuses: Iterable[HealthStatus]) -> HealthStatus:
-    """Keep known failure visible while uncertainty or qualification remains."""
-    values = set(statuses)
-    for value in ("unhealthy", "unknown", "waiting", "skipped"):
-        if value in values:
-            return value
-    return "healthy" if values else "skipped"

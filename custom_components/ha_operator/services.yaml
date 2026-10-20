@@ -30,7 +30,7 @@ request:
           - hands_off
     target:
       name: Requested target
-      description: Target object with position, on, percentage, direction, or a configured fan profile. Required
+      description: Target object with position, on, percentage, direction, a configured fan profile, numeric value, or select option. Required
         in target mode; omit for hands-off mode.
       selector:
         object: null

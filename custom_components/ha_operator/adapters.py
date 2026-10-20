@@ -265,6 +265,125 @@ class SwitchAdapter(Adapter):
         )
 
 
+class NumberAdapter(Adapter):
+    """HA exposed state/service units and bounds; step is presentation metadata."""
+
+    @property
+    def unit_compatible(self) -> bool:
+        state = self._state()
+        return bool(
+            state is not None
+            and state.attributes.get("unit_of_measurement") == self.config["unit_of_measurement"]
+        )
+
+    @property
+    def metadata(self) -> tuple[float, float, float] | None:
+        state = self._state()
+        if state is None:
+            return None
+        values = []
+        for key in ("min", "max", "step"):
+            raw = state.attributes.get(key)
+            if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+                return None
+            try:
+                value = float(raw)
+            except OverflowError:
+                return None
+            if not math.isfinite(value):
+                return None
+            values.append(value)
+        minimum, maximum, step = values
+        return (minimum, maximum, step) if minimum <= maximum and step > 0 else None
+
+    def commands_for(self, target: Target) -> tuple[str, ...]:
+        return ("set_value",)
+
+    def read_observation(self, now: float) -> Observation:
+        state = self._state()
+        target = None
+        if _usable(state) and self.unit_compatible:
+            try:
+                value = float(state.state)
+                if math.isfinite(value):
+                    target = Target(value=value)
+            except ValueError:
+                pass
+        observation = self._native_observation(target, now)
+        return (
+            observation
+            if target is not None
+            else Observation(
+                None,
+                False,
+                restriction=observation.restriction,
+                reported_at=observation.reported_at,
+            )
+        )
+
+    def normalize(self, target: Target) -> Target:
+        self._validate_fields(target, {"value"})
+        value = target.value
+        if not self.unit_compatible:
+            raise TargetValidationError(
+                "number_unit_changed", "Number actor unit differs from its configured binding"
+            )
+        metadata = self.metadata
+        if value is None or metadata is None or not metadata[0] <= value <= metadata[1]:
+            raise TargetValidationError(
+                "number_target_invalid",
+                "Number target requires valid finite bounds and an in-range value",
+            )
+        return target
+
+    async def async_apply(self, target: Target, still_current: Callable[[], bool]) -> bool:
+        target = self.normalize(target)
+        return await self._call(
+            "number",
+            "set_value",
+            {"entity_id": self.entity_id, "value": target.value},
+            still_current,
+        )
+
+
+class SelectAdapter(Adapter):
+    """Read current native options; never invent or substitute an option."""
+
+    @property
+    def options(self) -> list[str]:
+        state = self._state()
+        options = state.attributes.get("options") if state else None
+        return (
+            list(options)
+            if isinstance(options, (list, tuple)) and all(isinstance(item, str) for item in options)
+            else []
+        )
+
+    def commands_for(self, target: Target) -> tuple[str, ...]:
+        return ("select_option",)
+
+    def read_observation(self, now: float) -> Observation:
+        state = self._state()
+        return self._native_observation(Target(option=state.state) if _usable(state) else None, now)
+
+    def normalize(self, target: Target) -> Target:
+        self._validate_fields(target, {"option"})
+        if target.option not in self.options:
+            raise TargetValidationError(
+                "invalid_select_option", "Target option is not currently supported"
+            )
+        return target
+
+    async def async_apply(self, target: Target, still_current: Callable[[], bool]) -> bool:
+        target = self.normalize(target)
+        return await self._call(
+            "select",
+            "select_option",
+            {"entity_id": self.entity_id, "option": target.option},
+            still_current,
+        )
+
+
 class FanAdapter(Adapter):
     """A native fan, with speed quantization matching Home Assistant's helpers."""
 
@@ -675,6 +794,8 @@ class RelayFanAdapter(Adapter):
 def create_adapter(hass: HomeAssistant, resource_id: str, config: ResourceConfig) -> Adapter:
     """Create an adapter without claiming any service result is observed feedback."""
     classes = {
+        "number": NumberAdapter,
+        "select": SelectAdapter,
         "cover": CoverAdapter,
         "switch": SwitchAdapter,
         "fan": FanAdapter,

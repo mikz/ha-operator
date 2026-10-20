@@ -110,18 +110,9 @@ def test_native_conditions_preserve_serializable_config():
         "command_conditions": {
             "turn_on": [{"condition": "template", "value_template": "{{ true }}"}]
         },
-        "health_checks": [
-            {
-                "alias": "Frames",
-                "conditions": [
-                    {"condition": "numeric_state", "entity_id": "sensor.frames", "above": 1}
-                ],
-                "qualification": [],
-            }
-        ],
     }
     data = validate_resource({**SWITCH, **checks})
-    assert json.loads(json.dumps(data))["health_checks"] == checks["health_checks"]
+    assert json.loads(json.dumps(data))["command_conditions"] == checks["command_conditions"]
     assert data["command_conditions"] == checks["command_conditions"]
 
 
@@ -129,7 +120,6 @@ def test_native_conditions_preserve_serializable_config():
     "checks",
     [
         {"command_conditions": {"turn_on": []}},
-        {"health_checks": [{"alias": "Frames", "conditions": []}]},
     ],
 )
 def test_empty_native_lists_are_admitted(checks):
@@ -294,9 +284,9 @@ def test_policy_defaults_dynamic_target_and_occurrences():
         "kind": "state",
         "target_entity": "schedule.morning",
         "target_attribute": "position",
-        "eligibility_entity": "schedule.morning",
+        "conditions": [{"condition": "state", "entity_id": "schedule.morning", "state": "on"}],
     }
-    assert validate_policy(dynamic, {"r": COVER})["eligibility_state"] == "on"
+    assert validate_policy(dynamic, {"r": COVER})["conditions"][0]["state"] == "on"
     assert validate_policy(dynamic, {"r": COVER})["target_field"] == "position"
     assert (
         validate_policy(POLICY | {"kind": "occurrence", "priority": -5}, {"r": COVER})["priority"]
@@ -426,189 +416,6 @@ def test_dynamic_target_can_read_the_entity_state():
         "target_entity": "sensor.position",
     }
     assert validate_policy(policy, {"r": COVER})["target_field"] == "position"
-
-
-def test_optional_native_settings_preserve_existing_configuration():
-    old = POLICY | {"eligibility_entity": "input_boolean.ready"}
-    original = deepcopy(old)
-    assert validate_policy(old, {"r": COVER}) == original | {
-        "priority": 0,
-        "eligibility_state": "on",
-    }
-    assert old == original
-    assert "input" not in validate_policy(POLICY, {"r": COVER})
-    assert "return_monitor" not in validate_resource(COVER)
-
-
-@pytest.mark.parametrize("kind,source", [("state", NUMERIC_INPUT), ("occurrence", TIMER_INPUT)])
-def test_native_input_round_trip_and_independent_copy(kind, source):
-    policy = POLICY | {"kind": kind, "input": deepcopy(source)}
-    original = deepcopy(policy)
-    result = validate_configuration(
-        [
-            entry("resource", "r", COVER | {"return_monitor": RETURN_MONITOR}),
-            entry("policy", "p", policy),
-        ]
-    )
-    assert result["policies"]["p"]["input"] == source
-    assert result["resources"]["r"]["return_monitor"] == RETURN_MONITOR
-    result["policies"]["p"]["input"]["qualification_seconds"] = 1
-    assert policy == original
-
-
-@pytest.mark.parametrize("value", [None, [], "sensor.temperature", {}, {"type": "other"}])
-def test_invalid_input_shape_has_specific_error(value):
-    with pytest.raises(ConfigurationError) as error:
-        validate_policy(POLICY | {"input": value}, {"r": COVER})
-    assert error.value.code == "invalid_policy_input"
-
-
-@pytest.mark.parametrize(
-    "patch",
-    [
-        {"comparison": "above"},
-        {"comparison": None},
-        {"threshold": None},
-        {"threshold": True},
-        {"threshold": "16"},
-        {"threshold": float("nan")},
-        {"threshold": float("inf")},
-        {"unit": None},
-        {"unit": " "},
-        {"request_seconds": 30},
-        {"extra": 1},
-    ],
-)
-def test_invalid_numeric_input_fields(patch):
-    with pytest.raises(ConfigurationError) as error:
-        validate_policy(POLICY | {"input": NUMERIC_INPUT | patch}, {"r": COVER})
-    assert error.value.code == "invalid_policy_input"
-
-
-@pytest.mark.parametrize(
-    "kind,source,field",
-    [
-        ("state", NUMERIC_INPUT, "qualification_seconds"),
-        ("occurrence", TIMER_INPUT, "qualification_seconds"),
-        ("occurrence", TIMER_INPUT, "request_seconds"),
-    ],
-)
-@pytest.mark.parametrize("value", [None, 0, -1, True, "60", float("nan"), float("inf")])
-def test_input_durations_must_be_finite_positive_numbers(kind, source, field, value):
-    with pytest.raises(ConfigurationError) as error:
-        validate_policy(POLICY | {"kind": kind, "input": source | {field: value}}, {"r": COVER})
-    assert error.value.code == "invalid_policy_input"
-    assert field in error.value.detail
-
-
-@pytest.mark.parametrize("kind,source", [("occurrence", NUMERIC_INPUT), ("state", TIMER_INPUT)])
-def test_input_requires_matching_policy_kind(kind, source):
-    with pytest.raises(ConfigurationError) as error:
-        validate_policy(POLICY | {"kind": kind, "input": source}, {"r": COVER})
-    assert error.value.code == "invalid_policy_input"
-
-
-@pytest.mark.parametrize(
-    "field,value", [("comparison", "below"), ("threshold", 16), ("unit", "°C")]
-)
-def test_timer_rejects_numeric_settings(field, value):
-    with pytest.raises(ConfigurationError) as error:
-        validate_policy(
-            POLICY | {"kind": "occurrence", "input": TIMER_INPUT | {field: value}}, {"r": COVER}
-        )
-    assert error.value.code == "invalid_policy_input"
-
-
-@pytest.mark.parametrize("kind,source", [("state", NUMERIC_INPUT), ("occurrence", TIMER_INPUT)])
-@pytest.mark.parametrize("entity_id", ["input_number.source", "binary_sensor.source", "bad", None])
-def test_native_input_requires_correct_source_domain(kind, source, entity_id):
-    with pytest.raises(ConfigurationError) as error:
-        validate_policy(
-            POLICY | {"kind": kind, "input": source | {"entity_id": entity_id}}, {"r": COVER}
-        )
-    assert error.value.code == "invalid_input_source"
-
-
-@pytest.mark.parametrize("kind,source", [("state", NUMERIC_INPUT), ("occurrence", TIMER_INPUT)])
-@pytest.mark.parametrize(
-    "legacy", [{"eligibility_entity": "input_boolean.ready"}, {"eligibility_state": "on"}]
-)
-def test_native_input_replaces_helper_eligibility(kind, source, legacy):
-    with pytest.raises(ConfigurationError) as error:
-        validate_policy(POLICY | {"kind": kind, "input": source} | legacy, {"r": COVER})
-    assert error.value.code == "input_eligibility_conflict"
-
-
-@pytest.mark.parametrize("source_state", ["15.5", "-10", "unknown", "unavailable"])
-async def test_numeric_input_accepts_matching_native_units_and_outages(hass, source_state):
-    hass.states.async_set("sensor.temperature", source_state, {"unit_of_measurement": "°C"})
-    policy = validate_policy(POLICY | {"input": NUMERIC_INPUT}, {"r": COVER}, hass)
-    assert policy["input"] == NUMERIC_INPUT
-
-
-@pytest.mark.parametrize("unit", [None, "°F", "K", "C"])
-async def test_numeric_input_rejects_missing_or_different_native_unit(hass, unit):
-    hass.states.async_set("sensor.temperature", "unknown", {"unit_of_measurement": unit})
-    with pytest.raises(ConfigurationError) as error:
-        validate_policy(POLICY | {"input": NUMERIC_INPUT}, {"r": COVER}, hass)
-    assert error.value.code == "input_unit_mismatch"
-
-
-@pytest.mark.parametrize("source_state", ["cold", "nan", "inf", "-inf"])
-async def test_numeric_input_rejects_usable_nonnumeric_or_nonfinite_sources(hass, source_state):
-    hass.states.async_set("sensor.temperature", source_state, {"unit_of_measurement": "°C"})
-    with pytest.raises(ConfigurationError) as error:
-        validate_policy(POLICY | {"input": NUMERIC_INPUT}, {"r": COVER}, hass)
-    assert error.value.code == "invalid_input_value"
-
-
-@pytest.mark.parametrize("kind,source", [("state", NUMERIC_INPUT), ("occurrence", TIMER_INPUT)])
-async def test_native_input_rejects_missing_and_managed_sources(hass, kind, source):
-    with pytest.raises(ConfigurationError) as error:
-        validate_policy(POLICY | {"kind": kind, "input": source}, {"r": COVER}, hass)
-    assert error.value.code == "entity_not_found"
-    domain = source["entity_id"].split(".")[0]
-    registered = er.async_get(hass).async_get_or_create(domain, "ha_operator", "owned_input")
-    hass.states.async_set(registered.entity_id, "unknown", {"unit_of_measurement": "°C"})
-    with pytest.raises(ConfigurationError) as error:
-        validate_policy(
-            POLICY | {"kind": kind, "input": source | {"entity_id": registered.entity_id}},
-            {"r": COVER},
-            hass,
-        )
-    assert error.value.code == "managed_entity"
-
-
-async def test_native_inputs_keep_target_capability_validation(hass):
-    hass.states.async_set("sensor.temperature", "15", {"unit_of_measurement": "°C"})
-    hass.states.async_set("timer.ventilation", "idle")
-    hass.states.async_set("fan.raw", "off", {"supported_features": 0})
-    for kind, source in (("state", NUMERIC_INPUT), ("occurrence", TIMER_INPUT)):
-        with pytest.raises(ConfigurationError) as error:
-            validate_policy(
-                POLICY | {"kind": kind, "target": {"percentage": 50}, "input": source},
-                {"r": FAN},
-                hass,
-            )
-        assert error.value.code == "unsupported_capability"
-    assert (
-        validate_policy(POLICY | {"kind": "occurrence", "input": TIMER_INPUT}, {"r": COVER}, hass)[
-            "input"
-        ]
-        == TIMER_INPUT
-    )
-
-
-def test_native_input_retains_dynamic_targets_and_strict_positive_durations():
-    policy = {key: value for key, value in POLICY.items() if key != "target"}
-    policy.update(target_entity="sensor.position", input=NUMERIC_INPUT | {"threshold": -10})
-    assert validate_policy(policy, {"r": COVER})["target_field"] == "position"
-    assert (
-        validate_policy(
-            POLICY | {"input": NUMERIC_INPUT | {"qualification_seconds": 0.0001}}, {"r": COVER}
-        )["input"]["qualification_seconds"]
-        == 0.0001
-    )
 
 
 @pytest.mark.parametrize("resource", [SWITCH, FAN, RELAY])

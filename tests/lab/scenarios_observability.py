@@ -33,7 +33,9 @@ async def run_observability(lab):
                 "kind": "state",
                 "target": {"position": 40},
                 "priority": 10,
-                "eligibility_entity": "input_boolean.demo_evening",
+                "conditions": [
+                    {"condition": "state", "entity_id": "input_boolean.demo_evening", "state": "on"}
+                ],
             },
         )
         registry = await ha.ws("config/entity_registry/list")

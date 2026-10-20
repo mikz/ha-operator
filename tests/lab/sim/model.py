@@ -23,6 +23,8 @@ _ACTIONS = {
     "fan": {"turn_on", "turn_off", "set_percentage", "set_direction"},
     "binary_sensor": set(),
     "sensor": set(),
+    "number": {"set_value"},
+    "select": {"select_option"},
 }
 
 
@@ -45,6 +47,10 @@ class Device:
     airflow_role: str | None = None
     airflow_requires_any: tuple[str, ...] = ()
     unit: str | None = None
+    min_value: float = -20
+    max_value: float = 80
+    step: float = 0.5
+    options: tuple[str, ...] = ()
     observable: dict[str, Any] = field(default_factory=dict)
     pending: deque[tuple[float, dict[str, Any]]] = field(default_factory=deque)
     sampled: dict[str, Any] = field(default_factory=dict)
@@ -63,6 +69,10 @@ class Device:
         if self.kind == "fan":
             result["speed_count"] = self.speed_count
             result["supports_direction"] = True
+        if self.kind == "number":
+            result.update(min=self.min_value, max=self.max_value, step=self.step)
+        if self.kind == "select":
+            result["options"] = list(self.options)
         if self.unit is not None:
             result["unit"] = self.unit
         return result
@@ -123,6 +133,10 @@ def default_devices() -> list[dict[str, Any]]:
         {"id": "central_lighting", "kind": "switch"},
         {"id": "room_flag", "kind": "switch"},
         {"id": "room_lighting", "kind": "switch"},
+        {"id": "setpoint", "kind": "number", "value": 18, "unit": "°C"},
+        {"id": "setpoint_aux", "kind": "number", "value": 18, "unit": "°C"},
+        {"id": "setpoint_desired", "kind": "sensor", "value": 20.125, "unit": "°C"},
+        {"id": "operating_mode", "kind": "select", "options": ["quiet", "boost"], "value": "quiet"},
     ]
 
 
@@ -181,13 +195,13 @@ class Simulator:
             if device_id in candidates:
                 raise ValueError(f"Duplicate device: {device_id}")
             kind = spec["kind"]
-            if kind not in {"cover", "switch", "fan", "binary_sensor", "sensor"}:
+            if kind not in _ACTIONS:
                 raise ValueError(f"Unknown device kind: {kind}")
             unit = spec.get("unit")
             if unit is not None and (
-                kind != "sensor" or not isinstance(unit, str) or not unit.strip()
+                kind not in {"sensor", "number"} or not isinstance(unit, str) or not unit.strip()
             ):
-                raise ValueError("unit must be nonempty text on a sensor")
+                raise ValueError("unit must be nonempty text on a sensor or number")
             position = self._percentage(spec.get("position", 0))
             percentage = self._percentage(spec.get("percentage", 0))
             physical = {
@@ -232,7 +246,19 @@ class Simulator:
                 airflow_role=spec.get("airflow_role"),
                 airflow_requires_any=tuple(dependencies),
                 unit=unit,
+                min_value=self._finite(spec.get("min", -20)),
+                max_value=self._finite(spec.get("max", 80)),
+                step=self._finite(spec.get("step", 0.5)),
+                options=self._options(spec.get("options", [])),
             )
+            if kind == "number" and (device.min_value > device.max_value or device.step <= 0):
+                raise ValueError("Invalid number metadata")
+            if kind == "number":
+                physical["value"] = self._finite(physical["value"])
+                if not device.min_value <= physical["value"] <= device.max_value:
+                    raise ValueError("Initial number value outside bounds")
+            if kind == "select" and physical["value"] not in device.options:
+                raise ValueError("Initial select value outside options")
             if controls["hidden_rain"] and controls["rain_autoclose"] and position > 0:
                 physical.update(target=0.0, moving=True)
             candidates[device_id] = device
@@ -266,6 +292,26 @@ class Simulator:
         if not math.isfinite(value) or not 0 <= value <= 100:
             raise CommandError("Percentage/position must be finite and between 0 and 100")
         return value
+
+    @staticmethod
+    def _finite(value: Any) -> float:
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(value)
+        ):
+            raise ValueError("Expected a finite number")
+        return float(value)
+
+    @staticmethod
+    def _options(value: Any) -> tuple[str, ...]:
+        if (
+            not isinstance(value, list)
+            or any(not isinstance(item, str) for item in value)
+            or len(set(value)) != len(value)
+        ):
+            raise ValueError("Expected unique text options")
+        return tuple(value)
 
     @staticmethod
     def _boolean(value: Any) -> bool:
@@ -442,7 +488,14 @@ class Simulator:
             "unknown_direction",
         }
         physical_keys = {"position", "on", "percentage", "direction", "value"}
-        unexpected = patch.keys() - control_keys - physical_keys
+        metadata_keys = (
+            {"unit", "min", "max", "step"}
+            if device.kind == "number"
+            else {"options"}
+            if device.kind == "select"
+            else set()
+        )
+        unexpected = patch.keys() - control_keys - physical_keys - metadata_keys
         if unexpected:
             raise ValueError(f"Unknown scenario controls: {sorted(unexpected)}")
         patch = deepcopy(patch)
@@ -456,6 +509,17 @@ class Simulator:
             patch[key] = float(patch[key])
             if not math.isfinite(patch[key]) or patch[key] < 0:
                 raise ValueError(f"Invalid {key}")
+        if "options" in patch:
+            device.options = self._options(patch["options"])
+        if "unit" in patch:
+            if patch["unit"] is not None and not isinstance(patch["unit"], str):
+                raise ValueError("Invalid unit")
+            device.unit = patch["unit"]
+        for key, attribute in (("min", "min_value"), ("max", "max_value"), ("step", "step")):
+            if key in patch:
+                setattr(device, attribute, self._finite(patch[key]))
+        if "value" in patch and device.kind == "number":
+            patch["value"] = self._finite(patch["value"])
         for key in control_keys & patch.keys():
             device.controls[key] = patch[key]
         for key in physical_keys & patch.keys():
@@ -490,6 +554,9 @@ class Simulator:
             self._switch_command(device, action)
         elif device.kind == "fan":
             self._fan_command(device, action, command)
+        elif device.kind in {"number", "select"}:
+            device.physical["value"] = command["value" if device.kind == "number" else "option"]
+            self.record("effect", device_id, action=action, value=device.physical["value"])
         else:
             raise CommandError("Read-only signal")
         self.tick()
@@ -510,6 +577,15 @@ class Simulator:
             self._percentage(command.get("position"))
         if device.kind == "fan" and action in {"turn_on", "set_percentage"}:
             self._percentage(command.get("percentage", 100))
+        if device.kind == "number":
+            try:
+                value = self._finite(command.get("value"))
+            except ValueError as err:
+                raise CommandError(str(err)) from err
+            if not device.min_value <= value <= device.max_value:
+                raise CommandError("Number outside current bounds")
+        if device.kind == "select" and command.get("option") not in device.options:
+            raise CommandError("Option outside current options")
         if action == "stop" and not device.supports_stop:
             raise CommandError("STOP not supported")
 

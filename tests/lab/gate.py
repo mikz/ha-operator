@@ -1,6 +1,7 @@
 """Hold application startup until host inspection proves the private network."""
 
 import hashlib
+import json
 import os
 import shutil
 import sys
@@ -27,7 +28,10 @@ def main():
         digest = hashlib.sha256(archive.read_bytes()).hexdigest()
         receipt = config / ".lab-artifact-sha256"
         if receipt.exists() and receipt.read_text().strip() != digest:
-            raise SystemExit("Persistent configuration contains another release")
+            override = config / ".lab-package-swap.json"
+            allowed = json.loads(override.read_text()) if override.is_file() else {}
+            if allowed != {"image_sha256": digest, "installed_sha256": receipt.read_text().strip()}:
+                raise SystemExit("Persistent configuration contains another release")
         if not receipt.exists():
             configuration = (
                 Path("/lab/configuration.yaml")

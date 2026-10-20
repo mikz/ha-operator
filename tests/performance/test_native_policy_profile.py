@@ -1,5 +1,6 @@
-"""Compare identical native Operator policy workloads in both release ZIPs.
+"""Measure legacy 0.3 policy detectors; archive this probe with its baseline ZIP.
 
+This legacy configuration is not a comparable 0.4 native-trigger workload.
 The runner supplies an extracted integration ZIP. All entities, timers and
 storage use offline HA fixtures with identical configuration and warmup.
 """

@@ -1,5 +1,10 @@
 # Baseline alignment
 
+This historical alignment plan predates the 0.4.0 native-policy migration. For current
+policy configuration and retirement of custom detector inputs, use
+[native policies](native-policies.md); the retained tables below describe the earlier baseline.
+
+
 This is the approved implementation plan from 2026-10-01. It supersedes the
 custom durability and operator trace contracts in the v0.1.6 implementation.
 The [development contract](development-contract.md) and

@@ -7,7 +7,6 @@ import hashlib
 import json
 import logging
 import math
-from collections import deque
 from collections.abc import Callable, Iterable, Mapping
 from copy import deepcopy
 from dataclasses import asdict, replace
@@ -29,6 +28,7 @@ from homeassistant.core import (
 )
 from homeassistant.exceptions import ConfigEntryError, HomeAssistantError, ServiceValidationError
 from homeassistant.helpers import area_registry as ar
+from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers import issue_registry as ir
@@ -38,12 +38,11 @@ from homeassistant.helpers.event import (
     async_track_state_report_event,
     async_track_time_interval,
 )
-from homeassistant.helpers.start import async_at_started
 from homeassistant.helpers.storage import Store
 from homeassistant.util import dt as dt_util
 
 from . import OperatorConfigEntry
-from .adapters import DISPATCH_PARENT, Adapter, create_adapter
+from .adapters import DISPATCH_PARENT, Adapter, NumberAdapter, create_adapter
 from .async_utils import async_settle
 from .configuration import validate_configuration
 from .const import DOMAIN
@@ -68,37 +67,21 @@ from .core import (
 from .data import (
     AcceptedRequestReceipt,
     JSONObject,
-    NumericInputConfig,
     OccurrenceRecord,
     PolicyConfig,
-    PolicyInputRecord,
     RequestReceipt,
     RequirementConfig,
     ResourceConfig,
     RuntimeSnapshot,
     StoredSnapshot,
     TargetData,
-    TimerInputConfig,
 )
 from .intents import IntentValidationError, apply_command
 from .native_conditions import (
     ConditionEvaluation,
     NativeConditionList,
-    aggregate_health,
-    health_status,
 )
-from .policy_inputs import (
-    NumericInput,
-    NumericReport,
-    NumericState,
-    TimerEvent,
-    TimerInput,
-    TimerState,
-    numeric_transition,
-    recover_numeric,
-    recover_timer,
-    timer_transition,
-)
+from .policy_triggers import PolicyTriggers
 from .provenance import Selection, selection_for, target_label
 from .return_monitor import (
     ReturnMonitorInput,
@@ -116,14 +99,6 @@ _UNKNOWN = {"unknown", "unavailable"}
 
 type ContextKey = tuple[str, str | None] | tuple[str, str | None, str | None]
 type StateEvent = Event[EventStateChangedData] | Event[EventStateReportedData]
-type PolicyEvent = NumericReport | TimerEvent | None
-
-
-class PolicyInputMaps(TypedDict):
-    """The existing two-map policy-input preview and mutation surface."""
-
-    policy_inputs: dict[str, PolicyInputRecord]
-    occurrences: dict[str, OccurrenceRecord]
 
 
 class LastCommand(TypedDict):
@@ -192,6 +167,8 @@ def _validate_saved_state(state: StoredSnapshot) -> RuntimeSnapshot:
         occurrence_id = text(item["occurrence_id"], "occurrence_id")
         if key != json.dumps([policy_id, occurrence_id]):
             raise ValueError("Saved occurrence key does not match its identity")
+        if type(item.get("trigger_owned", False)) is not bool:
+            raise ValueError("Saved native ownership must be boolean")
         if type(item.get("skipped", False)) is not bool:
             raise ValueError("Saved occurrence suppression must be boolean")
         Occurrence(
@@ -203,6 +180,13 @@ def _validate_saved_state(state: StoredSnapshot) -> RuntimeSnapshot:
         )
         if not item.get("skipped") and not item.get("target"):
             raise ValueError("Admitted occurrence must retain its target")
+    owned = [
+        item["policy_id"]
+        for item in state["occurrences"].values()
+        if isinstance(item, dict) and item.get("trigger_owned")
+    ]
+    if len(owned) != len(set(owned)):
+        raise ValueError("Multiple saved trigger-owned occurrences for a policy")
     for request_id, value in state["requests"].items():
         text(request_id, "request_id")
         item = record(value)
@@ -264,27 +248,10 @@ class OperatorRuntime:
             for key, config in self.resources.items()
             if config.get("command_conditions")
         }
-        self._health_checks = {
-            key: [
-                (
-                    check,
-                    NativeConditionList(hass, check["conditions"]),
-                    NativeConditionList(hass, check["qualification"])
-                    if "qualification" in check
-                    else None,
-                )
-                for check in config["health_checks"]
-            ]
-            for key, config in self.resources.items()
-            if config.get("health_checks")
-        }
         self._command_results: dict[str, dict[str, ConditionEvaluation]] = {}
-        self._health_results: dict[str, dict[str, Any]] = {}
-        self._published_health: dict[str, dict[str, Any]] = {}
         self._published_conditions: dict[str, dict[str, Any]] = {}
         self._condition_signatures: dict[str, object] = {}
         self._command_signatures: dict[str, object] = {}
-        self._health_signatures: dict[str, object] = {}
         for key in self._command_checks:
             self._adapters[key].command_allowed = lambda command, key=key: self._check_command(
                 key, command
@@ -299,7 +266,7 @@ class OperatorRuntime:
         self._tasks: list[asyncio.Task[None]] = []
         self._stop_tasks: set[asyncio.Task[None]] = set()
         self._close_task: asyncio.Task[bool] | None = None
-        self._close_interrupts_timer_inputs = False
+        self._withdraw_trigger_requests = False
         self._generation = dict.fromkeys(self.resources, 0)
         self._signatures: dict[str, tuple[Target | None, str | None, str | None, str, bool]] = {}
         self._last_send: dict[str, float] = {}
@@ -317,15 +284,15 @@ class OperatorRuntime:
         self._input_flush: asyncio.Task[None] | None = None
         self._pending_resources: set[str] = set()
         self._pending_conditions: set[str] = set()
-        self._policy_events: deque[tuple[str, PolicyEvent, float, Context | None, bool]] = deque()
         self._input_ingress = dict.fromkeys(self.resources, 0)
         self._input_processed = dict.fromkeys(self.resources, 0)
-        self._policy_sources: dict[str, list[str]] = {}
-        self._input_fingerprints: dict[str, str] = {}
-        self._timer_states: dict[str, tuple[str, str | None, float | None]] = {}
-        self._timer_episodes: dict[str, str] = {}
-        self._numeric_reports: dict[str, NumericReport] = {}
-        self._timer_admissions_open = False
+        self._policy_checks = {
+            key: NativeConditionList(hass, config.get("conditions", []))
+            for key, config in self.policies.items()
+        }
+        self._policy_results: dict[str, ConditionEvaluation] = {}
+        self._trigger_owners: dict[str, PolicyTriggers] = {}
+        self._trigger_epochs: set[PolicyTriggers] = set()
         self._return_dirty: set[str] = set()
         self._return_fingerprints = {
             key: hashlib.sha256(
@@ -343,12 +310,6 @@ class OperatorRuntime:
             if config.get("return_monitor")
         }
         self._return_notifications: dict[str, tuple[float | None, float | None] | None] = {}
-        for policy_id, config in self.policies.items():
-            if source := config.get("input"):
-                self._policy_sources.setdefault(source["entity_id"], []).append(policy_id)
-                self._input_fingerprints[policy_id] = hashlib.sha256(
-                    json.dumps(source, sort_keys=True, separators=(",", ":")).encode()
-                ).hexdigest()
         self._feedback_resources: dict[str, set[str]] = {}
         self._input_resources = self._input_dependencies()
         self._decision_input_entities = set(self._input_resources)
@@ -371,9 +332,7 @@ class OperatorRuntime:
             for entity_id in inputs:
                 dependencies.setdefault(entity_id, set()).add(identifier)
         for policy in self.policies.values():
-            if source := policy.get("input"):
-                dependencies.setdefault(source["entity_id"], set()).add(policy["resource_id"])
-            for entity_id in (policy.get("eligibility_entity"), policy.get("target_entity")):
+            for entity_id in (policy.get("target_entity"),):
                 if entity_id:
                     dependencies.setdefault(entity_id, set()).add(policy["resource_id"])
         groups = []
@@ -399,289 +358,129 @@ class OperatorRuntime:
                         changed = True
         return dependencies
 
-    def _input_record(self, policy_id: str, state: NumericState | TimerState) -> PolicyInputRecord:
-        # Each caller pairs this state with this input's own transition or recovery.
-        return cast(
-            PolicyInputRecord,
-            {
-                "type": self.policies[policy_id]["input"]["type"],
-                "fingerprint": self._input_fingerprints[policy_id],
-                "state": state.to_record(),
-            },
-        )
-
     @staticmethod
-    def _numeric_report(source: NumericInputConfig, native: State | None) -> NumericReport:
-        value = None
-        if (
-            native is not None
-            and native.state not in _UNKNOWN
-            and not any(
-                native.attributes.get(key) for key in ("restored", "assumed_state", "optimistic")
-            )
-            and native.attributes.get("unit_of_measurement") == source["unit"]
-        ):
-            try:
-                parsed = float(native.state)
-                if math.isfinite(parsed):
-                    value = parsed
-            except ValueError, TypeError:
-                pass
-        return NumericReport(value)
+    def _retire_trigger_requests(state: RuntimeSnapshot, policy_id: str | None = None) -> bool:
+        keys = [
+            key
+            for key, item in state["occurrences"].items()
+            if item.get("trigger_owned") and (policy_id is None or item["policy_id"] == policy_id)
+        ]
+        for key in keys:
+            del state["occurrences"][key]
+        return bool(keys)
 
     @callback
-    def _capture_timer_state(
-        self, entity_id: str, native: State | None, previous: State | None
-    ) -> None:
-        if native is None:
-            self._timer_states[entity_id] = ("unknown", None, None)
+    def _sync_policy_triggers(self) -> None:
+        if self._closed or not self._initialized:
             return
-        finish = native.attributes.get("finishes_at")
-        parsed = dt_util.parse_datetime(finish) if isinstance(finish, str) else None
-        self._timer_states[entity_id] = (
-            native.state,
-            previous.state if previous is not None else None,
-            parsed.timestamp() if parsed is not None else None,
-        )
-
-    @callback
-    def _timer_event(self, event: Event[Mapping[str, Any]]) -> None:
-        if self._closed:
-            return
-        entity_id = event.data["entity_id"]
-        phase, previous, finish = self._timer_states.get(entity_id, ("unknown", None, None))
-        kind = str(event.event_type).partition(".")[2]
-        for policy_id in self._policy_sources[entity_id]:
-            source = self.policies[policy_id]["input"]
-            if source["type"] != "timer_episode":
-                continue
-            episode = self._timer_episodes.get(policy_id)
-            action: Literal["start", "pause", "resume", "cancel", "finish", "change"]
-            if kind in {"started", "restarted"}:
-                if not self._timer_admissions_open:
-                    continue
-                if phase != "active":
-                    continue  # Lifecycle event must agree with its preceding native state.
-                if previous not in {"idle", "active", "paused"}:
-                    continue
-                if previous == "paused":
-                    if episode is None:
-                        continue
-                    action = "resume"
-                else:
-                    episode = uuid4().hex
-                    self._timer_episodes[policy_id] = episode
-                    action = "start"
-            else:
-                if episode is None:
-                    continue
-                if kind == "paused":
-                    action = "pause"
-                elif kind == "cancelled":
-                    action = "cancel"
-                elif kind == "finished":
-                    action = "finish"
-                else:
-                    action = "change"
-                expected = {
-                    "pause": "paused",
-                    "cancel": "idle",
-                    "finish": "idle",
-                    "change": "active",
-                }[action]
-                if phase != expected:
-                    continue
-            record = self._state["policy_inputs"].get(policy_id)
-            accepted = (
-                record is not None
-                and record["state"].get("episode_id") == episode
-                and record["state"].get("phase") == "accepted"
-            )
-            admissible = self.mode(
-                self.policies[policy_id]["resource_id"]
-            ) == "live" and self.policy_enabled(policy_id)
-            self._policy_events.append(
-                (
-                    policy_id,
-                    TimerEvent(action, episode, finish, accepted),
-                    event.time_fired.timestamp(),
-                    event.context,
-                    admissible,
-                )
-            )
-            self._queue_reconciliation(self._input_resources[entity_id], policy_input=True)
-        self._timer_states[entity_id] = (phase, phase, finish)
-
-    async def _recover_policy_inputs(self) -> None:
-        now = _now()
-
-        def recover(raw_state: RuntimeSnapshot) -> None:
-            # async_start validated all saved semantics before recovery changes runtime state.
-            state = raw_state
-            for policy_id in set(state["policy_inputs"]) & (
-                set(self.policies) - set(self._input_fingerprints)
-            ):
-                for item in state["occurrences"].values():
-                    if item["policy_id"] == policy_id:
-                        item["skipped"] = True
-                del state["policy_inputs"][policy_id]
-            for policy_id, fingerprint in self._input_fingerprints.items():
-                source = self.policies[policy_id]["input"]
-                record = state["policy_inputs"].get(policy_id)
-                matching = record is not None and record["fingerprint"] == fingerprint
-                if record is not None and record["type"] == "timer_episode":
-                    old = TimerState.from_record(record["state"])
-                    if old.episode_id is not None and (
-                        not matching
-                        or old.phase == "qualifying"
-                        or (old.expires_at is not None and old.expires_at <= now)
-                    ):
-                        key = json.dumps([policy_id, old.episode_id])
-                        item = state["occurrences"].setdefault(
-                            key,
-                            {
-                                "policy_id": policy_id,
-                                "occurrence_id": old.episode_id,
-                                # Every saved non-idle episode validates a finite expiry.
-                                "expires_at": cast(float, old.expires_at),
-                            },
-                        )
-                        item["skipped"] = True
-                recovered: NumericState | TimerState
-                if source["type"] == "qualified_numeric":
-                    recovered = (
-                        recover_numeric(NumericState.from_record(record["state"]))
-                        if matching and record is not None
-                        else NumericState()
-                    )
-                else:
-                    recovered = (
-                        recover_timer(TimerState.from_record(record["state"]), now=now).state
-                        if matching and record is not None
-                        else TimerState()
-                    )
-                    if recovered.episode_id is not None:
-                        self._timer_episodes[policy_id] = recovered.episode_id
-                state["policy_inputs"][policy_id] = self._input_record(policy_id, recovered)
-
-        self._mutate_state(recover, skip_unchanged=True)
-
-    async def _apply_policy_input(
-        self,
-        policy_id: str,
-        event: PolicyEvent,
-        captured_at: float,
-        context: Context | None,
-        admissible: bool,
-    ) -> None:
-        if self._closed or self.fault:
-            return
-        config = self.policies[policy_id]
-        source = config["input"]
-
-        def mutate(state: PolicyInputMaps) -> None:
-            record = state["policy_inputs"][policy_id]
-            final: NumericState | TimerState
-            if source["type"] == "qualified_numeric":
-                # Only numeric-source callbacks enqueue NumericReport; ticks enqueue None.
-                numeric_event = cast(NumericReport | None, event)
-                numeric = numeric_transition(
-                    NumericInput(source["threshold"], source["qualification_seconds"]),
-                    NumericState.from_record(record["state"]),
-                    numeric_event,
-                    now=captured_at,
-                )
-                # Process a report at its captured time, then catch up without inventing evidence.
-                final = numeric_transition(
-                    NumericInput(source["threshold"], source["qualification_seconds"]),
-                    numeric.state,
-                    None,
-                    now=_now(),
-                ).state
-            else:
-                timer_config = TimerInput(
-                    source["qualification_seconds"], source["request_seconds"]
-                )
-                previous = TimerState.from_record(record["state"])
-                # Only timer lifecycle callbacks enqueue TimerEvent; ticks enqueue None.
-                timer_event = cast(TimerEvent | None, event)
-                if timer_event is not None and timer_event.kind == "start":
-                    if json.dumps([policy_id, timer_event.episode_id]) in state["occurrences"]:
-                        return
-                transition = timer_transition(timer_config, previous, timer_event, now=captured_at)
-                tick = timer_transition(timer_config, transition.state, None, now=_now())
-                changes = (*transition.occurrence_changes, *tick.occurrence_changes)
-                final = tick.state
-                if final.phase in {"qualifying", "accepted"} and (
-                    not admissible
-                    or self.mode(config["resource_id"]) != "live"
-                    or not self.policy_enabled(policy_id)
-                ):
-                    assert final.episode_id is not None
-                    rejected = timer_transition(
-                        timer_config, final, TimerEvent("suppress", final.episode_id), now=_now()
-                    )
-                    final = rejected.state
-                    changes = (*changes, *rejected.occurrence_changes)
-                for change in changes:
-                    key = json.dumps([policy_id, change.episode_id])
-                    item = state["occurrences"].get(key)
-                    if change.action == "suppress":
-                        if item is None:
-                            item = state["occurrences"][key] = {
-                                "policy_id": policy_id,
-                                "occurrence_id": change.episode_id,
-                                "expires_at": change.expires_at,
-                            }
-                        item["skipped"] = True
-                    elif item is None:
-                        # Reuse admission validation only for the surviving, unexpired request.
-                        if final.phase != "accepted" or final.episode_id != change.episode_id:
-                            continue
-                        self._occurrence(policy_id, change.episode_id, change.expires_at)
-                        self._admit(config["resource_id"])
-                        target = self._policy_target(config)
-                        if target is None:
-                            assert final.episode_id is not None
-                            rejected = timer_transition(
-                                timer_config,
-                                final,
-                                TimerEvent("suppress", final.episode_id),
-                                now=_now(),
-                            )
-                            final = rejected.state
-                        occurrence: OccurrenceRecord = {
-                            "policy_id": policy_id,
-                            "occurrence_id": change.episode_id,
-                            "expires_at": change.expires_at,
-                            "skipped": target is None,
-                        }
-                        if target is not None:
-                            occurrence["target"] = target.to_dict()
-                        state["occurrences"][key] = occurrence
-            state["policy_inputs"][policy_id] = self._input_record(policy_id, final)
-
-        original_occurrences = {
-            key: item
+        inactive = [
+            key
             for key, item in self._state["occurrences"].items()
-            if item["policy_id"] == policy_id
-        }
-        original: PolicyInputMaps = {
-            "policy_inputs": {policy_id: self._state["policy_inputs"][policy_id]},
-            "occurrences": original_occurrences,
-        }
-        candidate = deepcopy(original)
-        mutate(candidate)
-        if candidate == original:
+            if item.get("trigger_owned")
+            and (
+                (config := self.policies.get(item["policy_id"])) is None
+                or "triggers" not in config
+                or not self.policy_enabled(item["policy_id"])
+                or self.mode(config["resource_id"]) != "live"
+            )
+        ]
+        if inactive:
+            self._mutate_state(lambda state: [state["occurrences"].pop(key) for key in inactive])
+        for policy_id, config in self.policies.items():
+            if "triggers" not in config:
+                continue
+            active = self.policy_enabled(policy_id) and self.mode(config["resource_id"]) == "live"
+            owner = self._trigger_owners.get(policy_id)
+            if owner is not None and not active:
+                owner.close()
+                del self._trigger_owners[policy_id]
+
+                def retire(state: RuntimeSnapshot, policy_id: str = policy_id) -> None:
+                    self._retire_trigger_requests(state, policy_id)
+
+                self._mutate_state(retire, skip_unchanged=True)
+            elif owner is None and active:
+                owner = self._trigger_owners[policy_id] = PolicyTriggers(self, policy_id)
+                self._trigger_epochs.add(owner)
+
+    @callback
+    def trigger_occurrence(
+        self,
+        owner: PolicyTriggers,
+        variables: dict[str, Any],
+        context: Context | None,
+        *,
+        cancel: bool,
+    ) -> None:
+        policy_id = owner.policy_id
+        config = self.policies[policy_id]
+        resource_id = config["resource_id"]
+        if (
+            self._closed
+            or self.fault
+            or self._trigger_owners.get(policy_id) is not owner
+            or owner.closed
+            or not owner.ready
+            or not self.policy_enabled(policy_id)
+            or self.mode(resource_id) != "live"
+        ):
             return
-        await self._change(
-            mutate,
-            skip_unchanged=True,
-            context=context,
-            context_key=("occurrence", policy_id, event.episode_id)
-            if isinstance(event, TimerEvent)
-            else None,
-        )
+        captured_at = _now()
+        contexts: dict[ContextKey, Context] | None = None
+        if cancel:
+            if not any(
+                item.get("trigger_owned") and item["policy_id"] == policy_id
+                for item in self._state["occurrences"].values()
+            ):
+                return
+            self._mutate_state(lambda state: self._retire_trigger_requests(state, policy_id))
+            contexts = None
+        else:
+            self._policy_results[policy_id] = result = self._policy_checks[policy_id].evaluate(
+                variables
+            )
+            if not result.permits_command:
+                return
+            target = self._policy_target(config)
+            if target is None:
+                return
+            occurrence_id = "native:" + uuid4().hex
+            key = json.dumps([policy_id, occurrence_id])
+
+            def replace_owned(state: RuntimeSnapshot) -> None:
+                self._retire_trigger_requests(state, policy_id)
+                state["occurrences"][key] = {
+                    "policy_id": policy_id,
+                    "occurrence_id": occurrence_id,
+                    "expires_at": captured_at
+                    + cv.positive_time_period(config["duration"]).total_seconds(),
+                    "target": target.to_dict(),
+                    "trigger_owned": True,
+                }
+
+            self._mutate_state(replace_owned)
+            self._ingress_details[("occurrence", policy_id, occurrence_id)] = {
+                "captured_at": dt_util.utc_from_timestamp(captured_at).isoformat(),
+                "policy_conditions": {
+                    "status": result.status,
+                    "conditions": deepcopy(result.conditions),
+                    "error": result.error,
+                },
+            }
+            trigger_data = variables.get("trigger")
+            if isinstance(trigger_data, Mapping):
+                native = trigger_data.get("to_state")
+                if isinstance(native, State) and trigger_data.get("entity_id") == native.entity_id:
+                    self._ingress_details[("occurrence", policy_id, occurrence_id)].update(
+                        self._source_details(native), source_capture="native_trigger"
+                    )
+            contexts = {("occurrence", policy_id, occurrence_id): context} if context else None
+            if contexts:
+                self._contexts.update(contexts)
+        self._generation[resource_id] += 1
+        self._recompute()
+        self._wake_all()
+        self._notify(contexts)
 
     async def async_start(self) -> None:
         try:
@@ -692,14 +491,6 @@ class OperatorRuntime:
                     if loaded is not None
                     else cast(RuntimeSnapshot, empty_state())
                 )
-                for policy_id, fingerprint in self._input_fingerprints.items():
-                    record = self._state["policy_inputs"].get(policy_id)
-                    if (
-                        record is not None
-                        and record["fingerprint"] == fingerprint
-                        and record["type"] != self.policies[policy_id]["input"]["type"]
-                    ):
-                        raise ValueError("Saved policy input type disagrees with its fingerprint")
             except (ValueError, TypeError, KeyError, OverflowError) as err:
                 raise InvalidSnapshot("Saved runtime records are invalid") from err
             if any(key not in self._state["intents"] for key in self.intents):
@@ -715,7 +506,6 @@ class OperatorRuntime:
                 self._mutate_state(
                     lambda state: state["modes"].update(dict.fromkeys(self.resources, "observe"))
                 )
-            await self._recover_policy_inputs()
             removed_monitors = (
                 set(self._state["return_monitors"]) - self._return_fingerprints.keys()
             )
@@ -779,47 +569,28 @@ class OperatorRuntime:
                     self.hass, self._observed_entities, self._input_changed
                 )
             )
-        if self._policy_sources:
-
-            @callback
-            def open_timer_admissions(_: HomeAssistant) -> None:
-                for entity_id in self._policy_sources:
-                    if entity_id.startswith("timer."):
-                        native = self.hass.states.get(entity_id)
-                        self._capture_timer_state(entity_id, native, native)
-                self._timer_admissions_open = True
-
-            self._unsubscribers.append(async_at_started(self.hass, open_timer_admissions))
-
-            @callback
-            def timer_filter(data: Mapping[str, Any]) -> bool:
-                return data.get("entity_id") in self._policy_sources
-
-            for event_type in (
-                "started",
-                "restarted",
-                "paused",
-                "cancelled",
-                "finished",
-                "changed",
-            ):
-                self._unsubscribers.append(
-                    self.hass.bus.async_listen(
-                        f"timer.{event_type}", self._timer_event, event_filter=timer_filter
-                    )
-                )
-            for entity_id in self._policy_sources:
-                native = self.hass.states.get(entity_id)
-                if entity_id.startswith("timer."):
-                    self._capture_timer_state(entity_id, native, native)
-                else:
-                    for policy_id in self._policy_sources[entity_id]:
-                        # Configuration validates sensor sources as qualified-numeric inputs.
-                        self._numeric_reports[policy_id] = self._numeric_report(
-                            cast(NumericInputConfig, self.policies[policy_id]["input"]), native
-                        )
         await self._async_setup_conditions()
+        for policy_id, checker in self._policy_checks.items():
+            await checker.async_setup()
+            if self.policies[policy_id]["kind"] == "state":
+
+                def changed(policy_id: str = policy_id) -> None:
+                    self._queue_reconciliation(
+                        {self.policies[policy_id]["resource_id"]}, policy_input=True
+                    )
+
+                await checker.async_track_changes(changed)
+                if checker.needs_polling:
+
+                    def poll(_: datetime, changed: Callable[[], None] = changed) -> None:
+                        changed()
+
+                    self._unsubscribers.append(
+                        async_track_time_interval(self.hass, poll, timedelta(seconds=1))
+                    )
         self._recompute()
+        self._sync_policy_triggers()
+        await asyncio.gather(*(owner.task for owner in self._trigger_owners.values()))
         self._tasks = [
             self.entry.async_create_background_task(
                 self.hass, self._worker(key), f"ha_operator:{key}"
@@ -829,19 +600,7 @@ class OperatorRuntime:
         self._wake_all()
 
     def _native_lists(self) -> dict[str, list[NativeConditionList]]:
-        resources = set(self._command_checks) | set(self._health_checks)
-        return {
-            key: [
-                *self._command_checks.get(key, {}).values(),
-                *(
-                    checker
-                    for _, conditions, qualification in self._health_checks.get(key, [])
-                    for checker in (conditions, qualification)
-                    if checker is not None
-                ),
-            ]
-            for key in resources
-        }
+        return {key: list(checks.values()) for key, checks in self._command_checks.items()}
 
     async def _async_setup_conditions(self) -> None:
         for key, checks in self._native_lists().items():
@@ -874,35 +633,11 @@ class OperatorRuntime:
         self._pending_conditions.add(resource_id)
         self._queue_reconciliation(set())
 
-    def _evaluate_health(self, resource_id: str) -> dict[str, Any]:
-        checks = []
-        statuses = []
-        for config, conditions, qualification in self._health_checks.get(resource_id, []):
-            qualified = qualification.evaluate() if qualification is not None else None
-            result = (
-                conditions.evaluate()
-                if qualified is None or qualified.status == "passed"
-                else ConditionEvaluation("skipped")
-            )
-            status = health_status(result, qualified)
-            statuses.append(status)
-            checks.append(
-                {
-                    "alias": config["alias"],
-                    "status": status,
-                    "conditions": asdict(result),
-                    "qualification": asdict(qualified) if qualified else None,
-                }
-            )
-        return {"status": aggregate_health(statuses), "checks": checks}
-
     def _refresh_conditions(self, resource_id: str) -> bool:
         self._command_results[resource_id] = {
             command: checker.evaluate()
             for command, checker in self._command_checks.get(resource_id, {}).items()
         }
-        if resource_id in self._health_checks:
-            self._health_results[resource_id] = self._evaluate_health(resource_id)
         return self._publish_conditions(resource_id)
 
     @staticmethod
@@ -924,38 +659,15 @@ class OperatorRuntime:
             command: asdict(result)
             for command, result in self._command_results.get(resource_id, {}).items()
         }
-        health = self._health_results.get(resource_id)
-        health_signature = (
-            None
-            if health is None
-            else (
-                health["status"],
-                tuple(
-                    (
-                        item["status"],
-                        self._check_signature(item["conditions"]),
-                        self._check_signature(item["qualification"])
-                        if item["qualification"]
-                        else None,
-                    )
-                    for item in health["checks"]
-                ),
-            )
-        )
-        if health is not None and self._health_signatures.get(resource_id) != health_signature:
-            self._health_signatures[resource_id] = health_signature
-            self._published_health[resource_id] = deepcopy(health)
         command_signature = tuple(
             (command, self._check_signature(result)) for command, result in commands.items()
         )
         self._command_signatures[resource_id] = command_signature
-        signature = (command_signature, health_signature)
+        signature = command_signature
         if self._condition_signatures.get(resource_id) == signature:
             return False
         self._condition_signatures[resource_id] = signature
-        self._published_conditions[resource_id] = deepcopy(
-            {"command_conditions": commands, "health": health}
-        )
+        self._published_conditions[resource_id] = deepcopy({"command_conditions": commands})
         return True
 
     def _check_command(self, resource_id: str, command: str) -> bool:
@@ -990,23 +702,18 @@ class OperatorRuntime:
                     command: asdict(checker.evaluate())
                     for command, checker in self._command_checks.get(resource_id, {}).items()
                 },
-                "health": self._evaluate_health(resource_id)
-                if resource_id in self._health_checks
-                else None,
             }
-            if resource_id in self._command_checks or resource_id in self._health_checks
+            if resource_id in self._command_checks
             else {}
         )
 
-    def health_details(self, resource_id: str) -> dict[str, Any]:
-        return deepcopy(self._published_health.get(resource_id, {}))
-
-    async def async_close(self, *, interrupt_timer_inputs: bool = False) -> bool:
+    async def async_close(self, *, withdraw_trigger_requests: bool = False) -> bool:
         """Fence synchronously, then finish the first boundary's owned cleanup."""
         if self._close_task is None:
             self._closed = True
-            self._timer_admissions_open = False
-            self._close_interrupts_timer_inputs = interrupt_timer_inputs
+            for owner in tuple(self._trigger_epochs):
+                owner.close()
+            self._withdraw_trigger_requests = withdraw_trigger_requests
             for key in self._generation:
                 self._generation[key] += 1
             self._close_task = self.hass.async_create_task(
@@ -1023,7 +730,6 @@ class OperatorRuntime:
             flush.cancel()
         self._pending_resources.clear()
         self._pending_conditions.clear()
-        self._policy_events.clear()
         for unsubscribe in self._unsubscribers:
             unsubscribe()
         self._unsubscribers.clear()
@@ -1049,46 +755,19 @@ class OperatorRuntime:
         for script in self._explanation_scripts.values():
             await script.async_unload()
         self._explanation_scripts.clear()
-        interrupted = []
-        demote = self.shadow_locked and self._initialized
-        interrupt = self._close_interrupts_timer_inputs and any(
-            (source := policy.get("input")) is not None and source["type"] == "timer_episode"
-            for policy in self.policies.values()
-        )
-
-        def fence(raw_state: RuntimeSnapshot) -> None:
-            # Unload fencing is entered only for initialized intent; abort cleanup skips it.
-            state = raw_state
-            if interrupt:
-                for policy_id in self._input_fingerprints:
-                    record = state["policy_inputs"].get(policy_id)
-                    if (
-                        record is not None
-                        and record["type"] == "timer_episode"
-                        and record["state"]["phase"] in {"qualifying", "accepted"}
-                    ):
-                        self._suppress_timer_input(state, policy_id)
-                        interrupted.append(policy_id)
-            if demote:
-                state["modes"].update(dict.fromkeys(self.resources, "observe"))
-
+        for checker in self._policy_checks.values():
+            checker.async_unload()
+        await asyncio.gather(*(owner.async_close() for owner in tuple(self._trigger_epochs)))
         if self._initialized:
-            if interrupt or demote:
-                self._mutate_state(fence, skip_unchanged=True)
-                for policy_id in interrupted:
-                    policy = self.policies[policy_id]
-                    entity_id = er.async_get(self.hass).async_get_entity_id(
-                        "sensor", DOMAIN, f"{policy['resource_id']}_reason"
-                    )
-                    self.hass.bus.async_fire(
-                        "logbook_entry",
-                        {
-                            "name": policy["name"],
-                            "message": "Timer episode interrupted by HA Operator reload or unload",
-                            "domain": DOMAIN,
-                            "entity_id": entity_id,
-                        },
-                    )
+            if self._withdraw_trigger_requests or self.shadow_locked:
+                self._mutate_state(
+                    lambda state: self._retire_trigger_requests(state), skip_unchanged=True
+                )
+            if self.shadow_locked:
+                self._mutate_state(
+                    lambda state: state["modes"].update(dict.fromkeys(self.resources, "observe")),
+                    skip_unchanged=True,
+                )
             await self._store.async_save(self._state)
         self._listeners.clear()
         return True
@@ -1268,11 +947,12 @@ class OperatorRuntime:
             raise HomeAssistantError(translation_domain=DOMAIN, translation_key="storage_inhibited")
         changed = self._mutate_state(mutator, skip_unchanged=skip_unchanged)
         contexts = {}
-        if changed and context_key is not None and context is not None:
+        if changed and context_key is not None:
             for key in context_key() if callable(context_key) else [context_key]:
-                contexts[key] = self._contexts[key] = context
+                if context is not None:
+                    contexts[key] = self._contexts[key] = context
                 if source_details is not None:
-                    self._ingress_details[key] = source_details
+                    self._ingress_details[key] = deepcopy(source_details)
         self._recompute()
         self._wake_all()
         self._notify(contexts)
@@ -1588,40 +1268,11 @@ class OperatorRuntime:
             if mode == "observe":
                 for policy_id, policy in self.policies.items():
                     if policy["resource_id"] == resource_id:
-                        self._suppress_timer_input(state, policy_id)
+                        self._retire_trigger_requests(state, policy_id)
 
         await self._change(
             mutate,
         )
-
-    def _suppress_timer_input(self, state: RuntimeSnapshot, policy_id: str) -> None:
-        record = state["policy_inputs"].get(policy_id)
-        if record is None or record["type"] != "timer_episode":
-            return
-        timer = TimerState.from_record(record["state"])
-        if timer.phase not in {"qualifying", "accepted"}:
-            return
-        # Only this timer input's own record can reach timer suppression.
-        source = cast(TimerInputConfig, self.policies[policy_id]["input"])
-        assert timer.episode_id is not None
-        transition = timer_transition(
-            TimerInput(source["qualification_seconds"], source["request_seconds"]),
-            timer,
-            TimerEvent("suppress", timer.episode_id),
-            now=_now(),
-        )
-        state["policy_inputs"][policy_id] = self._input_record(policy_id, transition.state)
-        for change in transition.occurrence_changes:
-            key = json.dumps([policy_id, change.episode_id])
-            item = state["occurrences"].setdefault(
-                key,
-                {
-                    "policy_id": policy_id,
-                    "occurrence_id": change.episode_id,
-                    "expires_at": change.expires_at,
-                },
-            )
-            item["skipped"] = True
 
     async def async_set_policy_enabled(self, policy_id: str, enabled: bool) -> None:
         if policy_id not in self.policies or not isinstance(enabled, bool):
@@ -1632,7 +1283,7 @@ class OperatorRuntime:
         def mutate(state: RuntimeSnapshot) -> None:
             state["policy_enabled"][policy_id] = enabled
             if not enabled:
-                self._suppress_timer_input(state, policy_id)
+                self._retire_trigger_requests(state, policy_id)
                 for occurrence in state["occurrences"].values():
                     if occurrence["policy_id"] == policy_id:
                         occurrence["skipped"] = True
@@ -1667,7 +1318,7 @@ class OperatorRuntime:
         *,
         context: Context | None = None,
     ) -> OccurrenceRecord:
-        source_details = self._automation_trigger_details(context)
+        source_details = self._automation_trigger_details(context) or {}
         config, key, expiry = self._occurrence(policy_id, occurrence_id, expires_at)
         self._admit(config["resource_id"])
         target = self._policy_target(config)
@@ -1691,6 +1342,15 @@ class OperatorRuntime:
                     "skipped": not self.policy_enabled(policy_id)
                     or not self._eligible(config, policy_id),
                 }
+                if result := self._policy_results.get(policy_id):
+                    source_details.update(
+                        captured_at=dt_util.utc_from_timestamp(_now()).isoformat(),
+                        policy_conditions={
+                            "status": result.status,
+                            "conditions": deepcopy(result.conditions),
+                            "error": result.error,
+                        },
+                    )
 
         await self._change(
             mutate,
@@ -1723,7 +1383,7 @@ class OperatorRuntime:
     async def async_reconcile(self, resource_id: str | None = None) -> None:
         if resource_id is not None:
             self._resource(resource_id)
-        if self._input_fingerprints or self._return_fingerprints:
+        if self._return_fingerprints:
             self._queue_reconciliation(
                 {resource_id} if resource_id else set(self.resources), policy_input=True
             )
@@ -1750,18 +1410,8 @@ class OperatorRuntime:
         return state.attributes.get(attribute) if attribute else state.state
 
     def _eligible(self, config: PolicyConfig, policy_id: str) -> bool:
-        if source := config.get("input"):
-            record = self._state["policy_inputs"].get(policy_id)
-            if record is None or record["fingerprint"] != self._input_fingerprints[policy_id]:
-                return False
-            if source["type"] == "qualified_numeric":
-                state = NumericState.from_record(record["state"])
-                return state.qualified and not state.recovery_pending
-            return TimerState.from_record(record["state"]).phase == "accepted"
-        entity_id = config.get("eligibility_entity")
-        return not entity_id or self._state_value(entity_id) == config.get(
-            "eligibility_state", "on"
-        )
+        self._policy_results[policy_id] = result = self._policy_checks[policy_id].evaluate()
+        return result.permits_command
 
     def _policy_target(self, config: PolicyConfig) -> Target | None:
         target: dict[str, object] = dict(config.get("target", {}))
@@ -1773,7 +1423,7 @@ class OperatorRuntime:
             if value is None:
                 return None
             field = config.get("target_field", "position")
-            if field in {"position", "percentage"}:
+            if field in {"position", "percentage", "value"}:
                 if isinstance(value, bool):
                     return None
                 try:
@@ -1787,9 +1437,21 @@ class OperatorRuntime:
                     value = value == "on"
                 else:
                     return None
+            if field == "value" and "target_attribute" not in config:
+                state = self.hass.states.get(target_entity)
+                if (
+                    state is None
+                    or state.attributes.get("unit_of_measurement")
+                    != self.resources[config["resource_id"]]["unit_of_measurement"]
+                ):
+                    return None
             target[field] = value
         try:
-            return self.adapter(config["resource_id"]).normalize(Target.from_dict(target))
+            adapter = self.adapter(config["resource_id"])
+            requested = Target.from_dict(target)
+            if isinstance(adapter, NumberAdapter) and not adapter.unit_compatible:
+                return requested
+            return adapter.normalize(requested)
         except ValueError, TypeError, HomeAssistantError:
             return None
 
@@ -1845,94 +1507,10 @@ class OperatorRuntime:
             return
         if not _is_state_event(event):
             # Absolute lease/occurrence and provider deadlines need no telemetry.
-            self._queue_reconciliation(
-                set(self.resources), policy_input=bool(self._input_fingerprints)
-            )
+            self._queue_reconciliation(set(self.resources))
             return
         entity_id = event.data["entity_id"]
         affected = self._input_resources.get(entity_id, set())
-        policy_input = False
-        if entity_id in self._policy_sources:
-            native = event.data.get("new_state")
-            if entity_id.startswith("timer."):
-                if event.event_type == EVENT_STATE_CHANGED:
-                    # HA state-changed events carry EventStateChangedData.
-                    changed_event = cast(Event[EventStateChangedData], event)
-                    self._capture_timer_state(
-                        entity_id, native, changed_event.data.get("old_state")
-                    )
-                    if (
-                        native is None
-                        or native.state in _UNKNOWN
-                        or any(
-                            native.attributes.get(key)
-                            for key in ("restored", "assumed_state", "optimistic")
-                        )
-                    ):
-                        for policy_id in self._policy_sources[entity_id]:
-                            if episode := self._timer_episodes.get(policy_id):
-                                record = self._state["policy_inputs"].get(policy_id)
-                                accepted = (
-                                    record is not None
-                                    and record["state"].get("episode_id") == episode
-                                    and record["state"].get("phase") == "accepted"
-                                )
-                                if accepted:
-                                    continue
-                                policy_input = True
-                                self._policy_events.append(
-                                    (
-                                        policy_id,
-                                        TimerEvent("suppress", episode),
-                                        event.time_fired.timestamp(),
-                                        event.context,
-                                        False,
-                                    )
-                                )
-            else:
-                unchanged = (
-                    event.event_type == EVENT_STATE_REPORTED
-                    and not self.fault
-                    and self._input_flush is None
-                    and not self._pending_resources
-                    and not self._policy_events
-                )
-                if unchanged:
-                    for policy_id in self._policy_sources[entity_id]:
-                        record = self._state["policy_inputs"].get(policy_id)
-                        if (
-                            record is None
-                            or record["type"] != "qualified_numeric"
-                            or record["fingerprint"] != self._input_fingerprints[policy_id]
-                        ):
-                            unchanged = False
-                            break
-                        previous_numeric = NumericState.from_record(record["state"])
-                        # Validated sensor sources have qualified-numeric configuration.
-                        source = cast(NumericInputConfig, self.policies[policy_id]["input"])
-                        config = NumericInput(source["threshold"], source["qualification_seconds"])
-                        report = self._numeric_reports.get(policy_id, NumericReport(None))
-                        reported = numeric_transition(
-                            config, previous_numeric, report, now=event.time_fired.timestamp()
-                        )
-                        current = numeric_transition(config, reported.state, None, now=_now())
-                        if previous_numeric.recovery_pending or current.state != previous_numeric:
-                            unchanged = False
-                            break
-                if not unchanged:
-                    for policy_id in self._policy_sources[entity_id]:
-                        if event.event_type == EVENT_STATE_CHANGED:
-                            # Configuration validates sensor sources as qualified-numeric inputs.
-                            self._numeric_reports[policy_id] = self._numeric_report(
-                                cast(NumericInputConfig, self.policies[policy_id]["input"]), native
-                            )
-                        report = self._numeric_reports.get(policy_id, NumericReport(None))
-                        self._policy_events.append(
-                            (policy_id, report, event.time_fired.timestamp(), event.context, True)
-                        )
-                    self._queue_reconciliation(affected, policy_input=True)
-                    return
-                # Native input is unchanged; shared roles still need the ordinary report checks.
         if event.event_type == EVENT_STATE_REPORTED:
             # HA reports unchanged values separately from state/attribute changes.
             # Keep fresh observations (including relay report timestamps) without
@@ -1951,7 +1529,7 @@ class OperatorRuntime:
             deadline_due = self._next_evaluation is not None and self._next_evaluation <= _now()
             if not changed and not affected & self._applying and not deadline_due:
                 return
-        self._queue_reconciliation(affected, policy_input=policy_input)
+        self._queue_reconciliation(affected)
 
     @callback
     def _queue_reconciliation(self, resource_ids: set[str], *, policy_input: bool = False) -> None:
@@ -1987,19 +1565,9 @@ class OperatorRuntime:
                     pending_conditions
                     and not changed_conditions
                     and not affected
-                    and not self._policy_events
                     and not self._return_dirty
                 ):
                     return
-                while self._policy_events and not self._closed:
-                    policy_id, event, captured_at, context, admissible = (
-                        self._policy_events.popleft()
-                    )
-                    await self._apply_policy_input(
-                        policy_id, event, captured_at, context, admissible
-                    )
-                for policy_id in self._input_fingerprints:
-                    await self._apply_policy_input(policy_id, None, _now(), None, True)
                 if self._return_fingerprints:
                     self._recompute()
                     if self._return_dirty:
@@ -2007,7 +1575,6 @@ class OperatorRuntime:
                 if (
                     not self._pending_resources
                     and not self._pending_conditions
-                    and not self._policy_events
                     and not self._return_dirty
                 ):
                     break
@@ -2034,12 +1601,7 @@ class OperatorRuntime:
             if (
                 not self._closed
                 and not self.fault
-                and (
-                    self._pending_resources
-                    or self._pending_conditions
-                    or self._policy_events
-                    or self._return_dirty
-                )
+                and (self._pending_resources or self._pending_conditions or self._return_dirty)
             ):
                 self._queue_reconciliation(set())
 
@@ -2052,14 +1614,6 @@ class OperatorRuntime:
         for identifier in resource_ids:
             if self.decisions[identifier].status in {"pending", "waiting"}:
                 self._wake[identifier].set()
-
-    def policy_input(self, policy_id: str) -> NumericState | TimerState | None:
-        """Expose current input state without scheduling or mutating qualification."""
-        record = self._state["policy_inputs"].get(policy_id)
-        if record is None:
-            return None
-        model = NumericState if record["type"] == "qualified_numeric" else TimerState
-        return model.from_record(record["state"])
 
     def return_monitor(self, resource_id: str) -> ReturnMonitorState:
         """Expose current monitor state; telemetry and desired values stay separate."""
@@ -2109,7 +1663,7 @@ class OperatorRuntime:
         await self._change(mutate, skip_unchanged=True)
 
     def _sync_return_notifications(self, now: float) -> None:
-        if self._closed or self.fault or self._policy_events:
+        if self._closed or self.fault:
             return
         for key in self._return_fingerprints:
             if self._input_ingress[key] != self._input_processed[key]:
@@ -2140,6 +1694,14 @@ class OperatorRuntime:
             self._return_notifications[key] = episode
 
     def _recompute(self, *, mark_returns: bool = True) -> None:
+        self._sync_policy_triggers()
+        expired = [
+            key
+            for key, item in self._state["occurrences"].items()
+            if item.get("trigger_owned") and item["expires_at"] <= _now()
+        ]
+        if expired:
+            self._mutate_state(lambda state: [state["occurrences"].pop(key) for key in expired])
         if self._closed:
             return
         now = _now()
@@ -2181,6 +1743,12 @@ class OperatorRuntime:
                     target=Target.from_dict(item["target"]) if item.get("target") else None,
                 )
                 for item in self._state["occurrences"].values()
+                if not item.get("trigger_owned")
+                or (
+                    (owner := self._trigger_owners.get(item["policy_id"])) is not None
+                    and owner.ready
+                    and not owner.closed
+                )
             ]
         except (KeyError, ValueError, TypeError) as err:
             self._invalid_state(err)
@@ -2198,7 +1766,7 @@ class OperatorRuntime:
                     self._policy_target(config),
                     config["priority"],
                     self.policy_enabled(key),
-                    self._eligible(config, key),
+                    config["kind"] == "occurrence" or self._eligible(config, key),
                     config["kind"],
                 )
                 for key, config in self.policies.items()
@@ -2249,6 +1817,18 @@ class OperatorRuntime:
             policy = (
                 self.policies.get(selection.source_id) if selection.source_id is not None else None
             )
+            if policy_result := self._policy_results.get(selection.source_id or ""):
+                sources = tuple(
+                    dict.fromkeys(
+                        entity_id
+                        for item in policy_result.conditions
+                        for entity_id in item.get("sources", {})
+                    )
+                )
+                self.selections[key] = selection = replace(
+                    selection,
+                    related_entities=tuple(dict.fromkeys((*selection.related_entities, *sources))),
+                )
             if policy is not None and (intent_id := policy.get("intent_id")):
                 name = self.intents[intent_id]["name"][:128]
                 entity_id = registry.async_get_entity_id("switch", DOMAIN, f"{intent_id}_desired")
@@ -2263,10 +1843,19 @@ class OperatorRuntime:
         self.decisions = dict(result.decisions)
         for key, decision in self.decisions.items():
             if (
-                key in self._command_checks or key in self._health_checks
-            ) and self._reason_identity(previous_selections.get(key)) != self._reason_identity(
-                self.selections[key]
+                decision.target is not None
+                and self.resources[key]["kind"] in {"number", "select"}
+                and decision.status in {"pending", "waiting", "satisfied"}
             ):
+                try:
+                    self.adapter(key).normalize(decision.target)
+                except TargetValidationError:
+                    self.decisions[key] = decision = replace(
+                        decision, status="restricted", reason="invalid_target"
+                    )
+            if (key in self._command_checks) and self._reason_identity(
+                previous_selections.get(key)
+            ) != self._reason_identity(self.selections[key]):
                 self._refresh_conditions(key)
                 self._published_conditions[key] = deepcopy(
                     {
@@ -2274,7 +1863,6 @@ class OperatorRuntime:
                             command: asdict(item)
                             for command, item in self._command_results.get(key, {}).items()
                         },
-                        "health": self._health_results.get(key),
                     }
                 )
             if (
@@ -2403,27 +1991,6 @@ class OperatorRuntime:
             self._deadline_timer()
             self._deadline_timer = None
         deadlines = [result.next_evaluation] if result.next_evaluation is not None else []
-        for policy_id, source_hash in self._input_fingerprints.items():
-            record = self._state["policy_inputs"].get(policy_id)
-            if record is None or record["fingerprint"] != source_hash:
-                continue
-            if record["type"] == "qualified_numeric":
-                numeric_state = NumericState.from_record(record["state"])
-                if (
-                    not numeric_state.qualified
-                    and not numeric_state.recovery_pending
-                    and numeric_state.source_quality == "numeric"
-                ):
-                    if numeric_state.due_at is not None:
-                        deadlines.append(numeric_state.due_at)
-            else:
-                timer_state = TimerState.from_record(record["state"])
-                if timer_state.phase == "qualifying":
-                    assert timer_state.due_at is not None
-                    deadlines.append(timer_state.due_at)
-                elif timer_state.phase == "accepted":
-                    assert timer_state.expires_at is not None
-                    deadlines.append(timer_state.expires_at)
         if mark_returns and not self.fault:
             for key in self._return_fingerprints:
                 state = self.return_monitor(key)
@@ -2483,6 +2050,12 @@ class OperatorRuntime:
                 "source_capture",
             )
         )
+        if result := self._policy_results.get(selection.source_id or ""):
+            details["policy_conditions"] = {
+                "status": result.status,
+                "conditions": deepcopy(result.conditions),
+                "error": result.error,
+            }
         details["captured_at"] = dt_util.utc_from_timestamp(now).isoformat()
         ingress_key = (
             ("manual", selection.request_id)
@@ -2494,32 +2067,18 @@ class OperatorRuntime:
         policy = self.policies.get(selection.source_id or "")
         if policy is None or selection.source_kind not in {"policy", "occurrence"}:
             return details
-        source = policy.get("input")
-        entity_id = (
-            source["entity_id"]
-            if source
-            else (policy.get("eligibility_entity") if selection.source_kind == "policy" else None)
+        result = self._policy_results.get(selection.source_id or "")
+        sources = (
+            tuple(
+                dict.fromkeys(
+                    entity_id for item in result.conditions for entity_id in item.get("sources", {})
+                )
+            )
+            if result
+            else ()
         )
-        if source:
-            details["qualification_seconds"] = source["qualification_seconds"]
-            if source["type"] == "qualified_numeric":
-                details["configured_comparison"] = source["comparison"]
-                details["configured_threshold"] = source["threshold"]
-        if entity_id is None:
-            return details
-        details["source_capture"] = "selection"
-        native = self.hass.states.get(entity_id)
-        details["source_entity"] = entity_id
-        if native is None:
-            return details
-        details.update(self._source_details(native))
-        value = self._state_value(entity_id)
-        if source and source["type"] == "qualified_numeric":
-            value = self._numeric_report(source, native).value
-        if value is None:
-            details.update(source_value=None, source_unit=None, source_updated_at=None)
-        else:
-            details["source_value"] = value
+        if len(sources) == 1 and (native := self.hass.states.get(sources[0])):
+            details.update(self._source_details(native), source_capture="selection")
         return details
 
     def _source_details(self, native: State) -> dict[str, object]:
@@ -2925,4 +2484,12 @@ class OperatorRuntime:
                 for key in ids
             },
             "requirements": deepcopy(self._requirement_details),
+            "policies": {
+                key: {
+                    "status": result.status,
+                    "conditions": deepcopy(result.conditions),
+                    "error": result.error,
+                }
+                for key, result in self._policy_results.items()
+            },
         }

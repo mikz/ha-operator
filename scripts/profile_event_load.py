@@ -21,10 +21,27 @@ def run(args):
     destination = args.output.resolve()
     destination.mkdir(parents=True, exist_ok=False)
     native_suite = args.suite == "native-policies"
+    conditions_suite = args.suite == "native-conditions"
+    if not conditions_suite and args.baseline is None:
+        raise ValueError("Comparable suites require a baseline package")
+    if native_suite:
+        with zipfile.ZipFile(args.candidate) as package:
+            release = json.loads(package.read("manifest.json"))
+        if tuple(int(part) for part in release["version"].split(".")[:2]) >= (0, 4):
+            raise ValueError(
+                "Legacy detector probe is not comparable after 0.3; use events "
+                "for identical inputs or native-conditions for candidate-only measurement"
+            )
     probe = (
         REPOSITORY
         / "tests/performance"
-        / ("test_native_policy_profile.py" if native_suite else "test_event_profile.py")
+        / (
+            "test_conditions_profile.py"
+            if conditions_suite
+            else "test_native_policy_profile.py"
+            if native_suite
+            else "test_event_profile.py"
+        )
     )
     probe_bytes = probe.read_bytes()
     workloads = (
@@ -32,6 +49,8 @@ def run(args):
         if native_suite
         else ("unchanged", "changed_burst", "followers_commands", "followers_reports")
     )
+    if conditions_suite:
+        workloads = ("native-conditions",)
     if args.workloads:
         if set(args.workloads) - set(workloads):
             raise ValueError("Workload is not part of the selected suite")
@@ -42,7 +61,11 @@ def run(args):
         for workload in workloads:
             repeats = range(args.repeats if measurement == "timing" else 1)
             for repeat in repeats:
-                variants = [("baseline", args.baseline), ("candidate", args.candidate)]
+                variants = (
+                    [("candidate", args.candidate)]
+                    if conditions_suite
+                    else [("baseline", args.baseline), ("candidate", args.candidate)]
+                )
                 if repeat % 2:
                     variants.reverse()
                 for label, package in variants:
@@ -103,7 +126,7 @@ def run(args):
                             stats.print_stats("ha_operator", 35)
                     print(name, f"CPU {receipt['cpu_seconds']:.4f}s", flush=True)
     comparison = []
-    if "timing" in args.measurements:
+    if "timing" in args.measurements and not conditions_suite:
         for workload in workloads:
             row = {"workload": workload}
             for label in ("baseline", "candidate"):
@@ -125,8 +148,13 @@ def run(args):
             comparison.append(row)
     result = {
         "suite": args.suite,
-        "baseline_operator_trace": "package_default",
-        "baseline_sha256": sha256(args.baseline.read_bytes()).hexdigest(),
+        "comparison_scope": "candidate-only native-policy probe"
+        if conditions_suite
+        else "identical probe and inputs in both packages",
+        "baseline_operator_trace": None if conditions_suite else "package_default",
+        "baseline_sha256": None
+        if conditions_suite
+        else sha256(args.baseline.read_bytes()).hexdigest(),
         "candidate_sha256": sha256(args.candidate.read_bytes()).hexdigest(),
         "probe_sha256": sha256(probe_bytes).hexdigest(),
         "batches": args.batches,
@@ -142,12 +170,16 @@ def run(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--baseline", type=Path, required=True)
+    parser.add_argument(
+        "--baseline", type=Path, help="Required for comparable event/legacy-policy suites"
+    )
     parser.add_argument("--candidate", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--batches", type=int, default=300)
     parser.add_argument("--repeats", type=int, default=3)
-    parser.add_argument("--suite", choices=("events", "native-policies"), default="events")
+    parser.add_argument(
+        "--suite", choices=("events", "native-policies", "native-conditions"), default="events"
+    )
     parser.add_argument("--workloads", nargs="+", help="Run only these workloads from the suite")
     parser.add_argument(
         "--measurements",

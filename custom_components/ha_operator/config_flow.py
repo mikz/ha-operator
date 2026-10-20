@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from datetime import date, time, timedelta
 from types import MappingProxyType
 from typing import Any, cast
 
@@ -20,6 +20,8 @@ from homeassistant.config_entries import (
 from homeassistant.core import callback
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import selector
+from homeassistant.helpers.template import Template
+from homeassistant.util import dt as dt_util
 
 from .configuration import (
     COMMANDS,
@@ -29,7 +31,22 @@ from .configuration import (
     validate_configuration,
 )
 from .const import DOMAIN, NAME
-from .data import ResourceConfig, SubentryConfig
+from .data import PolicyConfig, ResourceConfig, SubentryConfig
+
+
+def _native_config_value(value: Any) -> Any:
+    """Store native selector output as config, not bound runtime objects."""
+    if isinstance(value, Template):
+        return value.template
+    if isinstance(value, timedelta):
+        return {"seconds": value.total_seconds()}
+    if isinstance(value, (date, time)):
+        return value.isoformat()
+    if isinstance(value, dict):
+        return {key: _native_config_value(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_native_config_value(item) for item in value]
+    return value
 
 
 def _entity(*, domains: list[str] | None = None, multiple: bool = False) -> selector.EntitySelector:
@@ -65,7 +82,7 @@ def _options_schema(options: dict[str, Any] | None = None) -> vol.Schema:
 class OperatorConfigFlow(ConfigFlow, domain=DOMAIN):
     """Create the single integration; resources are native subentries."""
 
-    VERSION = 3
+    VERSION = 4
 
     @staticmethod
     @callback
@@ -145,6 +162,81 @@ class OperatorSubentryFlow(ConfigSubentryFlow):
         self, user_input: dict[str, Any], current: ConfigSubentry | None
     ) -> SubentryConfig:
         entry = self._get_entry()
+        if self.kind == "resource" and user_input.get("kind") == "number":
+            user_input = dict(user_input)
+            actor = self.hass.states.get(user_input.get("entity_id", ""))
+            existing_number = current is not None and current.data.get("kind") == "number"
+            native_unit = actor.attributes.get("unit_of_measurement") if actor else None
+            requested_unit = (
+                user_input.get(
+                    "unit_of_measurement",
+                    current.data.get("unit_of_measurement")
+                    if existing_number and current
+                    else native_unit,
+                )
+                or None
+            )
+            if (
+                current
+                and existing_number
+                and requested_unit != current.data.get("unit_of_measurement")
+            ):
+                runtime = getattr(entry, "runtime_data", None)
+                now = dt_util.utcnow().timestamp()
+                outstanding = any(
+                    item.subentry_type == "policy"
+                    and item.data.get("resource_id") == current.subentry_id
+                    and "value" in item.data.get("target", {})
+                    for item in entry.subentries.values()
+                )
+                outstanding |= "value" in user_input.get("default_target", {})
+                outstanding |= any(
+                    item.subentry_type == "requirement"
+                    and any(
+                        provider.get("resource_id") == current.subentry_id
+                        and "value" in provider.get("target", {})
+                        for provider in item.data.get("providers", [])
+                    )
+                    for item in entry.subentries.values()
+                )
+                if runtime is None or runtime._closed:
+                    raise ConfigurationError(
+                        "number_rebind",
+                        "Load the integration and release numeric intent before rebinding",
+                        translation_key="config_number_binding",
+                    )
+                lease = runtime.manual(current.subentry_id)
+                outstanding |= (
+                    lease is not None
+                    and lease.active(now)
+                    and lease.target is not None
+                    and lease.target.value is not None
+                )
+                outstanding |= any(
+                    item.get("target", {}).get("value") is not None
+                    and not item.get("skipped")
+                    and item["expires_at"] > now
+                    and runtime.policies.get(item["policy_id"], {}).get("resource_id")
+                    == current.subentry_id
+                    for item in runtime._state["occurrences"].values()
+                )
+                if outstanding:
+                    raise ConfigurationError(
+                        "number_rebind",
+                        "Release numeric requests and remove fixed targets before rebinding",
+                        translation_key="config_number_binding",
+                    )
+            if (
+                not existing_number
+                or current is None
+                or requested_unit != current.data.get("unit_of_measurement")
+            ) and requested_unit != native_unit:
+                raise ConfigurationError(
+                    "number_rebind",
+                    "Bound unit must match the selected actor",
+                    translation_key="config_number_binding",
+                )
+            user_input["unit_of_measurement"] = requested_unit
         candidate_id = current.subentry_id if current else "__new__"
         candidate = ConfigSubentry(
             subentry_type=self.kind,
@@ -174,16 +266,13 @@ class OperatorSubentryFlow(ConfigSubentryFlow):
         placeholders: dict[str, str] = {}
         if user_input is not None:
             try:
+                user_input = _native_config_value(user_input)
                 data = self._validated_data(user_input, current)
                 if self.kind == "resource":
                     from .native_conditions import NativeConditionList
 
                     resource = cast(ResourceConfig, data)
                     lists = list(resource.get("command_conditions", {}).values())
-                    for check in resource.get("health_checks", []):
-                        lists.append(check["conditions"])
-                        if "qualification" in check:
-                            lists.append(check["qualification"])
                     for configs in lists:
                         native = NativeConditionList(self.hass, configs)
                         try:
@@ -200,6 +289,32 @@ class OperatorSubentryFlow(ConfigSubentryFlow):
                                 )
                         finally:
                             native.async_unload()
+                if self.kind == "policy":
+                    from homeassistant.helpers import config_validation as cv
+                    from homeassistant.helpers import trigger
+
+                    from .native_conditions import NativeConditionList
+
+                    try:
+                        for field in ("triggers", "cancel_triggers"):
+                            await trigger.async_validate_trigger_config(
+                                self.hass, cv.TRIGGER_SCHEMA(data.get(field, []))
+                            )
+                        policy_data = cast(PolicyConfig, data)
+                        native = NativeConditionList(self.hass, policy_data.get("conditions", []))
+                        try:
+                            await native.async_setup()
+                            if native.setup_error:
+                                raise ValueError(native.setup_error)
+                        finally:
+                            native.async_unload()
+                    except Exception as err:
+                        raise ConfigurationError(
+                            "invalid_conditions",
+                            str(err),
+                            translation_key="config_invalid_conditions",
+                            placeholders={"field": "policy", "error": str(err)},
+                        ) from err
             except ConfigurationError as err:
                 errors["base"] = err.translation_key
                 placeholders.update(err.translation_placeholders)
@@ -210,6 +325,12 @@ class OperatorSubentryFlow(ConfigSubentryFlow):
                     )
                 return self.async_create_entry(title=data["name"], data=dict(data))
         values = user_input if user_input is not None else dict(current.data) if current else {}
+        if (
+            self.kind == "resource"
+            and values.get("kind") == "number"
+            and values.get("unit_of_measurement") is None
+        ):
+            values = {**values, "unit_of_measurement": ""}
         return self.async_show_form(
             step_id=step,
             data_schema=self.add_suggested_values_to_schema(self._schema(), values),
@@ -235,7 +356,10 @@ class ResourceFlow(OperatorSubentryFlow):
             vol.Required("kind"): selector.SelectSelector(
                 {"options": list(KINDS), "mode": selector.SelectSelectorMode.DROPDOWN}
             ),
-            vol.Optional("entity_id"): _entity(domains=["cover", "fan", "switch"]),
+            vol.Optional("unit_of_measurement"): selector.TextSelector(),
+            vol.Optional("entity_id"): _entity(
+                domains=["cover", "fan", "switch", "number", "select"]
+            ),
             vol.Optional("outputs"): _entity(domains=["switch"], multiple=True),
             vol.Optional("profiles"): selector.ObjectSelector(),
             vol.Optional("default_target"): selector.ObjectSelector(),
@@ -249,18 +373,6 @@ class ResourceFlow(OperatorSubentryFlow):
                         command: {"selector": selector.ConditionSelector()} for command in commands
                     },
                     "translation_key": "command_conditions",
-                }
-            ),
-            vol.Optional("health_checks"): selector.ObjectSelector(
-                {
-                    "multiple": True,
-                    "label_field": "alias",
-                    "fields": {
-                        "alias": {"selector": selector.TextSelector(), "required": True},
-                        "conditions": {"selector": selector.ConditionSelector(), "required": True},
-                        "qualification": {"selector": selector.ConditionSelector()},
-                    },
-                    "translation_key": "health_checks",
                 }
             ),
             vol.Optional("return_monitor"): selector.ObjectSelector(
@@ -293,9 +405,9 @@ class ResourceFlow(OperatorSubentryFlow):
             ),
         }
         for key, default in RESOURCE_DEFAULTS.items():
-            fields[vol.Optional(key, default=default)] = (
-                _number(0, 100) if key == "tolerance" else _number()
-            )
+            fields[
+                vol.Optional(key) if key == "tolerance" else vol.Optional(key, default=default)
+            ] = _number(0) if key == "tolerance" else _number()
         return vol.Schema(fields)
 
 
@@ -303,98 +415,6 @@ class PolicyFlow(OperatorSubentryFlow):
     """Configure ordinary state-backed or explicitly submitted occurrence policies."""
 
     kind = "policy"
-
-    async def _async_step(self, step: str, user_input: dict[str, Any] | None) -> SubentryFlowResult:
-        if not self._get_entry().get_subentries_of_type("resource"):
-            return self.async_abort(reason="no_resources")
-        if user_input is None:
-            result = await super()._async_step(step, None)
-            if step == "reconfigure" and (schema := result.get("data_schema")) is not None:
-                current_data = self._get_reconfigure_subentry().data
-                result["data_schema"] = self.add_suggested_values_to_schema(
-                    schema,
-                    {"input_type": current_data.get("input", {}).get("type", "legacy")},
-                )
-            return result
-        data = dict(user_input)
-        input_type = data.pop("input_type", "legacy")
-        if input_type == "legacy":
-            return await super()._async_step(step, data)
-        data["kind"] = "state" if input_type == "qualified_numeric" else "occurrence"
-        current = self._get_reconfigure_subentry() if step == "reconfigure" else None
-        try:
-            if "eligibility_entity" in data or "eligibility_state" in data:
-                raise ConfigurationError(
-                    "input_eligibility_conflict",
-                    "Remove helper eligibility fields for a native input",
-                    translation_key="config_input_eligibility_conflict",
-                )
-            self._validated_data(data, current)
-        except ConfigurationError as err:
-            return self.async_show_form(
-                step_id=step,
-                data_schema=self.add_suggested_values_to_schema(self._schema(), user_input),
-                errors={"base": err.translation_key},
-                description_placeholders=err.translation_placeholders,
-            )
-        self._policy_data = data
-        self._policy_step = step
-        self._input_type = input_type
-        return await self._async_input_step(None)
-
-    async def async_step_qualified_numeric(
-        self, user_input: dict[str, Any] | None = None
-    ) -> SubentryFlowResult:
-        return await self._async_input_step(user_input)
-
-    async def async_step_timer_episode(
-        self, user_input: dict[str, Any] | None = None
-    ) -> SubentryFlowResult:
-        return await self._async_input_step(user_input)
-
-    async def _async_input_step(self, user_input: dict[str, Any] | None) -> SubentryFlowResult:
-        numeric = self._input_type == "qualified_numeric"
-        fields: dict[
-            vol.Marker, selector.EntitySelector | selector.NumberSelector | selector.TextSelector
-        ] = {
-            vol.Required("entity_id"): _entity(domains=["sensor" if numeric else "timer"]),
-            vol.Required("qualification_seconds"): _number(),
-        }
-        if numeric:
-            fields.update(
-                {
-                    vol.Required("threshold"): selector.NumberSelector(
-                        {"step": "any", "mode": selector.NumberSelectorMode.BOX}
-                    ),
-                    vol.Required("unit"): selector.TextSelector(),
-                }
-            )
-        else:
-            fields[vol.Required("request_seconds")] = _number()
-        errors: dict[str, str] | None = {}
-        placeholders: Mapping[str, str] | None = {}
-        if user_input is not None:
-            source = {**user_input, "type": self._input_type}
-            if numeric:
-                source["comparison"] = "below"
-            result = await super()._async_step(
-                self._policy_step, {**self._policy_data, "input": source}
-            )
-            if result["type"] != "form":
-                return result
-            errors, placeholders = result["errors"], result["description_placeholders"]
-        current = (
-            self._get_reconfigure_subentry().data.get("input", {})
-            if self._policy_step == "reconfigure"
-            else {}
-        )
-        values = current if user_input is None else user_input
-        return self.async_show_form(
-            step_id=self._input_type,
-            data_schema=self.add_suggested_values_to_schema(vol.Schema(fields), values),
-            errors=errors,
-            description_placeholders=placeholders,
-        )
 
     def _schema(self) -> vol.Schema:
         resources = self._get_entry().get_subentries_of_type("resource")
@@ -412,16 +432,11 @@ class PolicyFlow(OperatorSubentryFlow):
                 ),
                 vol.Required("kind"): selector.SelectSelector({"options": ["state", "occurrence"]}),
                 vol.Optional("priority", default=0): _number(-1000000, 1000000),
-                vol.Optional("input_type", default="legacy"): selector.SelectSelector(
-                    {
-                        "options": ["legacy", "qualified_numeric", "timer_episode"],
-                        "translation_key": "policy_input_type",
-                        "mode": selector.SelectSelectorMode.DROPDOWN,
-                    }
-                ),
                 vol.Optional("target"): selector.ObjectSelector(),
-                vol.Optional("eligibility_entity"): _entity(),
-                vol.Optional("eligibility_state"): selector.TextSelector(),
+                vol.Optional("conditions"): selector.ConditionSelector(),
+                vol.Optional("triggers"): selector.TriggerSelector(),
+                vol.Optional("duration"): selector.DurationSelector(),
+                vol.Optional("cancel_triggers"): selector.TriggerSelector(),
                 vol.Optional("target_entity"): _entity(),
                 vol.Optional("intent_id"): selector.SelectSelector(
                     {
@@ -434,7 +449,7 @@ class PolicyFlow(OperatorSubentryFlow):
                 ),
                 vol.Optional("target_attribute"): selector.TextSelector(),
                 vol.Optional("target_field"): selector.SelectSelector(
-                    {"options": ["position", "on", "percentage", "direction"]}
+                    {"options": ["position", "on", "percentage", "direction", "value", "option"]}
                 ),
             }
         )

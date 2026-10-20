@@ -5,7 +5,6 @@ from __future__ import annotations
 from typing import cast
 
 from .data import StoredSnapshot
-from .policy_inputs import NumericState, TimerState
 from .return_monitor import ReturnMonitorState
 
 _MAP_KEYS = (
@@ -15,7 +14,6 @@ _MAP_KEYS = (
     "policy_enabled",
     "requests",
     "intents",
-    "policy_inputs",
     "return_monitors",
 )
 
@@ -32,7 +30,6 @@ def empty_state() -> StoredSnapshot:
         "policy_enabled": {},
         "requests": {},
         "intents": {},
-        "policy_inputs": {},
         "return_monitors": {},
     }
 
@@ -64,29 +61,8 @@ def validate_state(state: object) -> StoredSnapshot:
             ReturnMonitorState.from_record(item["state"])
         except (ValueError, TypeError) as err:
             raise InvalidSnapshot("Invalid return monitor state") from err
-    for item in state["policy_inputs"].values():
-        if not isinstance(item, dict) or set(item) != {"type", "fingerprint", "state"}:
-            raise InvalidSnapshot("Invalid policy input record")
-        fingerprint = item["fingerprint"]
-        if (
-            not isinstance(fingerprint, str)
-            or len(fingerprint) != 64
-            or any(c not in "0123456789abcdef" for c in fingerprint)
-        ):
-            raise InvalidSnapshot("Invalid policy input fingerprint")
-        if not isinstance(item["type"], str):
-            raise InvalidSnapshot("Invalid policy input type")
-        models: dict[str, type[NumericState] | type[TimerState]] = {
-            "qualified_numeric": NumericState,
-            "timer_episode": TimerState,
-        }
-        model = models.get(item["type"])
-        if model is None or not isinstance(item["state"], dict):
-            raise InvalidSnapshot("Invalid policy input type or state")
-        try:
-            model.from_record(item["state"])
-        except (ValueError, TypeError) as err:
-            raise InvalidSnapshot("Invalid policy input state") from err
+    # The incompatible configuration migration already rejected live legacy inputs.
+    state = {key: value for key, value in state.items() if key != "policy_inputs"}
     # Only envelope/maps/input-state validation has run. Runtime owns the remaining
     # manual, occurrence and request semantic checks before control admission.
     return cast(StoredSnapshot, state)

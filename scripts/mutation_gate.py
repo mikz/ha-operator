@@ -65,29 +65,23 @@ MUTANTS = (
         ),
     ),
     Mutant(
-        "native_timer_survives_exact_expiry",
-        "custom_components/ha_operator/policy_inputs.py",
-        'if state.phase in ("qualifying", "accepted"):\n'
-        "        assert state.expires_at is not None\n        if now >= state.expires_at:",
-        'if state.phase in ("qualifying", "accepted"):\n'
-        "        assert state.expires_at is not None\n        if now > state.expires_at:",
+        "native_owned_expiry_does_not_retire_slot",
+        "custom_components/ha_operator/runtime.py",
+        'if item.get("trigger_owned") and item["expires_at"] <= _now()',
+        'if item.get("trigger_owned") and item["expires_at"] < _now()',
         (
-            "tests/unit/test_policy_inputs.py::"
-            "test_accepted_request_expires_exactly_once_and_cannot_replay",
-            "tests/unit/test_policy_inputs.py::"
-            "test_late_qualification_never_extends_request_or_admits_at_expiry",
+            "tests/integration/test_native_policies.py::test_trigger_owned_slot_retires_at_exact_expiry",
         ),
     ),
     Mutant(
-        "pending_finish_becomes_accepted_before_processing",
-        "custom_components/ha_operator/policy_inputs.py",
-        'event.kind == "finish"\n'
-        '                    and (state.phase == "qualifying" '
-        "or event.accepted_at_capture is False)",
-        'event.kind == "finish"\n                    and state.phase == "qualifying"',
+        "native_replacements_grow_stored_occurrences",
+        "custom_components/ha_operator/runtime.py",
+        "                self._retire_trigger_requests(state, policy_id)\n"
+        '                state["occurrences"][key] = {',
+        "                # Mutant: retain old owned records.\n"
+        '                state["occurrences"][key] = {',
         (
-            "tests/unit/test_policy_inputs.py::"
-            "test_finish_captured_before_admission_rejects_later_request",
+            "tests/integration/test_native_policy_boundaries.py::test_native_replacement_cancel_and_expiry_keep_one_slot_and_external_id",
         ),
     ),
     Mutant(
@@ -100,20 +94,22 @@ MUTANTS = (
         ("tests/unit/test_return_monitor.py::test_mismatch_or_unknown_cannot_confirm",),
     ),
     Mutant(
-        "pending_source_fact_dispatches_inside_adapter",
+        "restored_owned_occurrence_dispatches_before_readiness",
         "custom_components/ha_operator/runtime.py",
-        "            def still_current(generation: int = generation, "
-        "target: Target = target) -> bool:\n"
-        "                if self._input_ingress[resource_id] "
-        "!= self._input_processed[resource_id]:\n"
-        "                    return False",
-        "            def still_current(generation: int = generation, "
-        "target: Target = target) -> bool:\n"
-        "                if False:\n"
-        "                    return False",
+        "                    and owner.ready\n                    and not owner.closed",
+        "                    and not owner.closed",
         (
-            "tests/integration/test_policy_inputs_runtime.py::"
-            "test_pending_cancel_is_checked_inside_inflight_adapter",
+            "tests/integration/test_native_policy_boundaries.py::test_restored_request_waits_for_both_registrations_and_stays_inhibited_on_failure",
+        ),
+    ),
+    Mutant(
+        "rejected_native_callback_interrupts_manual_work",
+        "custom_components/ha_operator/runtime.py",
+        '        resource_id = config["resource_id"]\n        if (\n            self._closed',
+        '        resource_id = config["resource_id"]\n'
+        "        self._generation[resource_id] += 1\n        if (\n            self._closed",
+        (
+            "tests/integration/test_native_policy_boundaries.py::test_rejected_admission_and_empty_cancel_do_not_interrupt_manual_relay",
         ),
     ),
 )

@@ -30,7 +30,7 @@ def test_negative_oversized_runtime_number_uses_native_semantic_validation():
     assert raised.value.translation_placeholders == {"field": "duration"}
 
 
-@pytest.mark.parametrize("key", ["expiry", "effective_expiry", "next_attempt", "input_deadline"])
+@pytest.mark.parametrize("key", ["expiry", "effective_expiry", "next_attempt"])
 @pytest.mark.parametrize("stamp", [None, 0, 1.8e9, 1e100, 1.8e12])
 def test_timestamp_properties_preserve_numeric_deadlines_and_representable_dates(key, stamp):
     runtime = SimpleNamespace(
@@ -41,19 +41,13 @@ def test_timestamp_properties_preserve_numeric_deadlines_and_representable_dates
         manual=lambda _: SimpleNamespace(expires_at=stamp),
         selections={"roof": SimpleNamespace(expires_at=stamp)},
         next_attempts={"roof": stamp},
-        policy_input=lambda _: SimpleNamespace(due_at=stamp),
     )
-    entity = (
-        sensor.PolicyInputSensor(runtime, "roof", key)
-        if key == "input_deadline"
-        else sensor.ResourceSensor(runtime, "roof", key)
-    )
+    entity = sensor.ResourceSensor(runtime, "roof", key)
     expected = datetime.fromtimestamp(stamp, UTC) if stamp in (0, 1.8e9) else None
     assert entity.native_value == expected
     assert runtime.manual("roof").expires_at == stamp
     assert runtime.selections["roof"].expires_at == stamp
     assert runtime.next_attempts["roof"] == stamp
-    assert runtime.policy_input("roof").due_at == stamp
 
 
 @pytest.mark.parametrize("error", [OverflowError, ValueError, OSError])

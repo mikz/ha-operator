@@ -86,7 +86,9 @@ async def test_current_options_lock_blocks_command_already_waiting_for_actuator(
                 "resource_id": "roof",
                 "kind": "state",
                 "target": {"position": 70},
-                "eligibility_entity": "binary_sensor.schedule",
+                "conditions": [
+                    {"condition": "state", "entity_id": "binary_sensor.schedule", "state": "on"}
+                ],
             }
         }
     )

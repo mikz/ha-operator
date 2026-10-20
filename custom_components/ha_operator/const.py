@@ -2,8 +2,8 @@
 
 DOMAIN = "ha_operator"
 NAME = "HA Operator"
-VERSION = "0.3.0"
-PLATFORMS = ("cover", "fan", "switch", "sensor", "binary_sensor", "select", "button")
+VERSION = "0.4.0"
+PLATFORMS = ("cover", "fan", "switch", "sensor", "binary_sensor", "select", "button", "number")
 DEFAULT_MANUAL_DURATION = 1800.0
 DEFAULT_RETRY_INTERVAL = 300.0
 DEFAULT_COMMAND_INTERVAL = 30.0

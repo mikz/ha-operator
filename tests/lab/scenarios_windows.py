@@ -407,7 +407,7 @@ async def run_windows(lab):
                 "resource_id": resources[0],
                 "priority": 100,
                 "target": {"position": baseline},
-                "eligibility_entity": cold,
+                "conditions": [{"condition": "state", "entity_id": cold, "state": "on"}],
             },
         )
         await ha.request(
@@ -819,33 +819,24 @@ async def run_windows(lab):
 
 
 async def run_native_windows(lab, resources, entities, modes):
-    """Replace the synthetic helper writers through actual native subentry forms."""
+    """Native helper eligibility and trigger-owned requests; no legacy episode engine."""
     from .runner import ARTIFACTS, eventually
 
     ha, resource = lab.ha, resources[0]
-    temperature = "sensor.sim_window_temperature"
-    timer = "timer.lab_window_timer"
+    temperature, timer = "sensor.sim_window_temperature", "timer.lab_window_timer"
     evidence = {
-        "schema": 1,
-        "clock": "real wall clock, accelerated configured durations",
-        "qualification_seconds": 2,
-        "request_seconds": 12,
-        "demo_request_seconds": 18,
-        "warning_seconds": 6,
-        "restart_request_seconds": 180,
+        "schema": 2,
+        "clock": "real wall clock, accelerated native durations",
+        "behavior_changes": [
+            "Numeric qualification belongs to an independent native Template binary sensor.",
+            "Restarting an already active timer does not reset HA's state-for trigger.",
+            "Only configured cancel/pause events withdraw accepted trigger requests; "
+            "natural finish does not renew them.",
+            "Reload withdraws trigger-owned requests; no legacy episode restoration "
+            "or catch-up claim.",
+        ],
         "snapshots": [],
     }
-
-    async def diagnostics():
-        return (await ha.request("GET", f"/api/diagnostics/config_entry/{lab.entry}"))["data"]
-
-    async def input_state(policy):
-        data = await diagnostics()
-        return data["policies"][sha256(policy.encode()).hexdigest()[:12]]["input"]["state"]
-
-    async def monitor():
-        data = await diagnostics()
-        return data["resources"][sha256(resource.encode()).hexdigest()[:12]]["return_monitor"]
 
     async def explain():
         return (
@@ -858,52 +849,46 @@ async def run_native_windows(lab, resources, entities, modes):
             row["entity_id"] for row in registry if row.get("unique_id") == identifier + "_" + key
         )
 
-    async def temp(value, *, available=True):
+    async def monitor():
+        data = (await ha.request("GET", f"/api/diagnostics/config_entry/{lab.entry}"))["data"]
+        return data["resources"][sha256(resource.encode()).hexdigest()[:12]]["return_monitor"]
+
+    async def temp(value):
         await lab.sim(
-            "POST", "/admin/devices/window_temperature", {"value": value, "available": available}
+            "POST", "/admin/devices/window_temperature", {"value": value, "available": True}
         )
         await eventually(
-            lambda: ha.state(temperature),
-            lambda state: (
-                state["state"] == "unavailable"
-                if not available
-                else state["state"] not in {"unknown", "unavailable"}
-                and float(state["state"]) == value
-            ),
+            lambda: ha.state(temperature), lambda state: float(state["state"]) == value
         )
 
     async def timer_service(action, **data):
         await ha.service("timer", action, {"entity_id": timer, **data})
-
-    async def phase(policy, value):
-        return await eventually(lambda: input_state(policy), lambda state: state["phase"] == value)
 
     async def target(position):
         return await eventually(
             explain, lambda state: state["decision"]["target"]["position"] == position
         )
 
-    async def record(label):
-        value = {
-            "label": label,
-            "at": time.time(),
-            "explain": await explain(),
-            "numeric": await input_state(cold),
-            "timer": await input_state(timed),
-            "return": await monitor(),
-            "journal_seq": (await lab.sim())["journal_seq"],
-        }
-        evidence["snapshots"].append(value)
-        return value
+    async def accepted():
+        result = await eventually(
+            explain,
+            lambda item: (
+                item["selection"].get("source_id") == timed
+                and item["selection"].get("occurrence_id") is not None
+            ),
+        )
+        return result["selection"]
 
-    async def commands(marker):
-        return [
-            item
-            for item in await lab.journal()
-            if item["seq"] > marker
-            and item["device_id"] == "skylight"
-            and item["kind"] == "command"
-        ]
+    async def record(label):
+        evidence["snapshots"].append(
+            {
+                "label": label,
+                "at": time.time(),
+                "explain": await explain(),
+                "return": await monitor(),
+                "journal_seq": (await lab.sim())["journal_seq"],
+            }
+        )
 
     async with lab.scenario("WINDOW-NATIVE-CONFIGURATION"):
         retiring = [
@@ -929,13 +914,13 @@ async def run_native_windows(lab, resources, entities, modes):
             "resource_id": resource,
             "priority": 50,
             "target": {"position": 7},
-            "input": {
-                "type": "qualified_numeric",
-                "entity_id": temperature,
-                "threshold": 16,
-                "unit": "°C",
-                "qualification_seconds": 2,
-            },
+            "conditions": [
+                {
+                    "condition": "state",
+                    "entity_id": "binary_sensor.lab_native_cold_qualified",
+                    "state": "on",
+                }
+            ],
         }
         timer_config = {
             "name": "Window timed occurrence",
@@ -943,12 +928,14 @@ async def run_native_windows(lab, resources, entities, modes):
             "resource_id": resource,
             "priority": 20,
             "target": {"position": 100},
-            "input": {
-                "type": "timer_episode",
-                "entity_id": timer,
-                "qualification_seconds": 2,
-                "request_seconds": 12,
-            },
+            "duration": {"seconds": 12},
+            "triggers": [
+                {"trigger": "state", "entity_id": timer, "to": "active", "for": {"seconds": 2}}
+            ],
+            "cancel_triggers": [
+                {"trigger": "event", "event_type": event, "event_data": {"entity_id": timer}}
+                for event in ("timer.cancelled", "timer.paused")
+            ],
         }
         await ha.reconfigure_subentry(lab.entry, cold, "policy", cold_config)
         await ha.reconfigure_subentry(lab.entry, timed, "policy", timer_config)
@@ -973,161 +960,72 @@ async def run_native_windows(lab, resources, entities, modes):
             "/admin/devices/skylight",
             {"hidden_rain": False, "refuse_actions": [], "position": 7, "speed": 100},
         )
-        evidence["cutover"] = {
-            "retired_writers": retiring,
-            "resource_id": resource,
-            "cold_policy_id": cold,
-            "timer_policy_id": timed,
-        }
+        await temp(20)
         await record("native-configured")
 
-    async with lab.scenario("WINDOW-NATIVE-NUMERIC-QUALIFICATION"):
+    async with lab.scenario("WINDOW-NATIVE-HELPER-QUALIFICATION"):
         await temp(15)
-        started = await phase(cold, "qualifying")
-        await temp(14)
-        assert (await input_state(cold))["due_at"] == started["due_at"]
-        await temp(17)  # Await the raw HA report: the polling source must not coalesce warm/cold.
-        await phase(cold, "idle")
-        await temp(15)
-        reset = await phase(cold, "qualifying")
-        assert reset["due_at"] > started["due_at"]
-        await phase(cold, "qualified")
-        await record("numeric-qualified-after-ordered-warm-cold")
-
-    async with lab.scenario("WINDOW-NATIVE-NUMERIC-UNKNOWN-RECOVERY"):
-        await temp(17)
-        await phase(cold, "idle")
-        await temp(15)
-        started = await phase(cold, "qualifying")
-        await temp(15, available=False)
-        await asyncio.sleep(2.2)
-        unknown = await input_state(cold)
-        assert unknown["due_at"] == started["due_at"] and not unknown["qualified"]
-        await temp(15)
-        await phase(cold, "qualified")
-        assert (await input_state(cold))["due_at"] == started["due_at"]
-        await temp(15, available=False)
-        await lab.crash("restart")
-        await lab.ready()
-        recovered = await phase(cold, "recovering")
-        assert recovered["due_at"] == started["due_at"] and recovered["recovery_pending"]
-        await temp(15)
-        await phase(cold, "qualified")
-        await record("numeric-fresh-restart-report")
-        await temp(20)
-        await phase(cold, "idle")
-
-    async with lab.scenario("WINDOW-NATIVE-TIMER-LIFECYCLE"):
-        await timer_service("start")
-        first = await phase(timed, "qualifying")
-        await timer_service("start", duration="00:00:04")
-        second = await eventually(
-            lambda: input_state(timed), lambda state: state["episode_id"] != first["episode_id"]
+        await eventually(
+            lambda: ha.state("binary_sensor.lab_native_cold_qualified"),
+            lambda item: item["state"] == "on",
         )
-        assert second["expires_at"] >= first["expires_at"]
-        await phase(timed, "accepted")
-        await lab.wait_position(100)
-        accepted = await input_state(timed)
-        await eventually(lambda: ha.state(timer), lambda state: state["state"] == "idle")
-        assert (await input_state(timed))["expires_at"] == accepted["expires_at"]
-        await target(100)
-        await record("accepted-natural-finish-fixed-expiry")
-        await phase(timed, "expired")
-        await lab.wait_position(7)
-        await timer_service("start", duration="00:01:00")
-        await phase(timed, "accepted")
-        await timer_service("pause")
-        await phase(timed, "suppressed")
-        marker = (await lab.sim())["journal_seq"]
-        await timer_service("start")  # Resume from paused does not open again.
-        await asyncio.sleep(2.5)
-        assert (await input_state(timed))["phase"] == "suppressed"
-        assert not [item for item in await commands(marker) if item["data"].get("position", 0) > 7]
-        await timer_service("start")  # Active restart after resume is a new episode.
-        await phase(timed, "accepted")
-        await timer_service("cancel")
-        await phase(timed, "suppressed")
-        await record("timer-pause-resume-cancel")
-
-    async with lab.scenario("WINDOW-NATIVE-TIMER-PRECEDENCE"):
-        await timer_service("start")
-        original = await phase(timed, "accepted")
-        await temp(15)
-        await phase(cold, "qualified")
-        await target(7)  # Stronger cold policy wins while the opening remains recorded.
-        assert (await input_state(timed))["expires_at"] == original["expires_at"]
+        await eventually(explain, lambda item: item["selection"].get("source_id") == cold)
+        await target(7)
         await ha.service(
             "ha_operator",
             "request",
-            {"resource_id": resource, "target": {"position": 35}, "duration": 4},
+            {"resource_id": resource, "target": {"position": 35}, "duration": 2},
         )
         await target(35)
-        await lab.wait_position(35)
-        assert (await input_state(timed))["expires_at"] == original["expires_at"]
-        await record("manual-over-cold-over-timer")
-        await ha.service("ha_operator", "release", {"resource_id": resource})
+        await target(7)
         await temp(20)
+        await eventually(
+            lambda: ha.state("binary_sensor.lab_native_cold_qualified"),
+            lambda item: item["state"] == "off",
+        )
+        await record("independent-native-helper")
+
+    async with lab.scenario("WINDOW-NATIVE-TIMER-QUALIFY-CANCEL-EXPIRY"):
+        await timer_service("start", duration=6)
+        original = await accepted()
+        await target(100)
+        await lab.wait_position(100)
+        await eventually(lambda: ha.state(timer), lambda item: item["state"] == "idle")
+        assert (await accepted())["expires_at"] == original["expires_at"]
+        await target(7)
+        await lab.wait_position(7)
+        await timer_service("start", duration=30)
+        await accepted()
+        await timer_service("pause")
+        await target(7)
         await timer_service("cancel")
+        await timer_service("start", duration=30)
+        await accepted()
+        await timer_service("cancel")
+        await target(7)
+        await record("native-pause-cancel-and-absolute-expiry")
 
-    for action in ("restart", "kill"):
-        async with lab.scenario("WINDOW-NATIVE-TIMER-" + action.upper()):
-            long_timer = {
-                **timer_config,
-                "input": {**timer_config["input"], "request_seconds": 180},
-            }
-            await ha.reconfigure_subentry(lab.entry, timed, "policy", long_timer)
-            await timer_service("start")
-            original = await phase(timed, "accepted")
-            await lab.wait_position(100)
-            simulator_id = (await lab.sim(path="/health"))["instance_id"]
-            saved_request = {
-                "kind": "timer",
-                "key": timed,
-                "identity_hash": original["episode_id"],
-                "expires_at": original["expires_at"],
-            }
-            await lab.crash(action, saved_request=saved_request)
-            if action == "kill":
-                await lab.crash("start")
-            await lab.ready()
-            restored = await phase(timed, "accepted")
-            assert restored["expires_at"] == original["expires_at"]
-            assert restored["episode_id"] == original["episode_id"]
-            assert (await lab.sim(path="/health"))["instance_id"] == simulator_id
-            await target(100)
-            await record("accepted-timer-" + action)
-            await timer_service("cancel")
-
-    async with lab.scenario("WINDOW-NATIVE-PENDING-RELOAD"):
-        pending_config = {
-            **timer_config,
-            "input": {**timer_config["input"], "qualification_seconds": 6},
-        }
-        await ha.reconfigure_subentry(lab.entry, timed, "policy", pending_config)
-        await timer_service("start")
-        await phase(timed, "qualifying")
+    async with lab.scenario("WINDOW-NATIVE-PENDING-RELOAD-OBSERVE"):
+        await timer_service("start", duration=30)
         await ha.reload_entry(lab.entry)
-        await phase(timed, "suppressed")
-        marker = (await lab.sim())["journal_seq"]
-        await asyncio.sleep(6.3)
-        assert (await input_state(timed))["phase"] == "suppressed"
-        assert not [item for item in await commands(marker) if item["data"].get("position", 0) > 7]
-        await record("pending-reload-no-catch-up")
+        await asyncio.sleep(2.5)
+        assert (await explain())["selection"].get("source_id") != timed
         await timer_service("cancel")
-        await ha.reconfigure_subentry(lab.entry, timed, "policy", timer_config)
-
-    async with lab.scenario("WINDOW-NATIVE-OBSERVE-ZERO"):
         await ha.service("select", "select_option", {"entity_id": modes[0], "option": "observe"})
         marker = (await lab.sim())["journal_seq"]
-        await timer_service("start")
+        await timer_service("start", duration=30)
         await asyncio.sleep(2.5)
-        await phase(timed, "suppressed")
-        assert not await commands(marker)
+        assert (await explain())["selection"].get("source_id") != timed
+        assert not [
+            row
+            for row in await lab.journal()
+            if row["seq"] > marker and row["device_id"] == "skylight" and row["kind"] == "command"
+        ]
         await ha.service("select", "select_option", {"entity_id": modes[0], "option": "live"})
         await asyncio.sleep(2.5)
-        assert not [item for item in await commands(marker) if item["data"].get("position", 0) > 7]
+        assert (await explain())["selection"].get("source_id") != timed
         await timer_service("cancel")
-        await record("observe-rejected-without-replay")
+        await record("native-no-inactive-replay")
 
     async with lab.scenario("WINDOW-NATIVE-DASHBOARD"):
         scalars = {
@@ -1191,11 +1089,11 @@ async def run_native_windows(lab, resources, entities, modes):
         )
 
     async with lab.scenario("WINDOW-NATIVE-RETURN-DEMO"):
-        demo_config = {**timer_config, "input": {**timer_config["input"], "request_seconds": 18}}
+        demo_config = {**timer_config, "duration": {"seconds": 18}}
         await ha.reconfigure_subentry(lab.entry, timed, "policy", demo_config)
         await lab.wait_position(7)
         await timer_service("start")
-        original = await phase(timed, "accepted")
+        original = await accepted()
         await target(100)
         await screenshot("opening")
         marker = (await lab.sim())["journal_seq"]
@@ -1212,11 +1110,11 @@ async def run_native_windows(lab, resources, entities, modes):
                 for item in items
             ),
         )
-        assert (await input_state(timed))["expires_at"] == original["expires_at"]
+        assert (await explain())["selection"]["expires_at"] == original["expires_at"]
         await screenshot("refusal")
         # End the opening with the raw device at 100%, refusing the return command.
         await lab.sim("POST", "/admin/devices/skylight", {"position": 100})
-        await phase(timed, "expired")
+        await target(7)
         await target(7)
         await eventually(explain, lambda state: state["observation"]["target"]["position"] == 100)
         returning = await eventually(monitor, lambda state: state["phase"] == "waiting")

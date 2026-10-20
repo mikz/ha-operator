@@ -97,12 +97,6 @@ async def test_native_check_ui_add_edit_remove_preserves_resource(hass, native_s
     entry.add_to_hass(hass)
     form = await _start(hass, entry, "resource")
     fields = {key.schema: value for key, value in form["data_schema"].schema.items()}
-    health = fields["health_checks"]
-    assert health.config["multiple"]
-    assert isinstance(health.config["fields"]["conditions"]["selector"], selector.ConditionSelector)
-    assert isinstance(
-        health.config["fields"]["qualification"]["selector"], selector.ConditionSelector
-    )
     command = fields["command_conditions"]
     assert isinstance(
         command.config["fields"]["set_cover_position"]["selector"], selector.ConditionSelector
@@ -116,58 +110,26 @@ async def test_native_check_ui_add_edit_remove_preserves_resource(hass, native_s
                 {"condition": "state", "entity_id": "binary_sensor.inlet", "state": "on"}
             ]
         },
-        "health_checks": [
-            {
-                "alias": "Feedback",
-                "conditions": [{"condition": "template", "value_template": "{{ true }}"}],
-            }
-        ],
     }
     result = await hass.config_entries.subentries.async_configure(form["flow_id"], data)
     assert result["type"] is FlowResultType.CREATE_ENTRY
     original = next(iter(entry.subentries.values()))
     edit = await entry.start_subentry_reconfigure_flow(hass, original.subentry_id)
-    data["health_checks"][0]["alias"] = "Reporting"
+    data["command_conditions"]["set_cover_position"][0]["state"] = "off"
     result = await hass.config_entries.subentries.async_configure(edit["flow_id"], data)
     assert result["reason"] == "reconfigure_successful"
-    assert entry.subentries[original.subentry_id].data["health_checks"][0]["alias"] == "Reporting"
+    assert (
+        entry.subentries[original.subentry_id].data["command_conditions"]["set_cover_position"][0][
+            "state"
+        ]
+        == "off"
+    )
     edit = await entry.start_subentry_reconfigure_flow(hass, original.subentry_id)
     result = await hass.config_entries.subentries.async_configure(
         edit["flow_id"], {"name": "Window", "kind": "cover", "entity_id": "cover.raw"}
     )
     assert result["reason"] == "reconfigure_successful"
-    assert "health_checks" not in entry.subentries[original.subentry_id].data
     assert "command_conditions" not in entry.subentries[original.subentry_id].data
-
-
-async def test_native_qualification_compile_error_stays_in_resource_form(hass, native_sources):
-    entry = MockConfigEntry(domain=DOMAIN)
-    entry.add_to_hass(hass)
-    form = await _start(hass, entry, "resource")
-    result = await hass.config_entries.subentries.async_configure(
-        form["flow_id"],
-        {
-            "name": "Window",
-            "kind": "cover",
-            "entity_id": "cover.raw",
-            "health_checks": [
-                {
-                    "alias": "Startup",
-                    "conditions": [],
-                    "qualification": [
-                        {
-                            "condition": "template",
-                            "value_template": "{{ true }}",
-                            "enabled": "{{ 1 / 0 }}",
-                        }
-                    ],
-                }
-            ],
-        },
-    )
-    assert result["type"] is FlowResultType.FORM
-    assert result["errors"] == {"base": "config_invalid_conditions"}
-    assert not entry.subentries
 
 
 async def test_policy_needs_resource_then_creates(hass, native_sources):
@@ -188,130 +150,6 @@ async def test_policy_needs_resource_then_creates(hass, native_sources):
     assert result["type"] is FlowResultType.CREATE_ENTRY
     assert result["data"]["resource_id"] == resource.subentry_id
     assert result["data"]["priority"] == 0
-
-
-@pytest.mark.parametrize("input_type", ["qualified_numeric", "timer_episode"])
-async def test_native_policy_forms_create_then_reconfigure_type_and_legacy(
-    hass, native_sources, input_type
-):
-    hass.states.async_set("sensor.temperature", "15", {"unit_of_measurement": "°C"})
-    hass.states.async_set("timer.ventilation", "idle")
-    entry = MockConfigEntry(domain=DOMAIN)
-    entry.add_to_hass(hass)
-    resource = await _resource(hass, entry)
-    initial = await _start(hass, entry, "policy")
-    schema = initial["data_schema"].schema
-    assert schema["input_type"].config["options"] == [
-        "legacy",
-        "qualified_numeric",
-        "timer_episode",
-    ]
-    assert next(key for key in schema if key == "input_type").default() == "legacy"
-    base = {
-        "name": "Native",
-        "resource_id": resource.subentry_id,
-        "kind": "state" if input_type == "qualified_numeric" else "occurrence",
-        "target": {"position": 7},
-        "priority": 42,
-        "input_type": input_type,
-    }
-    second = await hass.config_entries.subentries.async_configure(initial["flow_id"], base)
-    assert second["step_id"] == input_type
-    assert len(entry.subentries) == 1
-    fields = second["data_schema"].schema
-    numeric = input_type == "qualified_numeric"
-    assert set(fields) == (
-        {"entity_id", "threshold", "unit", "qualification_seconds"}
-        if numeric
-        else {"entity_id", "qualification_seconds", "request_seconds"}
-    )
-    assert fields["entity_id"].config["filter"] == [{"domain": ["sensor" if numeric else "timer"]}]
-    native = {
-        "entity_id": "sensor.temperature" if numeric else "timer.ventilation",
-        "qualification_seconds": 60,
-    }
-    native.update({"threshold": 16, "unit": "°C"} if numeric else {"request_seconds": 1800})
-    created = await hass.config_entries.subentries.async_configure(second["flow_id"], native)
-    assert created["type"] is FlowResultType.CREATE_ENTRY
-    configured = next(iter(entry.get_subentries_of_type("policy")))
-    identifier = configured.subentry_id
-    assert configured.data["priority"] == 42 and "input_type" not in configured.data
-    edit = await entry.start_subentry_reconfigure_flow(hass, identifier)
-    suggested = next(key for key in edit["data_schema"].schema if key == "input_type")
-    assert suggested.description["suggested_value"] == input_type
-    second = await hass.config_entries.subentries.async_configure(edit["flow_id"], base)
-    for key in second["data_schema"].schema:
-        assert key.description["suggested_value"] == native[str(key)]
-    changed = await hass.config_entries.subentries.async_configure(
-        second["flow_id"], native | {"qualification_seconds": 90}
-    )
-    assert changed["reason"] == "reconfigure_successful"
-    assert entry.subentries[identifier].data["input"]["qualification_seconds"] == 90
-    other_type = "timer_episode" if numeric else "qualified_numeric"
-    edit = await entry.start_subentry_reconfigure_flow(hass, identifier)
-    second = await hass.config_entries.subentries.async_configure(
-        edit["flow_id"],
-        base | {"input_type": other_type, "kind": "occurrence" if numeric else "state"},
-    )
-    other = {
-        "entity_id": "timer.ventilation" if numeric else "sensor.temperature",
-        "qualification_seconds": 20,
-    }
-    other.update({"request_seconds": 100} if numeric else {"threshold": 17, "unit": "°C"})
-    changed = await hass.config_entries.subentries.async_configure(second["flow_id"], other)
-    assert changed["reason"] == "reconfigure_successful"
-    assert set(entry.subentries[identifier].data["input"]) == set(other) | {"type"} | (
-        {"comparison"} if not numeric else set()
-    )
-    edit = await entry.start_subentry_reconfigure_flow(hass, identifier)
-    legacy = {key: value for key, value in base.items() if key != "input_type"}
-    changed = await hass.config_entries.subentries.async_configure(edit["flow_id"], legacy)
-    assert changed["reason"] == "reconfigure_successful"
-    assert "input" not in entry.subentries[identifier].data
-
-
-@pytest.mark.parametrize(
-    "base_patch,source_patch,code",
-    [
-        ({}, {"entity_id": "sensor.missing"}, "config_entity_not_found"),
-        ({}, {"entity_id": "timer.ventilation"}, "config_entity_domain"),
-        ({}, {"unit": "°F"}, "config_input_unit_must_match_the_sensor_unit"),
-        ({}, {"threshold": float("nan")}, "config_number_minimum"),
-    ],
-)
-async def test_native_policy_final_atomic_validation_errors(
-    hass, native_sources, base_patch, source_patch, code
-):
-    hass.states.async_set("sensor.temperature", "15", {"unit_of_measurement": "°C"})
-    hass.states.async_set("timer.ventilation", "idle")
-    entry = MockConfigEntry(domain=DOMAIN)
-    entry.add_to_hass(hass)
-    resource = await _resource(hass, entry)
-    initial = await _start(hass, entry, "policy")
-    form = await hass.config_entries.subentries.async_configure(
-        initial["flow_id"],
-        {
-            "name": "Cold",
-            "resource_id": resource.subentry_id,
-            "kind": "state",
-            "target": {"position": 7},
-            "input_type": "qualified_numeric",
-            **base_patch,
-        },
-    )
-    result = await hass.config_entries.subentries.async_configure(
-        form["flow_id"],
-        {
-            "entity_id": "sensor.temperature",
-            "threshold": 16,
-            "unit": "°C",
-            "qualification_seconds": 60,
-            **source_patch,
-        },
-    )
-    assert result["step_id"] == "qualified_numeric" and result["errors"] == {"base": code}
-    assert "detail" not in result["description_placeholders"]
-    assert len(entry.subentries) == 1
 
 
 async def test_typed_return_monitor_resource_form(hass, native_sources):
@@ -346,36 +184,6 @@ async def test_native_policy_aborts_when_resource_removed_before_submission(hass
             "resource_id": resource.subentry_id,
             "kind": "state",
             "target": {"position": 7},
-            "input_type": "qualified_numeric",
-        },
-    )
-    assert result["reason"] == "no_resources"
-
-
-async def test_native_policy_aborts_when_resource_removed_before_final_submission(
-    hass, native_sources
-):
-    entry = MockConfigEntry(domain=DOMAIN)
-    entry.add_to_hass(hass)
-    resource = await _resource(hass, entry)
-    form = await _start(hass, entry, "policy")
-    second = await hass.config_entries.subentries.async_configure(
-        form["flow_id"],
-        {
-            "name": "Vent",
-            "resource_id": resource.subentry_id,
-            "kind": "occurrence",
-            "target": {"position": 100},
-            "input_type": "timer_episode",
-        },
-    )
-    hass.config_entries.async_remove_subentry(entry, resource.subentry_id)
-    result = await hass.config_entries.subentries.async_configure(
-        second["flow_id"],
-        {
-            "entity_id": "timer.ventilation",
-            "qualification_seconds": 60,
-            "request_seconds": 1800,
         },
     )
     assert result["reason"] == "no_resources"
@@ -398,41 +206,6 @@ async def test_reconfigure_policy_without_resource_aborts(hass):
     entry.add_to_hass(hass)
     result = await entry.start_subentry_reconfigure_flow(hass, "orphan")
     assert result["reason"] == "no_resources"
-
-
-@pytest.mark.parametrize(
-    "patch,code",
-    [
-        ({"target": {"on": True}}, "config_target_fields_are_not_supported_by"),
-        ({"eligibility_entity": "input_boolean.ready"}, "config_input_eligibility_conflict"),
-        ({"priority": 0.5}, "config_priority_must_be_an_integer"),
-    ],
-)
-async def test_native_common_errors_are_repairable_before_input_form(
-    hass, native_sources, patch, code
-):
-    entry = MockConfigEntry(domain=DOMAIN)
-    entry.add_to_hass(hass)
-    resource = await _resource(hass, entry)
-    form = await _start(hass, entry, "policy")
-    common = {
-        "name": "Native",
-        "resource_id": resource.subentry_id,
-        "kind": "state",
-        "target": {"position": 7},
-        "input_type": "timer_episode",
-    }
-    failed = await hass.config_entries.subentries.async_configure(form["flow_id"], common | patch)
-    assert failed["step_id"] == "user" and failed["errors"] == {"base": code}
-    assert len(entry.subentries) == 1
-    corrected = await hass.config_entries.subentries.async_configure(failed["flow_id"], common)
-    assert corrected["step_id"] == "timer_episode"
-    hass.states.async_set("timer.ventilation", "idle")
-    created = await hass.config_entries.subentries.async_configure(
-        corrected["flow_id"],
-        {"entity_id": "timer.ventilation", "qualification_seconds": 60, "request_seconds": 1800},
-    )
-    assert created["data"]["kind"] == "occurrence"
 
 
 async def test_desired_controls_create_reconfigure_and_follow(hass):
@@ -761,3 +534,66 @@ async def test_unlock_closed_runtime_keeps_lock(hass, tmp_path):
     assert result["errors"] == {"base": "unlock_unavailable"}
     assert entry.options["shadow_lock"] is True
     assert await hass.config_entries.async_unload(entry.entry_id)
+
+
+@pytest.mark.parametrize("kind", ["resource", "policy"])
+async def test_native_condition_compile_error_remains_in_native_form(hass, native_sources, kind):
+    entry = MockConfigEntry(domain=DOMAIN, version=4)
+    entry.add_to_hass(hass)
+    if kind == "policy":
+        resource = await _resource(hass, entry)
+        data = {
+            "name": "Bad template",
+            "kind": "state",
+            "resource_id": resource.subentry_id,
+            "target": {"position": 7},
+        }
+    else:
+        data = {"name": "Bad template", "kind": "cover", "entity_id": "cover.raw"}
+    condition = [
+        {"condition": "template", "value_template": "{{ true }}", "enabled": "{{ 1 / 0 }}"}
+    ]
+    data.update(
+        {"conditions": condition}
+        if kind == "policy"
+        else {"command_conditions": {"set_cover_position": condition}}
+    )
+    form = await _start(hass, entry, kind)
+    result = await hass.config_entries.subentries.async_configure(form["flow_id"], data)
+    assert result["type"] is FlowResultType.FORM
+    assert result["errors"] == {"base": "config_invalid_conditions"}
+    assert "ZeroDivisionError" in result["description_placeholders"]["error"]
+
+
+async def test_native_resource_selector_compiled_output_roundtrips_as_json(hass, native_sources):
+    import json
+
+    entry = MockConfigEntry(domain=DOMAIN, version=4)
+    entry.add_to_hass(hass)
+    form = await _start(hass, entry, "resource")
+    data = {
+        "name": "Native guards",
+        "kind": "cover",
+        "entity_id": "cover.raw",
+        "command_conditions": {
+            "set_cover_position": [
+                {"condition": "time", "after": "06:00:00"},
+                {"condition": "template", "value_template": "{{ true }}"},
+            ]
+        },
+    }
+    compiled = form["data_schema"](data)
+    result = await hass.config_entries.subentries.async_configure(form["flow_id"], compiled)
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    saved = json.loads(json.dumps(result["data"]))
+    assert saved["command_conditions"] == data["command_conditions"]
+
+
+def test_native_selector_temporal_values_keep_serializable_shapes():
+    from datetime import date, time, timedelta
+
+    from custom_components.ha_operator.config_flow import _native_config_value
+
+    assert _native_config_value(
+        {"date": date(2026, 10, 20), "time": time(6), "for": timedelta(seconds=60)}
+    ) == {"date": "2026-10-20", "time": "06:00:00", "for": {"seconds": 60}}

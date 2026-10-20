@@ -45,7 +45,7 @@
             "manual_control": "Allow manual control",
             "return_monitor": "Return confirmation",
             "command_conditions": "Command conditions",
-            "health_checks": "Health checks"
+            "unit_of_measurement": "Bound number unit"
           },
           "data_description": {
             "manual_control": "Turn off for a follower controlled by a source. Removes managed command entities, manual status, expiry, and resume controls; manual request actions are rejected.",
@@ -64,7 +64,7 @@
             "manual_duration": "Positive seconds for a manual lease when no duration or absolute expiry is supplied. Defaults to 1800. Expiry withdraws the override; a policy must supply any return target.",
             "tolerance": "Allowed cover-position difference from the target, from 0 to 100 percentage points. Defaults to 2. Independent physical feedback remains required.",
             "command_conditions": "Conditions for individual supported commands. Blocked commands retain the selected target. STOP and relay interlock shutdown keep their safety behavior.",
-            "health_checks": "Named observations, independent of desired targets and command permission. Qualification conditions can defer a check during startup. Checks never issue commands."
+            "unit_of_measurement": "Captured from the number actor on creation. Leave empty for unitless. Rebinding requires releasing numeric requests and removing fixed numeric targets."
           }
         },
         "reconfigure": {
@@ -88,7 +88,7 @@
             "manual_control": "Allow manual control",
             "return_monitor": "Return confirmation",
             "command_conditions": "Command conditions",
-            "health_checks": "Health checks"
+            "unit_of_measurement": "Bound number unit"
           },
           "data_description": {
             "manual_control": "Turn off for a follower controlled by a source. Removes managed command entities, manual status, expiry, and resume controls; manual request actions are rejected.",
@@ -107,7 +107,7 @@
             "manual_duration": "Positive seconds for a manual lease when no duration or absolute expiry is supplied. Defaults to 1800. Expiry withdraws the override; a policy must supply any return target.",
             "tolerance": "Allowed cover-position difference from the target, from 0 to 100 percentage points. Defaults to 2. Independent physical feedback remains required.",
             "command_conditions": "Conditions for individual supported commands. Blocked commands retain the selected target. STOP and relay interlock shutdown keep their safety behavior.",
-            "health_checks": "Named observations, independent of desired targets and command permission. Qualification conditions can defer a check during startup. Checks never issue commands."
+            "unit_of_measurement": "Captured from the number actor on creation. Leave empty for unitless. Rebinding requires releasing numeric requests and removing fixed numeric targets."
           }
         }
       },
@@ -140,8 +140,6 @@
         "config_entity_not_found": "[%key:component::ha_operator::exceptions::config_entity_not_found::message%]",
         "config_target_names_an_unknown_relay_profile": "[%key:component::ha_operator::exceptions::config_target_names_an_unknown_relay_profile::message%]",
         "config_fan_target_uses_unsupported_capabilities": "[%key:component::ha_operator::exceptions::config_fan_target_uses_unsupported_capabilities::message%]",
-        "config_input_type_must_be_qualified_numeric_or_timer_episode": "[%key:component::ha_operator::exceptions::config_input_type_must_be_qualified_numeric_or_timer_episode::message%]",
-        "config_input_policy_kind": "[%key:component::ha_operator::exceptions::config_input_policy_kind::message%]",
         "config_return_monitor_requires_a_cover_resource": "[%key:component::ha_operator::exceptions::config_return_monitor_requires_a_cover_resource::message%]",
         "config_relay_fan_owns_outputs_remove_entity_id": "[%key:component::ha_operator::exceptions::config_relay_fan_owns_outputs_remove_entity_id::message%]",
         "config_profiles_must_include_an_all_off_profile_and_an_on_profile": "[%key:component::ha_operator::exceptions::config_profiles_must_include_an_all_off_profile_and_an_on_profile::message%]",
@@ -149,16 +147,11 @@
         "config_default_target_must_name_an_on_profile": "[%key:component::ha_operator::exceptions::config_default_target_must_name_an_on_profile::message%]",
         "config_relay_settings_are_only_valid_for_relay_fan": "[%key:component::ha_operator::exceptions::config_relay_settings_are_only_valid_for_relay_fan::message%]",
         "config_an_output_is_already_owned_by_another_resource": "[%key:component::ha_operator::exceptions::config_an_output_is_already_owned_by_another_resource::message%]",
-        "config_input_replaces_eligibility_entity_and_eligibility_state": "[%key:component::ha_operator::exceptions::config_input_replaces_eligibility_entity_and_eligibility_state::message%]",
-        "config_eligibility_state_requires_eligibility_entity": "[%key:component::ha_operator::exceptions::config_eligibility_state_requires_eligibility_entity::message%]",
         "config_a_desired_control_supplies_the_complete_target_of_a_state_backed_switch_policy": "[%key:component::ha_operator::exceptions::config_a_desired_control_supplies_the_complete_target_of_a_state_backed_switch_policy::message%]",
         "config_intent_id_must_reference_a_configured_desired_control": "[%key:component::ha_operator::exceptions::config_intent_id_must_reference_a_configured_desired_control::message%]",
         "config_provider_ids_must_be_unique": "[%key:component::ha_operator::exceptions::config_provider_ids_must_be_unique::message%]",
         "config_provider_requires_independent_confirmation_evidence": "[%key:component::ha_operator::exceptions::config_provider_requires_independent_confirmation_evidence::message%]",
         "config_unsupported_subentry_type": "[%key:component::ha_operator::exceptions::config_unsupported_subentry_type::message%]",
-        "config_timer_episode_input_cannot_contain_numeric_comparison_settings": "[%key:component::ha_operator::exceptions::config_timer_episode_input_cannot_contain_numeric_comparison_settings::message%]",
-        "config_qualified_numeric_input_cannot_contain_request_seconds": "[%key:component::ha_operator::exceptions::config_qualified_numeric_input_cannot_contain_request_seconds::message%]",
-        "config_input_comparison_must_be_below": "[%key:component::ha_operator::exceptions::config_input_comparison_must_be_below::message%]",
         "config_every_profile_must_specify_every_owned_output": "[%key:component::ha_operator::exceptions::config_every_profile_must_specify_every_owned_output::message%]",
         "config_profile_output_values_must_be_true_or_false": "[%key:component::ha_operator::exceptions::config_profile_output_values_must_be_true_or_false::message%]",
         "config_profile_direction_must_be_forward_or_reverse": "[%key:component::ha_operator::exceptions::config_profile_direction_must_be_forward_or_reverse::message%]",
@@ -174,18 +167,14 @@
         "config_evidence_values_must_be_finite": "[%key:component::ha_operator::exceptions::config_evidence_values_must_be_finite::message%]",
         "config_position_evidence_must_use_a_raw_cover_current_position_attribute": "[%key:component::ha_operator::exceptions::config_position_evidence_must_use_a_raw_cover_current_position_attribute::message%]",
         "config_position_evidence_cannot_use_optimistic_state": "[%key:component::ha_operator::exceptions::config_position_evidence_cannot_use_optimistic_state::message%]",
-        "config_input_unit_must_match_the_sensor_unit": "[%key:component::ha_operator::exceptions::config_input_unit_must_match_the_sensor_unit::message%]",
         "config_a_resource_cannot_belong_to_multiple_airflow_control_groups": "[%key:component::ha_operator::exceptions::config_a_resource_cannot_belong_to_multiple_airflow_control_groups::message%]",
-        "config_input_source_must_report_a_finite_number": "[%key:component::ha_operator::exceptions::config_input_source_must_report_a_finite_number::message%]",
         "config_intent_reference": "[%key:component::ha_operator::exceptions::config_intent_reference::message%]",
         "config_intent_cycle": "[%key:component::ha_operator::exceptions::config_intent_cycle::message%]",
-        "config_input_eligibility_conflict": "[%key:component::ha_operator::exceptions::config_input_eligibility_conflict::message%]",
         "config_number_minimum": "[%key:component::ha_operator::exceptions::config_number_minimum::message%]",
         "config_entity_domain": "[%key:component::ha_operator::exceptions::config_entity_domain::message%]",
         "config_relay_profile_signatures": "[%key:component::ha_operator::exceptions::config_relay_profile_signatures::message%]",
         "config_relay_profile_speed": "[%key:component::ha_operator::exceptions::config_relay_profile_speed::message%]",
-        "config_invalid_conditions": "Invalid {field}: {error}",
-        "config_invalid_health_checks": "Health checks must be a list with unique aliases."
+        "config_invalid_conditions": "Invalid {field}: {error}"
       },
       "abort": {
         "no_resources": "Add a resource before creating a policy.",
@@ -207,26 +196,26 @@
             "kind": "Policy type",
             "priority": "Priority",
             "target": "Fixed target",
-            "eligibility_entity": "Eligibility entity",
-            "eligibility_state": "Eligible state",
             "target_entity": "Target source entity",
             "target_attribute": "Target attribute",
             "target_field": "Target field",
             "intent_id": "Operator desired control",
-            "input_type": "Policy input"
+            "conditions": "Conditions",
+            "triggers": "Native admission triggers",
+            "duration": "Request duration",
+            "cancel_triggers": "Native cancellation triggers"
           },
           "data_description": {
-            "input_type": "Keep the existing input, or configure a qualified sensor or timer. Remove helper eligibility fields when switching to a native input.",
             "resource_id": "Subentry ID of the existing resource that owns this output.",
-            "kind": "State policies remain eligible while their source qualifies. Occurrence policies need a distinct, bounded event submitted by an action or native timer input.",
+            "kind": "State policies select continuously. Occurrence policies admit bounded requests through native triggers or the existing submit action.",
             "priority": "Integer from -1000000 to 1000000; larger values win among eligible policies. Defaults to 0. Manual leases and airflow requirements have separate precedence.",
             "target": "Target object for the resource, such as position set to 0 or on set to true. A target source or desired control can supply a dynamic target instead.",
-            "eligibility_entity": "Optional source entity that must match Eligibility state. A native input replaces these eligibility fields.",
-            "eligibility_state": "Exact source state required for eligibility. Defaults to on when an eligibility entity is supplied. Missing or unknown feedback does not qualify.",
             "target_entity": "Read the target from this source entity state or its configured attribute. Telemetry does not create manual ownership.",
             "target_attribute": "Optional source attribute. Omit to read the source state; requires a target entity.",
             "target_field": "Target field to populate: position, on, percentage, or direction. Defaults to position; requires a target entity and matching resource capability.",
-            "intent_id": "Desired control subentry ID for a state policy controlling a switch. Replaces all other target fields; uses the current Boolean value."
+            "intent_id": "Desired control subentry ID for a state policy controlling a switch. Replaces all other target fields; uses the current Boolean value.",
+            "conditions": "State policies evaluate continuously. Occurrence conditions are checked only at admission; external submissions have no trigger variables.",
+            "duration": "Positive fixed lifetime from native trigger admission. Not required for externally submitted occurrences."
           }
         },
         "reconfigure": {
@@ -238,45 +227,26 @@
             "kind": "Policy type",
             "priority": "Priority",
             "target": "Fixed target",
-            "eligibility_entity": "Eligibility entity",
-            "eligibility_state": "Eligible state",
             "target_entity": "Target source entity",
             "target_attribute": "Target attribute",
             "target_field": "Target field",
             "intent_id": "Operator desired control",
-            "input_type": "Policy input"
+            "conditions": "Conditions",
+            "triggers": "Native admission triggers",
+            "duration": "Request duration",
+            "cancel_triggers": "Native cancellation triggers"
           },
           "data_description": {
-            "input_type": "Keep the existing input, or configure a qualified sensor or timer. Remove helper eligibility fields when switching to a native input.",
             "resource_id": "Subentry ID of the existing resource that owns this output.",
-            "kind": "State policies remain eligible while their source qualifies. Occurrence policies need a distinct, bounded event submitted by an action or native timer input.",
+            "kind": "State policies select continuously. Occurrence policies admit bounded requests through native triggers or the existing submit action.",
             "priority": "Integer from -1000000 to 1000000; larger values win among eligible policies. Defaults to 0. Manual leases and airflow requirements have separate precedence.",
             "target": "Target object for the resource, such as position set to 0 or on set to true. A target source or desired control can supply a dynamic target instead.",
-            "eligibility_entity": "Optional source entity that must match Eligibility state. A native input replaces these eligibility fields.",
-            "eligibility_state": "Exact source state required for eligibility. Defaults to on when an eligibility entity is supplied. Missing or unknown feedback does not qualify.",
             "target_entity": "Read the target from this source entity state or its configured attribute. Telemetry does not create manual ownership.",
             "target_attribute": "Optional source attribute. Omit to read the source state; requires a target entity.",
             "target_field": "Target field to populate: position, on, percentage, or direction. Defaults to position; requires a target entity and matching resource capability.",
-            "intent_id": "Desired control subentry ID for a state policy controlling a switch. Replaces all other target fields; uses the current Boolean value."
-          }
-        },
-        "qualified_numeric": {
-          "title": "Qualify a numeric source",
-          "description": "Activate this state policy after the sensor stays below the threshold for the qualification delay. The unit must exactly match the source. Unknown readings preserve the episode. After restart, a fresh numeric report is required.",
-          "data": {
-            "entity_id": "Sensor source",
-            "threshold": "Below threshold",
-            "unit": "Source unit",
-            "qualification_seconds": "Qualification delay (seconds)"
-          }
-        },
-        "timer_episode": {
-          "title": "Accept a timer episode",
-          "description": "A fresh timer start qualifies one expiring request. Pause or cancel withdraws it. Resume does not create a new opening. Natural timer completion keeps an accepted request until its own expiry.",
-          "data": {
-            "entity_id": "Timer source",
-            "qualification_seconds": "Qualification delay (seconds)",
-            "request_seconds": "Request duration after qualification (seconds)"
+            "intent_id": "Desired control subentry ID for a state policy controlling a switch. Replaces all other target fields; uses the current Boolean value.",
+            "conditions": "State policies evaluate continuously. Occurrence conditions are checked only at admission; external submissions have no trigger variables.",
+            "duration": "Positive fixed lifetime from native trigger admission. Not required for externally submitted occurrences."
           }
         }
       },
@@ -309,8 +279,6 @@
         "config_entity_not_found": "[%key:component::ha_operator::exceptions::config_entity_not_found::message%]",
         "config_target_names_an_unknown_relay_profile": "[%key:component::ha_operator::exceptions::config_target_names_an_unknown_relay_profile::message%]",
         "config_fan_target_uses_unsupported_capabilities": "[%key:component::ha_operator::exceptions::config_fan_target_uses_unsupported_capabilities::message%]",
-        "config_input_type_must_be_qualified_numeric_or_timer_episode": "[%key:component::ha_operator::exceptions::config_input_type_must_be_qualified_numeric_or_timer_episode::message%]",
-        "config_input_policy_kind": "[%key:component::ha_operator::exceptions::config_input_policy_kind::message%]",
         "config_return_monitor_requires_a_cover_resource": "[%key:component::ha_operator::exceptions::config_return_monitor_requires_a_cover_resource::message%]",
         "config_relay_fan_owns_outputs_remove_entity_id": "[%key:component::ha_operator::exceptions::config_relay_fan_owns_outputs_remove_entity_id::message%]",
         "config_profiles_must_include_an_all_off_profile_and_an_on_profile": "[%key:component::ha_operator::exceptions::config_profiles_must_include_an_all_off_profile_and_an_on_profile::message%]",
@@ -318,16 +286,11 @@
         "config_default_target_must_name_an_on_profile": "[%key:component::ha_operator::exceptions::config_default_target_must_name_an_on_profile::message%]",
         "config_relay_settings_are_only_valid_for_relay_fan": "[%key:component::ha_operator::exceptions::config_relay_settings_are_only_valid_for_relay_fan::message%]",
         "config_an_output_is_already_owned_by_another_resource": "[%key:component::ha_operator::exceptions::config_an_output_is_already_owned_by_another_resource::message%]",
-        "config_input_replaces_eligibility_entity_and_eligibility_state": "[%key:component::ha_operator::exceptions::config_input_replaces_eligibility_entity_and_eligibility_state::message%]",
-        "config_eligibility_state_requires_eligibility_entity": "[%key:component::ha_operator::exceptions::config_eligibility_state_requires_eligibility_entity::message%]",
         "config_a_desired_control_supplies_the_complete_target_of_a_state_backed_switch_policy": "[%key:component::ha_operator::exceptions::config_a_desired_control_supplies_the_complete_target_of_a_state_backed_switch_policy::message%]",
         "config_intent_id_must_reference_a_configured_desired_control": "[%key:component::ha_operator::exceptions::config_intent_id_must_reference_a_configured_desired_control::message%]",
         "config_provider_ids_must_be_unique": "[%key:component::ha_operator::exceptions::config_provider_ids_must_be_unique::message%]",
         "config_provider_requires_independent_confirmation_evidence": "[%key:component::ha_operator::exceptions::config_provider_requires_independent_confirmation_evidence::message%]",
         "config_unsupported_subentry_type": "[%key:component::ha_operator::exceptions::config_unsupported_subentry_type::message%]",
-        "config_timer_episode_input_cannot_contain_numeric_comparison_settings": "[%key:component::ha_operator::exceptions::config_timer_episode_input_cannot_contain_numeric_comparison_settings::message%]",
-        "config_qualified_numeric_input_cannot_contain_request_seconds": "[%key:component::ha_operator::exceptions::config_qualified_numeric_input_cannot_contain_request_seconds::message%]",
-        "config_input_comparison_must_be_below": "[%key:component::ha_operator::exceptions::config_input_comparison_must_be_below::message%]",
         "config_every_profile_must_specify_every_owned_output": "[%key:component::ha_operator::exceptions::config_every_profile_must_specify_every_owned_output::message%]",
         "config_profile_output_values_must_be_true_or_false": "[%key:component::ha_operator::exceptions::config_profile_output_values_must_be_true_or_false::message%]",
         "config_profile_direction_must_be_forward_or_reverse": "[%key:component::ha_operator::exceptions::config_profile_direction_must_be_forward_or_reverse::message%]",
@@ -343,12 +306,9 @@
         "config_evidence_values_must_be_finite": "[%key:component::ha_operator::exceptions::config_evidence_values_must_be_finite::message%]",
         "config_position_evidence_must_use_a_raw_cover_current_position_attribute": "[%key:component::ha_operator::exceptions::config_position_evidence_must_use_a_raw_cover_current_position_attribute::message%]",
         "config_position_evidence_cannot_use_optimistic_state": "[%key:component::ha_operator::exceptions::config_position_evidence_cannot_use_optimistic_state::message%]",
-        "config_input_unit_must_match_the_sensor_unit": "[%key:component::ha_operator::exceptions::config_input_unit_must_match_the_sensor_unit::message%]",
         "config_a_resource_cannot_belong_to_multiple_airflow_control_groups": "[%key:component::ha_operator::exceptions::config_a_resource_cannot_belong_to_multiple_airflow_control_groups::message%]",
-        "config_input_source_must_report_a_finite_number": "[%key:component::ha_operator::exceptions::config_input_source_must_report_a_finite_number::message%]",
         "config_intent_reference": "[%key:component::ha_operator::exceptions::config_intent_reference::message%]",
         "config_intent_cycle": "[%key:component::ha_operator::exceptions::config_intent_cycle::message%]",
-        "config_input_eligibility_conflict": "[%key:component::ha_operator::exceptions::config_input_eligibility_conflict::message%]",
         "config_number_minimum": "[%key:component::ha_operator::exceptions::config_number_minimum::message%]",
         "config_entity_domain": "[%key:component::ha_operator::exceptions::config_entity_domain::message%]",
         "config_relay_profile_signatures": "[%key:component::ha_operator::exceptions::config_relay_profile_signatures::message%]",
@@ -425,8 +385,6 @@
         "config_entity_not_found": "[%key:component::ha_operator::exceptions::config_entity_not_found::message%]",
         "config_target_names_an_unknown_relay_profile": "[%key:component::ha_operator::exceptions::config_target_names_an_unknown_relay_profile::message%]",
         "config_fan_target_uses_unsupported_capabilities": "[%key:component::ha_operator::exceptions::config_fan_target_uses_unsupported_capabilities::message%]",
-        "config_input_type_must_be_qualified_numeric_or_timer_episode": "[%key:component::ha_operator::exceptions::config_input_type_must_be_qualified_numeric_or_timer_episode::message%]",
-        "config_input_policy_kind": "[%key:component::ha_operator::exceptions::config_input_policy_kind::message%]",
         "config_return_monitor_requires_a_cover_resource": "[%key:component::ha_operator::exceptions::config_return_monitor_requires_a_cover_resource::message%]",
         "config_relay_fan_owns_outputs_remove_entity_id": "[%key:component::ha_operator::exceptions::config_relay_fan_owns_outputs_remove_entity_id::message%]",
         "config_profiles_must_include_an_all_off_profile_and_an_on_profile": "[%key:component::ha_operator::exceptions::config_profiles_must_include_an_all_off_profile_and_an_on_profile::message%]",
@@ -434,16 +392,11 @@
         "config_default_target_must_name_an_on_profile": "[%key:component::ha_operator::exceptions::config_default_target_must_name_an_on_profile::message%]",
         "config_relay_settings_are_only_valid_for_relay_fan": "[%key:component::ha_operator::exceptions::config_relay_settings_are_only_valid_for_relay_fan::message%]",
         "config_an_output_is_already_owned_by_another_resource": "[%key:component::ha_operator::exceptions::config_an_output_is_already_owned_by_another_resource::message%]",
-        "config_input_replaces_eligibility_entity_and_eligibility_state": "[%key:component::ha_operator::exceptions::config_input_replaces_eligibility_entity_and_eligibility_state::message%]",
-        "config_eligibility_state_requires_eligibility_entity": "[%key:component::ha_operator::exceptions::config_eligibility_state_requires_eligibility_entity::message%]",
         "config_a_desired_control_supplies_the_complete_target_of_a_state_backed_switch_policy": "[%key:component::ha_operator::exceptions::config_a_desired_control_supplies_the_complete_target_of_a_state_backed_switch_policy::message%]",
         "config_intent_id_must_reference_a_configured_desired_control": "[%key:component::ha_operator::exceptions::config_intent_id_must_reference_a_configured_desired_control::message%]",
         "config_provider_ids_must_be_unique": "[%key:component::ha_operator::exceptions::config_provider_ids_must_be_unique::message%]",
         "config_provider_requires_independent_confirmation_evidence": "[%key:component::ha_operator::exceptions::config_provider_requires_independent_confirmation_evidence::message%]",
         "config_unsupported_subentry_type": "[%key:component::ha_operator::exceptions::config_unsupported_subentry_type::message%]",
-        "config_timer_episode_input_cannot_contain_numeric_comparison_settings": "[%key:component::ha_operator::exceptions::config_timer_episode_input_cannot_contain_numeric_comparison_settings::message%]",
-        "config_qualified_numeric_input_cannot_contain_request_seconds": "[%key:component::ha_operator::exceptions::config_qualified_numeric_input_cannot_contain_request_seconds::message%]",
-        "config_input_comparison_must_be_below": "[%key:component::ha_operator::exceptions::config_input_comparison_must_be_below::message%]",
         "config_every_profile_must_specify_every_owned_output": "[%key:component::ha_operator::exceptions::config_every_profile_must_specify_every_owned_output::message%]",
         "config_profile_output_values_must_be_true_or_false": "[%key:component::ha_operator::exceptions::config_profile_output_values_must_be_true_or_false::message%]",
         "config_profile_direction_must_be_forward_or_reverse": "[%key:component::ha_operator::exceptions::config_profile_direction_must_be_forward_or_reverse::message%]",
@@ -459,12 +412,9 @@
         "config_evidence_values_must_be_finite": "[%key:component::ha_operator::exceptions::config_evidence_values_must_be_finite::message%]",
         "config_position_evidence_must_use_a_raw_cover_current_position_attribute": "[%key:component::ha_operator::exceptions::config_position_evidence_must_use_a_raw_cover_current_position_attribute::message%]",
         "config_position_evidence_cannot_use_optimistic_state": "[%key:component::ha_operator::exceptions::config_position_evidence_cannot_use_optimistic_state::message%]",
-        "config_input_unit_must_match_the_sensor_unit": "[%key:component::ha_operator::exceptions::config_input_unit_must_match_the_sensor_unit::message%]",
         "config_a_resource_cannot_belong_to_multiple_airflow_control_groups": "[%key:component::ha_operator::exceptions::config_a_resource_cannot_belong_to_multiple_airflow_control_groups::message%]",
-        "config_input_source_must_report_a_finite_number": "[%key:component::ha_operator::exceptions::config_input_source_must_report_a_finite_number::message%]",
         "config_intent_reference": "[%key:component::ha_operator::exceptions::config_intent_reference::message%]",
         "config_intent_cycle": "[%key:component::ha_operator::exceptions::config_intent_cycle::message%]",
-        "config_input_eligibility_conflict": "[%key:component::ha_operator::exceptions::config_input_eligibility_conflict::message%]",
         "config_number_minimum": "[%key:component::ha_operator::exceptions::config_number_minimum::message%]",
         "config_entity_domain": "[%key:component::ha_operator::exceptions::config_entity_domain::message%]",
         "config_relay_profile_signatures": "[%key:component::ha_operator::exceptions::config_relay_profile_signatures::message%]",
@@ -537,8 +487,6 @@
         "config_entity_not_found": "[%key:component::ha_operator::exceptions::config_entity_not_found::message%]",
         "config_target_names_an_unknown_relay_profile": "[%key:component::ha_operator::exceptions::config_target_names_an_unknown_relay_profile::message%]",
         "config_fan_target_uses_unsupported_capabilities": "[%key:component::ha_operator::exceptions::config_fan_target_uses_unsupported_capabilities::message%]",
-        "config_input_type_must_be_qualified_numeric_or_timer_episode": "[%key:component::ha_operator::exceptions::config_input_type_must_be_qualified_numeric_or_timer_episode::message%]",
-        "config_input_policy_kind": "[%key:component::ha_operator::exceptions::config_input_policy_kind::message%]",
         "config_return_monitor_requires_a_cover_resource": "[%key:component::ha_operator::exceptions::config_return_monitor_requires_a_cover_resource::message%]",
         "config_relay_fan_owns_outputs_remove_entity_id": "[%key:component::ha_operator::exceptions::config_relay_fan_owns_outputs_remove_entity_id::message%]",
         "config_profiles_must_include_an_all_off_profile_and_an_on_profile": "[%key:component::ha_operator::exceptions::config_profiles_must_include_an_all_off_profile_and_an_on_profile::message%]",
@@ -546,16 +494,11 @@
         "config_default_target_must_name_an_on_profile": "[%key:component::ha_operator::exceptions::config_default_target_must_name_an_on_profile::message%]",
         "config_relay_settings_are_only_valid_for_relay_fan": "[%key:component::ha_operator::exceptions::config_relay_settings_are_only_valid_for_relay_fan::message%]",
         "config_an_output_is_already_owned_by_another_resource": "[%key:component::ha_operator::exceptions::config_an_output_is_already_owned_by_another_resource::message%]",
-        "config_input_replaces_eligibility_entity_and_eligibility_state": "[%key:component::ha_operator::exceptions::config_input_replaces_eligibility_entity_and_eligibility_state::message%]",
-        "config_eligibility_state_requires_eligibility_entity": "[%key:component::ha_operator::exceptions::config_eligibility_state_requires_eligibility_entity::message%]",
         "config_a_desired_control_supplies_the_complete_target_of_a_state_backed_switch_policy": "[%key:component::ha_operator::exceptions::config_a_desired_control_supplies_the_complete_target_of_a_state_backed_switch_policy::message%]",
         "config_intent_id_must_reference_a_configured_desired_control": "[%key:component::ha_operator::exceptions::config_intent_id_must_reference_a_configured_desired_control::message%]",
         "config_provider_ids_must_be_unique": "[%key:component::ha_operator::exceptions::config_provider_ids_must_be_unique::message%]",
         "config_provider_requires_independent_confirmation_evidence": "[%key:component::ha_operator::exceptions::config_provider_requires_independent_confirmation_evidence::message%]",
         "config_unsupported_subentry_type": "[%key:component::ha_operator::exceptions::config_unsupported_subentry_type::message%]",
-        "config_timer_episode_input_cannot_contain_numeric_comparison_settings": "[%key:component::ha_operator::exceptions::config_timer_episode_input_cannot_contain_numeric_comparison_settings::message%]",
-        "config_qualified_numeric_input_cannot_contain_request_seconds": "[%key:component::ha_operator::exceptions::config_qualified_numeric_input_cannot_contain_request_seconds::message%]",
-        "config_input_comparison_must_be_below": "[%key:component::ha_operator::exceptions::config_input_comparison_must_be_below::message%]",
         "config_every_profile_must_specify_every_owned_output": "[%key:component::ha_operator::exceptions::config_every_profile_must_specify_every_owned_output::message%]",
         "config_profile_output_values_must_be_true_or_false": "[%key:component::ha_operator::exceptions::config_profile_output_values_must_be_true_or_false::message%]",
         "config_profile_direction_must_be_forward_or_reverse": "[%key:component::ha_operator::exceptions::config_profile_direction_must_be_forward_or_reverse::message%]",
@@ -571,12 +514,9 @@
         "config_evidence_values_must_be_finite": "[%key:component::ha_operator::exceptions::config_evidence_values_must_be_finite::message%]",
         "config_position_evidence_must_use_a_raw_cover_current_position_attribute": "[%key:component::ha_operator::exceptions::config_position_evidence_must_use_a_raw_cover_current_position_attribute::message%]",
         "config_position_evidence_cannot_use_optimistic_state": "[%key:component::ha_operator::exceptions::config_position_evidence_cannot_use_optimistic_state::message%]",
-        "config_input_unit_must_match_the_sensor_unit": "[%key:component::ha_operator::exceptions::config_input_unit_must_match_the_sensor_unit::message%]",
         "config_a_resource_cannot_belong_to_multiple_airflow_control_groups": "[%key:component::ha_operator::exceptions::config_a_resource_cannot_belong_to_multiple_airflow_control_groups::message%]",
-        "config_input_source_must_report_a_finite_number": "[%key:component::ha_operator::exceptions::config_input_source_must_report_a_finite_number::message%]",
         "config_intent_reference": "[%key:component::ha_operator::exceptions::config_intent_reference::message%]",
         "config_intent_cycle": "[%key:component::ha_operator::exceptions::config_intent_cycle::message%]",
-        "config_input_eligibility_conflict": "[%key:component::ha_operator::exceptions::config_input_eligibility_conflict::message%]",
         "config_number_minimum": "[%key:component::ha_operator::exceptions::config_number_minimum::message%]",
         "config_entity_domain": "[%key:component::ha_operator::exceptions::config_entity_domain::message%]",
         "config_relay_profile_signatures": "[%key:component::ha_operator::exceptions::config_relay_profile_signatures::message%]",
@@ -704,14 +644,6 @@
       "title": "Invalid HA Operator configuration",
       "description": "fan target uses unsupported capabilities. Correct the configuration, then reload the integration. No actuator worker runs until setup succeeds."
     },
-    "config_input_type_must_be_qualified_numeric_or_timer_episode": {
-      "title": "Invalid HA Operator configuration",
-      "description": "input.type must be qualified_numeric or timer_episode. Correct the configuration, then reload the integration. No actuator worker runs until setup succeeds."
-    },
-    "config_input_policy_kind": {
-      "title": "Invalid HA Operator configuration",
-      "description": "{input_type} input requires a {expected_kind} policy. Correct the configuration, then reload the integration. No actuator worker runs until setup succeeds."
-    },
     "config_return_monitor_requires_a_cover_resource": {
       "title": "Invalid HA Operator configuration",
       "description": "return_monitor requires a cover resource. Correct the configuration, then reload the integration. No actuator worker runs until setup succeeds."
@@ -740,14 +672,6 @@
       "title": "Invalid HA Operator configuration",
       "description": "an output is already owned by another resource. Correct the configuration, then reload the integration. No actuator worker runs until setup succeeds."
     },
-    "config_input_replaces_eligibility_entity_and_eligibility_state": {
-      "title": "Invalid HA Operator configuration",
-      "description": "input replaces eligibility_entity and eligibility_state. Correct the configuration, then reload the integration. No actuator worker runs until setup succeeds."
-    },
-    "config_eligibility_state_requires_eligibility_entity": {
-      "title": "Invalid HA Operator configuration",
-      "description": "eligibility_state requires eligibility_entity. Correct the configuration, then reload the integration. No actuator worker runs until setup succeeds."
-    },
     "config_a_desired_control_supplies_the_complete_target_of_a_state_backed_switch_policy": {
       "title": "Invalid HA Operator configuration",
       "description": "A desired control supplies the complete target of a state-backed switch policy. Correct the configuration, then reload the integration. No actuator worker runs until setup succeeds."
@@ -767,18 +691,6 @@
     "config_unsupported_subentry_type": {
       "title": "Invalid HA Operator configuration",
       "description": "unsupported subentry type. Correct the configuration, then reload the integration. No actuator worker runs until setup succeeds."
-    },
-    "config_timer_episode_input_cannot_contain_numeric_comparison_settings": {
-      "title": "Invalid HA Operator configuration",
-      "description": "timer_episode input cannot contain numeric comparison settings. Correct the configuration, then reload the integration. No actuator worker runs until setup succeeds."
-    },
-    "config_qualified_numeric_input_cannot_contain_request_seconds": {
-      "title": "Invalid HA Operator configuration",
-      "description": "qualified_numeric input cannot contain request_seconds. Correct the configuration, then reload the integration. No actuator worker runs until setup succeeds."
-    },
-    "config_input_comparison_must_be_below": {
-      "title": "Invalid HA Operator configuration",
-      "description": "input.comparison must be below. Correct the configuration, then reload the integration. No actuator worker runs until setup succeeds."
     },
     "config_every_profile_must_specify_every_owned_output": {
       "title": "Invalid HA Operator configuration",
@@ -840,17 +752,9 @@
       "title": "Invalid HA Operator configuration",
       "description": "position evidence cannot use optimistic state. Correct the configuration, then reload the integration. No actuator worker runs until setup succeeds."
     },
-    "config_input_unit_must_match_the_sensor_unit": {
-      "title": "Invalid HA Operator configuration",
-      "description": "input.unit must match the sensor unit. Correct the configuration, then reload the integration. No actuator worker runs until setup succeeds."
-    },
     "config_a_resource_cannot_belong_to_multiple_airflow_control_groups": {
       "title": "Invalid HA Operator configuration",
       "description": "a resource cannot belong to multiple airflow control groups. Correct the configuration, then reload the integration. No actuator worker runs until setup succeeds."
-    },
-    "config_input_source_must_report_a_finite_number": {
-      "title": "Invalid HA Operator configuration",
-      "description": "input source must report a finite number. Correct the configuration, then reload the integration. No actuator worker runs until setup succeeds."
     },
     "config_intent_reference": {
       "title": "Invalid HA Operator configuration",
@@ -859,10 +763,6 @@
     "config_intent_cycle": {
       "title": "Invalid HA Operator configuration",
       "description": "Desired control on-targets must not contain a cycle. Correct the configuration, then reload the integration. No actuator worker runs until setup succeeds."
-    },
-    "config_input_eligibility_conflict": {
-      "title": "Invalid HA Operator configuration",
-      "description": "Remove helper eligibility fields for a native input. Correct the configuration, then reload the integration. No actuator worker runs until setup succeeds."
     },
     "config_number_minimum": {
       "title": "Invalid HA Operator configuration",
@@ -884,9 +784,29 @@
       "title": "Invalid HA Operator configuration",
       "description": "Invalid {field}: {error}. Correct the resource configuration, then reload the integration."
     },
-    "config_invalid_health_checks": {
-      "title": "Invalid HA Operator configuration",
-      "description": "Health checks must be a list with unique aliases. Correct the resource configuration, then reload the integration."
+    "native_policy_migration": {
+      "title": "Migrate HA Operator policies before upgrading",
+      "description": "Pin or roll back to Operator 0.3.0. Wait for active requests to expire or approve withdrawal before disabling affected policies. Reconfigure legacy inputs to ordinary policies, clear occurrence eligibility fields, and migrate/clear Health checks through options. Then upgrade and configure native conditions/triggers before enabling policies. No entry or saved runtime state was changed."
+    },
+    "policy_trigger_setup": {
+      "title": "HA Operator native policy triggers failed",
+      "description": "The policy is inhibited because native trigger registration failed. Correct its configuration and reload. Available registration removers were detached."
+    },
+    "policy_trigger_cleanup": {
+      "title": "HA Operator native trigger cleanup is incomplete",
+      "description": "A native trigger platform raised before returning its cleanup callback. The policy is inhibited and all late callbacks are fenced. A hidden native listener may remain; restart Home Assistant after correcting the configuration. Reload is not proof of complete cleanup."
+    },
+    "number_unit_changed": {
+      "title": "HA Operator number configuration needs attention",
+      "description": "The number actor unit differs from its configured binding. Restore the unit or release outstanding numeric requests and explicitly reconfigure the binding."
+    },
+    "number_target_invalid": {
+      "title": "HA Operator number configuration needs attention",
+      "description": "The number target must be finite, within current native bounds, and have usable metadata."
+    },
+    "config_number_binding": {
+      "title": "HA Operator number configuration needs attention",
+      "description": "Number resources require an explicit tolerance and a bound native service unit. Release outstanding numeric requests and remove fixed numeric targets before rebinding."
     }
   },
   "exceptions": {
@@ -1104,7 +1024,7 @@
       "message": "{field} must be positive"
     },
     "config_kind_must_be_cover_switch_fan_or_relay_fan": {
-      "message": "kind must be cover, switch, fan, or relay_fan"
+      "message": "Resource kind must be cover, switch, fan, relay_fan, number, or select."
     },
     "config_manual_control_must_be_true_or_false": {
       "message": "manual_control must be true or false"
@@ -1142,12 +1062,6 @@
     "config_fan_target_uses_unsupported_capabilities": {
       "message": "fan target uses unsupported capabilities"
     },
-    "config_input_type_must_be_qualified_numeric_or_timer_episode": {
-      "message": "input.type must be qualified_numeric or timer_episode"
-    },
-    "config_input_policy_kind": {
-      "message": "{input_type} input requires a {expected_kind} policy"
-    },
     "config_return_monitor_requires_a_cover_resource": {
       "message": "return_monitor requires a cover resource"
     },
@@ -1169,12 +1083,6 @@
     "config_an_output_is_already_owned_by_another_resource": {
       "message": "an output is already owned by another resource"
     },
-    "config_input_replaces_eligibility_entity_and_eligibility_state": {
-      "message": "input replaces eligibility_entity and eligibility_state"
-    },
-    "config_eligibility_state_requires_eligibility_entity": {
-      "message": "eligibility_state requires eligibility_entity"
-    },
     "config_a_desired_control_supplies_the_complete_target_of_a_state_backed_switch_policy": {
       "message": "A desired control supplies the complete target of a state-backed switch policy"
     },
@@ -1189,15 +1097,6 @@
     },
     "config_unsupported_subentry_type": {
       "message": "unsupported subentry type"
-    },
-    "config_timer_episode_input_cannot_contain_numeric_comparison_settings": {
-      "message": "timer_episode input cannot contain numeric comparison settings"
-    },
-    "config_qualified_numeric_input_cannot_contain_request_seconds": {
-      "message": "qualified_numeric input cannot contain request_seconds"
-    },
-    "config_input_comparison_must_be_below": {
-      "message": "input.comparison must be below"
     },
     "config_every_profile_must_specify_every_owned_output": {
       "message": "every profile must specify every owned output"
@@ -1215,7 +1114,7 @@
       "message": "cover requires non-optimistic position control"
     },
     "config_target_field_must_be_position_on_percentage_or_direction": {
-      "message": "target_field must be position, on, percentage, or direction"
+      "message": "Target field must be position, on, percentage, direction, value, or option."
     },
     "config_provide_target_or_target_entity_target_attributes_require_target_entity": {
       "message": "provide target or target_entity; target attributes require target_entity"
@@ -1244,23 +1143,14 @@
     "config_position_evidence_cannot_use_optimistic_state": {
       "message": "position evidence cannot use optimistic state"
     },
-    "config_input_unit_must_match_the_sensor_unit": {
-      "message": "input.unit must match the sensor unit"
-    },
     "config_a_resource_cannot_belong_to_multiple_airflow_control_groups": {
       "message": "a resource cannot belong to multiple airflow control groups"
-    },
-    "config_input_source_must_report_a_finite_number": {
-      "message": "input source must report a finite number"
     },
     "config_intent_reference": {
       "message": "On targets must reference configured desired controls"
     },
     "config_intent_cycle": {
       "message": "Desired control on-targets must not contain a cycle"
-    },
-    "config_input_eligibility_conflict": {
-      "message": "Remove helper eligibility fields for a native input"
     },
     "config_number_minimum": {
       "message": "{field} must be a finite number greater than or equal to {minimum}"
@@ -1277,8 +1167,20 @@
     "config_invalid_conditions": {
       "message": "Invalid {field}: {error}"
     },
-    "config_invalid_health_checks": {
-      "message": "Health checks must be a list with unique aliases."
+    "number_unit_changed": {
+      "message": "The number actor unit differs from its configured binding. Restore the unit or release outstanding numeric requests and explicitly reconfigure the binding."
+    },
+    "number_target_invalid": {
+      "message": "The number target must be finite, within current native bounds, and have usable metadata."
+    },
+    "config_number_binding": {
+      "message": "Number resources require an explicit tolerance and a bound native service unit. Release outstanding numeric requests and remove fixed numeric targets before rebinding."
+    },
+    "select_option_type": {
+      "message": "Select target option must be a string."
+    },
+    "config_select_option_type": {
+      "message": "Select option must be a string of at most 255 characters."
     }
   },
   "services": {
@@ -1440,13 +1342,6 @@
     }
   },
   "selector": {
-    "policy_input_type": {
-      "options": {
-        "legacy": "Existing state or submitted occurrence",
-        "qualified_numeric": "Qualified numeric sensor",
-        "timer_episode": "Timer episode"
-      }
-    },
     "return_monitor": {
       "fields": {
         "target_at_most": {
@@ -1473,19 +1368,12 @@
         },
         "set_cover_position": {
           "name": "Set cover position"
-        }
-      }
-    },
-    "health_checks": {
-      "fields": {
-        "alias": {
-          "name": "Check name"
         },
-        "conditions": {
-          "name": "Health conditions"
+        "set_value": {
+          "name": "Set value"
         },
-        "qualification": {
-          "name": "Startup qualification"
+        "select_option": {
+          "name": "Select option"
         }
       }
     }
@@ -1580,39 +1468,11 @@
       },
       "provider": {
         "name": "Selected provider"
-      },
-      "input_phase": {
-        "name": "Input phase",
-        "state": {
-          "idle": "Idle",
-          "qualifying": "Qualifying",
-          "qualified": "Qualified",
-          "recovering": "Recovering",
-          "accepted": "Accepted",
-          "suppressed": "Suppressed",
-          "expired": "Expired"
-        }
-      },
-      "qualification_due": {
-        "name": "Qualification due"
-      },
-      "health": {
-        "name": "Health",
-        "state": {
-          "healthy": "Healthy",
-          "unhealthy": "Unhealthy",
-          "unknown": "Unknown",
-          "waiting": "Waiting for qualification",
-          "skipped": "Skipped"
-        }
       }
     },
     "binary_sensor": {
       "manual": {
         "name": "Manual active"
-      },
-      "qualified": {
-        "name": "Qualified"
       },
       "return_overdue": {
         "name": "Return overdue"

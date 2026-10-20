@@ -48,7 +48,14 @@ async def test_first_reason_state_has_native_trace_and_literal_snapshot(
     entry = await async_setup_operator(
         hass,
         tmp_path,
-        policies={"active": policy("{{ 7 * 7 }}", eligibility_entity="input_boolean.enabled")},
+        policies={
+            "active": policy(
+                "{{ 7 * 7 }}",
+                conditions=[
+                    {"condition": "state", "entity_id": "input_boolean.enabled", "state": "on"}
+                ],
+            )
+        },
     )
     reason_id = managed_id(hass, "sensor", key="reason")
     first = hass.states.get(reason_id)
@@ -240,8 +247,20 @@ async def test_reentrant_selection_never_receives_older_trace_context(hass, tmp_
         tmp_path,
         policies={
             "baseline": policy("Baseline"),
-            "evening": policy("Evening", 10, eligibility_entity="input_boolean.evening"),
-            "morning": policy("Morning", 20, eligibility_entity="input_boolean.morning"),
+            "evening": policy(
+                "Evening",
+                10,
+                conditions=[
+                    {"condition": "state", "entity_id": "input_boolean.evening", "state": "on"}
+                ],
+            ),
+            "morning": policy(
+                "Morning",
+                20,
+                conditions=[
+                    {"condition": "state", "entity_id": "input_boolean.morning", "state": "on"}
+                ],
+            ),
         },
     )
     runtime = entry.runtime_data

@@ -221,7 +221,7 @@ async def test_native_oversized_feedback_clears_stale_state_and_recovers(hass, t
                 "target_entity": source,
                 "target_attribute": field,
                 "target_field": field,
-                "eligibility_entity": source,
+                "conditions": [{"condition": "state", "entity_id": source, "state": "on"}],
             }
         }
     hass.states.async_set(source, state, attrs)

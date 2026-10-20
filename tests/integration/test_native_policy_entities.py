@@ -13,7 +13,6 @@ from tests.integration.helpers import (
     async_setup_operator,
     managed_id,
 )
-from tests.integration.test_policy_inputs_runtime import numeric_policy, temperature
 
 
 async def advance(hass, freezer, seconds):
@@ -22,69 +21,12 @@ async def advance(hass, freezer, seconds):
     await hass.async_block_till_done()
 
 
-async def test_disabled_diagnostics_execute_and_public_enable_reload_then_disable(
-    hass, tmp_path, freezer
-):
-    await async_add_physical_cover(hass)
-    temperature(hass, 15)
-    entry = await async_setup_operator(hass, tmp_path, policies=numeric_policy())
-    await async_activate(hass)
-    runtime = entry.runtime_data
-    registry = er.async_get(hass)
-    ids = [
-        registry.async_get_entity_id(platform, DOMAIN, f"cold_{key}")
-        for platform, key in (
-            ("sensor", "input_phase"),
-            ("sensor", "qualification_due"),
-            ("binary_sensor", "qualified"),
-        )
-    ]
-    for entity_id in ids:
-        record = registry.async_get(entity_id)
-        assert record.config_subentry_id == "cold"
-        assert record.entity_category == "diagnostic"
-        assert record.disabled_by is er.RegistryEntryDisabler.INTEGRATION
-        assert hass.states.get(entity_id) is None
-    temperature(hass, 14)
-    await hass.async_block_till_done()
-    due = runtime.policy_input("cold").due_at
-    await advance(hass, freezer, 60)
-    assert runtime.policy_input("cold").qualified
-    assert runtime.decisions["roof"].target.position == 7
-    assert all(hass.states.get(entity_id) is None for entity_id in ids)
-    for entity_id in ids:
-        registry.async_update_entity(entity_id, disabled_by=None)
-    await hass.async_block_till_done()
-    await advance(hass, freezer, 31)
-    assert runtime._closed and entry.runtime_data is not runtime
-    runtime = entry.runtime_data
-    assert runtime.policy_input("cold").due_at == due
-    temperature(hass, 13)
-    await hass.async_block_till_done()
-    assert hass.states.get(ids[0]).state == "qualified"
-    assert hass.states.get(ids[1]).attributes["device_class"] == "timestamp"
-    assert hass.states.get(ids[2]).state == "on"
-    for entity_id in ids:
-        registry.async_update_entity(entity_id, disabled_by=er.RegistryEntryDisabler.USER)
-    await hass.async_block_till_done()
-    assert entry.runtime_data is runtime and not runtime._closed
-    temperature(hass, 17)
-    await hass.async_block_till_done()
-    assert not runtime.policy_input("cold").qualified
-    temperature(hass, 14)
-    await hass.async_block_till_done()
-    await advance(hass, freezer, 60)
-    assert runtime.policy_input("cold").qualified
-    assert entry.runtime_data is runtime
-    await hass.config_entries.async_unload(entry.entry_id)
-
-
 async def test_return_problem_primary_expiry_and_input_source_links(hass, tmp_path, freezer):
     raw = await async_add_physical_cover(hass)
     raw._attr_current_cover_position = 100
     raw.refuse = True
     raw.async_write_ha_state()
-    temperature(hass, 15)
+    hass.states.async_set("sensor.temperature", "15")
     entry = await async_setup_operator(
         hass,
         tmp_path,
@@ -96,7 +38,17 @@ async def test_return_problem_primary_expiry_and_input_source_links(hass, tmp_pa
                 "return_monitor": {"target_at_most": 7, "warning_after_seconds": 300},
             }
         },
-        policies=numeric_policy()
+        policies={
+            "cold": {
+                "name": "Cold",
+                "kind": "state",
+                "resource_id": "roof",
+                "target": {"position": 7},
+                "conditions": [
+                    {"condition": "numeric_state", "entity_id": "sensor.temperature", "below": 16}
+                ],
+            }
+        }
         | {
             "vent": {
                 "name": "Opening",
@@ -108,11 +60,10 @@ async def test_return_problem_primary_expiry_and_input_source_links(hass, tmp_pa
         },
     )
     await async_activate(hass)
-    temperature(hass, 14)
+    hass.states.async_set("sensor.temperature", "14")
     await hass.async_block_till_done()
     await advance(hass, freezer, 60)
     desired = hass.states.get(managed_id(hass, "sensor", key="desired"))
-    assert desired.attributes["related_entities"] == ("sensor.temperature",)
     expiry_id = managed_id(hass, "sensor", key="effective_expiry")
     assert desired.attributes["effective_expiry_entity"] == expiry_id
     registry = er.async_get(hass)

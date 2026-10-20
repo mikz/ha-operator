@@ -13,6 +13,10 @@ def target_label(target: Target | None) -> str:
     """Human-readable target for Activity; the exact target remains on entities."""
     if target is None:
         return "none"
+    if target.value is not None:
+        return f"{target.value:g}"
+    if target.option is not None:
+        return target.option
     if target.position is not None:
         return f"{target.position:g}%"
     if target.profile is not None:
@@ -84,13 +88,7 @@ def selection_for(
                 expires_at=occurrence.expires_at if occurrence else None,
                 related_entities=tuple(
                     dict.fromkeys(
-                        entity_id
-                        for entity_id in (
-                            config.get("eligibility_entity"),
-                            config.get("target_entity"),
-                            config["input"]["entity_id"] if "input" in config else None,
-                        )
-                        if entity_id
+                        entity_id for entity_id in (config.get("target_entity"),) if entity_id
                     )
                 ),
             )

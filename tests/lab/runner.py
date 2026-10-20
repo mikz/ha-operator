@@ -24,7 +24,7 @@ STATE = Path("/state")
 
 
 def validate_native_diagnostics(data):
-    """Allow only bounded, anonymized input, monitor, condition, and health records."""
+    """Allow only bounded, anonymized native target, monitor, and condition records."""
 
     def number(value):
         return value is None or type(value) in (int, float) and math.isfinite(value)
@@ -33,8 +33,36 @@ def validate_native_diagnostics(data):
         return isinstance(value, str) and re.fullmatch(r"[0-9a-f]{12}", value) is not None
 
     condition_statuses = {"passed", "failed", "unknown", "skipped"}
-    health_statuses = {"healthy", "unhealthy", "unknown", "waiting", "skipped"}
+
+    def target(value):
+        if value is None:
+            return
+        assert isinstance(value, dict)
+        assert set(value) <= {
+            "position",
+            "percentage",
+            "on",
+            "direction",
+            "profile",
+            "value",
+            "option",
+        }
+        for key in {"position", "percentage", "value"} & set(value):
+            assert type(value[key]) in (int, float) and math.isfinite(value[key])
+        for key in {"profile", "option"} & set(value):
+            assert opaque(value[key])
+        if "on" in value:
+            assert type(value["on"]) is bool
+        if "direction" in value:
+            assert value["direction"] in {"forward", "reverse"}
+
     for row in data["resources"].values():
+        assert "health" not in row
+        for key in {"desired", "observed"} & set(row):
+            target(row[key])
+        for key in ("manual", "last_command"):
+            if row.get(key):
+                target(row[key]["target"])
         if "command_conditions" in row:
             commands = row["command_conditions"]
             assert isinstance(commands, dict)
@@ -44,6 +72,8 @@ def validate_native_diagnostics(data):
                 "set_direction",
                 "set_percentage",
                 "set_cover_position",
+                "set_value",
+                "select_option",
             }
             for result in commands.values():
                 assert isinstance(result, dict)
@@ -54,29 +84,6 @@ def validate_native_diagnostics(data):
                     type(result["evaluated_condition_count"]) is int
                     and result["evaluated_condition_count"] >= 0
                 )
-        if "health" in row:
-            health = row["health"]
-            assert isinstance(health, dict)
-            assert set(health) == {"status", "checks"}
-            assert health["status"] in health_statuses
-            assert isinstance(health["checks"], list)
-            for check in health["checks"]:
-                assert isinstance(check, dict)
-                assert set(check) == {
-                    "check",
-                    "status",
-                    "condition_status",
-                    "qualification_status",
-                    "evaluation_error",
-                }
-                assert opaque(check["check"])
-                assert check["status"] in health_statuses
-                assert check["condition_status"] in condition_statuses
-                assert (
-                    check["qualification_status"] is None
-                    or check["qualification_status"] in condition_statuses
-                )
-                assert type(check["evaluation_error"]) is bool
         if "return_monitor" in row:
             state = row["return_monitor"]
             assert set(state) == {"phase", "target_position", "due_at", "overdue"}
@@ -84,45 +91,8 @@ def validate_native_diagnostics(data):
             assert type(state["overdue"]) is bool
             assert number(state["target_position"]) and number(state["due_at"])
     for row in data["policies"].values():
+        assert set(row) == {"enabled"}
         assert type(row["enabled"]) is bool
-        source = row.get("input")
-        if source is None:
-            continue
-        kind = source["type"]
-        assert kind in {"qualified_numeric", "timer_episode"}
-        fields = {"type", "entity", "qualification_seconds", "state"}
-        assert set(source) == fields | (
-            {"threshold", "comparison", "unit"}
-            if kind == "qualified_numeric"
-            else {"request_seconds"}
-        )
-        assert opaque(source["entity"])
-        assert number(source["qualification_seconds"])
-        if kind == "qualified_numeric":
-            assert number(source["threshold"]) and source["comparison"] == "below"
-            assert opaque(source["unit"])
-        else:
-            assert number(source["request_seconds"])
-        state = source["state"]
-        if state is None:
-            continue
-        if kind == "qualified_numeric":
-            assert set(state) == {
-                "phase",
-                "due_at",
-                "qualified",
-                "source_quality",
-                "recovery_pending",
-            }
-            assert state["phase"] in {"idle", "qualifying", "qualified", "recovering"}
-            assert type(state["qualified"]) is bool and type(state["recovery_pending"]) is bool
-            assert state["source_quality"] in {"numeric", "unknown"}
-        else:
-            assert set(state) == {"phase", "due_at", "expires_at", "finish_at", "episode_id"}
-            assert state["phase"] in {"idle", "qualifying", "accepted", "suppressed", "expired"}
-            assert number(state["expires_at"]) and number(state["finish_at"])
-            assert state["episode_id"] is None or opaque(state["episode_id"])
-        assert number(state["due_at"])
 
 
 async def eventually(
@@ -376,7 +346,7 @@ class Lab:
             print(f"{name}: {item['status']}", flush=True)
             (ARTIFACTS / "scenarios.json").write_text(json.dumps(self.results, indent=2))
 
-    async def crash(self, action, *, saved_request=None):
+    async def crash(self, action, *, saved_request=None, backup=None):
         nonce = secrets.token_hex(6)
         request = {
             "run_id": os.environ["LAB_RUN_ID"],
@@ -384,6 +354,14 @@ class Lab:
             "requested_at": time.time(),
             "request_id": nonce,
         }
+        if action == "backup-restore":
+            assert backup is not None
+            request.update(backup_id=backup["backup_id"], agent_id=backup["agent_id"])
+            session = CONTROL / "lifecycle-session.json"
+            session.write_text(json.dumps({"access_token": self.ha.token}))
+            session.chmod(0o600)
+        if action == "migration-snapshot":
+            request["entry_id"] = self.entry
         if action == "kill":
             assert saved_request is not None
             request.update(entry_id=self.entry, saved_request=saved_request)
@@ -460,6 +438,10 @@ class Lab:
             config = await self.ready()
             assert config["version"] == os.environ["LAB_HA_VERSION"], config["version"]
             await self.page.screenshot(path=str(ARTIFACTS / "onboarding-complete.png"))
+        if os.environ["LAB_SCENARIO"] == "migration":
+            package = await self.crash("package-baseline")
+            assert package["package"]["version"] == "0.3.0"
+            await self.ready()
         async with self.scenario("LAB-NATIVE-CONFIG-FLOW"):
             await self.page.goto(self.ha.base + "/config/integrations/dashboard")
             await self.page.get_by_role("button", name="Add integration", exact=True).click()
@@ -753,13 +735,10 @@ class Lab:
                 "next_attempt",
             }
             assert all(
-                set(row)
-                == resource_fields | ({"return_monitor", "command_conditions", "health"} & set(row))
+                set(row) == resource_fields | ({"return_monitor", "command_conditions"} & set(row))
                 for row in data["resources"].values()
             )
-            assert all(
-                set(row) in ({"enabled"}, {"enabled", "input"}) for row in data["policies"].values()
-            )
+            assert all(set(row) == {"enabled"} for row in data["policies"].values())
             validate_native_diagnostics(data)
             assert all(
                 set(row) == {"status", "selected_provider", "acquiring_provider"}
@@ -906,6 +885,17 @@ async def main():
                     await run_observe_scenarios(lab)
                     await lab.diagnostics()
                     return
+                if os.environ["LAB_SCENARIO"] == "typed":
+                    from .scenarios_typed import run_typed
+
+                    await run_typed(lab)
+                    await lab.diagnostics()
+                    return
+                if os.environ["LAB_SCENARIO"] == "migration":
+                    from .scenarios_migration import run_migration
+
+                    await run_migration(lab)
+                    return
                 if os.environ["LAB_SCENARIO"] == "cellar":
                     from .scenarios_cellar import run_cellar_debug
 
@@ -937,6 +927,11 @@ async def main():
 
                     await observe(lab, locked=False)
                     await run_cellar_scenarios(lab)
+                    from .scenarios_conditions import run_conditions
+                    from .scenarios_typed import run_typed
+
+                    await run_conditions(lab)
+                    await run_typed(lab)
                     await run_observe_scenarios(lab)
                 await lab.diagnostics()
             finally:

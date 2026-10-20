@@ -469,6 +469,41 @@ async def test_native_ha_bridge_reports_feedback_not_receipts(
     await hass.async_block_till_done()
     coordinator = hass.data["ha_operator_sim"]
     try:
+        assert hass.states.get("number.sim_setpoint").state == "18.0"
+        assert hass.states.get("select.sim_operating_mode").state == "quiet"
+        simulator.control("setpoint", {"refuse_actions": ["set_value"]})
+        await hass.services.async_call(
+            "number",
+            "set_value",
+            {"entity_id": "number.sim_setpoint", "value": 20.125},
+            blocking=True,
+        )
+        assert hass.states.get("number.sim_setpoint").state == "18.0"
+        simulator.control("setpoint", {"refuse_actions": []})
+        await hass.services.async_call(
+            "number",
+            "set_value",
+            {"entity_id": "number.sim_setpoint", "value": 20.125},
+            blocking=True,
+        )
+        await coordinator.async_refresh()
+        await hass.async_block_till_done()
+        assert hass.states.get("number.sim_setpoint").state == "20.125"
+        await hass.services.async_call(
+            "select",
+            "select_option",
+            {"entity_id": "select.sim_operating_mode", "option": "boost"},
+            blocking=True,
+        )
+        await coordinator.async_refresh()
+        await hass.async_block_till_done()
+        assert hass.states.get("select.sim_operating_mode").state == "boost"
+        simulator.control("operating_mode", {"options": ["quiet"]})
+        simulator.control("setpoint", {"unit": "°F"})
+        await coordinator.async_refresh()
+        await hass.async_block_till_done()
+        assert hass.states.get("select.sim_operating_mode").attributes["options"] == ["quiet"]
+        assert hass.states.get("number.sim_setpoint").attributes["unit_of_measurement"] == "°F"
         assert hass.states.get("cover.sim_skylight").attributes["current_position"] == 0
         assert hass.states.get("fan.sim_exhaust").state == "off"
         assert hass.states.get("fan.sim_cellar_fan").state == "off"
@@ -578,3 +613,45 @@ def test_invalid_sensor_metadata_is_rejected_before_reset(sim, spec):
     with pytest.raises(ValueError, match="unit"):
         simulator.reset([spec])
     assert "window_temperature" in simulator.devices
+
+
+@pytest.mark.parametrize(
+    ("device", "action", "field", "target", "initial"),
+    [
+        ("setpoint", "set_value", "value", -1.25, 18),
+        ("operating_mode", "select_option", "option", "boost", "quiet"),
+    ],
+)
+def test_typed_actuators_refuse_and_delay_independent_feedback(
+    sim, device, action, field, target, initial
+):
+    simulator, clock = sim
+    simulator.control(device, {"refuse_actions": [action]})
+    assert simulator.command(device, {"action": action, field: target})["accepted"]
+    assert simulator.devices[device].physical["value"] == initial
+    simulator.control(device, {"refuse_actions": [], "telemetry_delay": 2})
+    simulator.command(device, {"action": action, field: target})
+    assert simulator.devices[device].physical["value"] == target
+    assert observed(simulator, device)["value"] == initial
+    clock.advance(2.1)
+    assert observed(simulator, device)["value"] == target
+    assert any(row["kind"] == "effect" and row["device_id"] == device for row in simulator.events)
+    simulator.control(device, {"available": False})
+    with pytest.raises(CommandError, match="unavailable"):
+        simulator.command(device, {"action": action, field: target})
+
+
+def test_typed_actuator_metadata_changes_and_command_validation(sim):
+    simulator, _ = sim
+    for value in (True, float("nan"), float("inf"), -21, 81):
+        with pytest.raises(CommandError):
+            simulator.command("setpoint", {"action": "set_value", "value": value})
+    # Step is metadata: valid service values need not fall on a grid.
+    simulator.command("setpoint", {"action": "set_value", "value": 0.125})
+    simulator.control("setpoint", {"unit": "°F", "min": -40, "max": 100})
+    numeric = simulator.devices["setpoint"].descriptor()
+    assert (numeric["unit"], numeric["min"], numeric["max"]) == ("°F", -40, 100)
+    simulator.control("operating_mode", {"options": ["quiet"]})
+    with pytest.raises(CommandError, match="options"):
+        simulator.command("operating_mode", {"action": "select_option", "option": "boost"})
+    assert simulator.devices["operating_mode"].descriptor()["options"] == ["quiet"]

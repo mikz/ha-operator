@@ -178,24 +178,14 @@ def native_diagnostics():
     return {
         "resources": {
             "a" * 12: {
+                "desired": {"value": -1.25},
+                "observed": {"option": "b" * 12},
                 "command_conditions": {
-                    "turn_on": {
+                    "set_value": {
                         "status": "passed",
                         "evaluation_error": False,
                         "evaluated_condition_count": 1,
                     }
-                },
-                "health": {
-                    "status": "unknown",
-                    "checks": [
-                        {
-                            "check": "f" * 12,
-                            "status": "unknown",
-                            "condition_status": "unknown",
-                            "qualification_status": None,
-                            "evaluation_error": True,
-                        }
-                    ],
                 },
                 "return_monitor": {
                     "phase": "overdue",
@@ -205,44 +195,7 @@ def native_diagnostics():
                 },
             }
         },
-        "policies": {
-            "b" * 12: {"enabled": True, "input": None},
-            "c" * 12: {"enabled": False},
-            "d" * 12: {
-                "enabled": True,
-                "input": {
-                    "type": "qualified_numeric",
-                    "entity": "e" * 12,
-                    "qualification_seconds": 1800,
-                    "threshold": 16,
-                    "comparison": "below",
-                    "unit": "f" * 12,
-                    "state": {
-                        "phase": "recovering",
-                        "due_at": 300,
-                        "qualified": True,
-                        "source_quality": "unknown",
-                        "recovery_pending": True,
-                    },
-                },
-            },
-            "e" * 12: {
-                "enabled": True,
-                "input": {
-                    "type": "timer_episode",
-                    "entity": "f" * 12,
-                    "qualification_seconds": 60,
-                    "request_seconds": 1800,
-                    "state": {
-                        "phase": "accepted",
-                        "due_at": None,
-                        "expires_at": 1860,
-                        "finish_at": 600,
-                        "episode_id": "a" * 12,
-                    },
-                },
-            },
-        },
+        "policies": {"b" * 12: {"enabled": True}, "c" * 12: {"enabled": False}},
     }
 
 
@@ -252,14 +205,9 @@ def test_native_diagnostics_accepts_only_known_anonymized_records():
     data = native_diagnostics()
     validate_native_diagnostics(data)
     data["resources"]["a" * 12].pop("return_monitor")
-    data["policies"]["d" * 12]["input"]["state"] = None
-    data["policies"]["e" * 12]["input"]["state"]["episode_id"] = None
-    validate_native_diagnostics(data)
     data["resources"]["a" * 12]["command_conditions"] = {}
-    data["resources"]["a" * 12]["health"]["checks"][0]["qualification_status"] = "passed"
     validate_native_diagnostics(data)
     data["resources"]["a" * 12].pop("command_conditions")
-    data["resources"]["a" * 12].pop("health")
     validate_native_diagnostics(data)
 
 
@@ -268,24 +216,18 @@ def test_native_diagnostics_accepts_only_known_anonymized_records():
     [
         (("command_conditions",), []),
         (("command_conditions",), {"sensor.private": {}}),
-        (("command_conditions", "turn_on"), []),
-        (("command_conditions", "turn_on", "status"), "healthy"),
-        (("command_conditions", "turn_on", "evaluation_error"), 1),
-        (("command_conditions", "turn_on", "evaluated_condition_count"), True),
-        (("command_conditions", "turn_on", "evaluated_condition_count"), -1),
-        (("command_conditions", "turn_on", "evaluated_condition_count"), 1.5),
-        (("command_conditions", "turn_on", "conditions"), [{"entity_id": "sensor.private"}]),
-        (("health",), []),
-        (("health", "status"), "passed"),
-        (("health", "checks"), {}),
-        (("health", "checks", 0), []),
-        (("health", "checks", 0, "check"), "Private check alias"),
-        (("health", "checks", 0, "status"), "passed"),
-        (("health", "checks", 0, "condition_status"), "healthy"),
-        (("health", "checks", 0, "qualification_status"), "waiting"),
-        (("health", "checks", 0, "evaluation_error"), 1),
-        (("health", "checks", 0, "alias"), "Private check alias"),
-        (("health", "checks", 0, "sources"), {"sensor.private": {"state": "on"}}),
+        (("command_conditions", "set_value"), []),
+        (("command_conditions", "set_value", "status"), "healthy"),
+        (("command_conditions", "set_value", "evaluation_error"), 1),
+        (("command_conditions", "set_value", "evaluated_condition_count"), True),
+        (("command_conditions", "set_value", "evaluated_condition_count"), -1),
+        (("command_conditions", "set_value", "evaluated_condition_count"), 1.5),
+        (("command_conditions", "set_value", "conditions"), [{"entity_id": "sensor.private"}]),
+        (("health",), {"status": "healthy"}),
+        (("desired", "value"), float("nan")),
+        (("desired", "value"), True),
+        (("desired", "entity_id"), "number.private"),
+        (("observed", "option"), "Private operating option"),
     ],
 )
 def test_native_condition_diagnostics_rejects_private_fields_and_invalid_shapes(path, value):
@@ -320,45 +262,37 @@ def test_native_return_diagnostics_rejects_unknown_fields_and_types(field, value
 
 
 @pytest.mark.parametrize(
-    "kind,field,value",
+    "field,value",
     [
-        ("numeric", "entity", "sensor.private_temperature"),
-        ("numeric", "unit", "°C"),
-        ("numeric", "threshold", True),
-        ("numeric", "comparison", "above"),
-        ("numeric", "type", "other"),
-        ("numeric", "secret", "private-name"),
-        ("timer", "request_seconds", float("inf")),
+        ("input", {"type": "qualified_numeric", "entity": "sensor.private"}),
+        ("input", {"type": "timer_episode", "state": {"episode_id": "private"}}),
+        ("conditions", [{"condition": "state", "entity_id": "sensor.private"}]),
+        ("triggers", [{"trigger": "event", "event_type": "private"}]),
+        ("source", "private-name"),
+        ("enabled", 1),
     ],
 )
-def test_native_input_diagnostics_rejects_plain_identifiers_and_unknown_fields(kind, field, value):
+def test_native_policy_diagnostics_rejects_legacy_or_private_configuration(field, value):
     from tests.lab.runner import validate_native_diagnostics
 
     data = native_diagnostics()
-    key = "d" if kind == "numeric" else "e"
-    data["policies"][key * 12]["input"][field] = value
+    data["policies"]["b" * 12][field] = value
     with pytest.raises(AssertionError):
         validate_native_diagnostics(data)
 
 
-@pytest.mark.parametrize(
-    "kind,field,value",
-    [
-        ("numeric", "qualified", 1),
-        ("numeric", "source_quality", "private-quality"),
-        ("numeric", "recovery_pending", 1),
-        ("numeric", "phase", "private-phase"),
-        ("timer", "episode_id", "plain-episode-id"),
-        ("timer", "expires_at", "1860"),
-        ("timer", "phase", "private-phase"),
-        ("timer", "secret", "private-name"),
-    ],
-)
-def test_native_input_state_diagnostics_rejects_unrecognized_records(kind, field, value):
-    from tests.lab.runner import validate_native_diagnostics
+def test_independent_lab_templates_use_native_schema():
+    from pathlib import Path
 
-    data = native_diagnostics()
-    key = "d" if kind == "numeric" else "e"
-    data["policies"][key * 12]["input"]["state"][field] = value
-    with pytest.raises(AssertionError):
-        validate_native_diagnostics(data)
+    import yaml
+    from homeassistant.components.template.config import CONFIG_SECTION_SCHEMA
+
+    class FixtureLoader(yaml.SafeLoader):
+        pass
+
+    FixtureLoader.add_constructor("!include", lambda loader, node: loader.construct_scalar(node))
+    config = yaml.load(
+        (Path(__file__).parents[1] / "lab/configuration.yaml").read_text(), Loader=FixtureLoader
+    )
+    validated = [CONFIG_SECTION_SCHEMA(section) for section in config["template"]]
+    assert len(validated) == 3

@@ -3,7 +3,14 @@
   "kind": "state",
   "resource_id": "WINDOW_RESOURCE_ID",
   "priority": 10,
-  "eligibility_entity": "binary_sensor.example_ventilation_needed",
-  "eligibility_state": "on",
-  "target": {"position": 40}
+  "target": {
+    "position": 40
+  },
+  "conditions": [
+    {
+      "condition": "state",
+      "entity_id": "binary_sensor.example_ventilation_needed",
+      "state": "on"
+    }
+  ]
 }

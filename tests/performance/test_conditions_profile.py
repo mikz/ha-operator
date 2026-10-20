@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import cProfile
 import gc
 import json
@@ -55,16 +56,21 @@ def custom_integrations(enable_custom_integrations):
 
 async def test_profile(hass, tmp_path, freezer, monkeypatch):
     hass.config.config_dir = str(tmp_path)
+    loop = asyncio.get_running_loop()
+    previous_debug = loop.get_debug()
+    loop.set_debug(False)
     count = int(os.environ.get("OPERATOR_PROFILE_COUNT", "20"))
     measure = os.environ.get("OPERATOR_PROFILE_MEASURE", "timing")
-    workload = os.environ.get("OPERATOR_PROFILE_WORKLOAD", "conditions")
-    assert workload == "conditions"
+    workload = os.environ.get("OPERATOR_PROFILE_WORKLOAD", "native-conditions")
+    assert workload == "native-conditions"
     counts = Counter()
     instances = WeakSet()
     native_evaluate = NativeConditionList.evaluate
 
     def evaluate(check):
         counts["condition_evaluations"] += 1
+        if check.configs and check.configs[0].get("entity_id") == metric:
+            counts["policy_condition_evaluations"] += 1
         instances.add(check)
         return native_evaluate(check)
 
@@ -89,18 +95,28 @@ async def test_profile(hass, tmp_path, freezer, monkeypatch):
         "command_conditions": {
             "turn_on": [{"condition": "state", "entity_id": gate, "state": "on"}]
         },
-        "health_checks": [
-            {
-                "alias": f"Metric {index}",
-                "conditions": [{"condition": "numeric_state", "entity_id": metric, "above": 10}],
-            }
-            for index in range(4)
-        ],
     }
+    policies = [
+        {
+            "subentry_id": f"policy{index}",
+            "subentry_type": "policy",
+            "title": f"Metric {index}",
+            "unique_id": None,
+            "data": {
+                "name": f"Metric {index}",
+                "kind": "state",
+                "resource_id": "resource",
+                "priority": index,
+                "target": {"on": False},
+                "conditions": [{"condition": "numeric_state", "entity_id": metric, "above": 10}],
+            },
+        }
+        for index in range(4)
+    ]
     entry = MockConfigEntry(
         domain=DOMAIN,
         title="Conditions",
-        version=2,
+        version=4,
         data={},
         options={},
         subentries_data=[
@@ -110,7 +126,8 @@ async def test_profile(hass, tmp_path, freezer, monkeypatch):
                 "title": config["name"],
                 "data": config,
                 "unique_id": None,
-            }
+            },
+            *policies,
         ],
     )
     entry.add_to_hass(hass)
@@ -120,8 +137,11 @@ async def test_profile(hass, tmp_path, freezer, monkeypatch):
     runtime = entry.runtime_data
     await runtime.async_set_mode("resource", "live")
     registry = er.async_get(hass)
-    health = registry.async_get_entity_id("sensor", DOMAIN, "resource_health")
-    assert health is not None and hass.states.get(health).state == "healthy"
+    reason = registry.async_get_entity_id("sensor", DOMAIN, "resource_reason")
+    assert reason is not None
+    assert (
+        runtime.explain("resource")["resources"]["resource"]["selection"]["source_id"] == "policy3"
+    )
 
     @callback
     def command(call):
@@ -148,11 +168,15 @@ async def test_profile(hass, tmp_path, freezer, monkeypatch):
     async def source(entity, value):
         previous = hass.states.get(entity)
         evaluations = counts["condition_evaluations"]
+        policy_evaluations = counts["policy_condition_evaluations"]
         hass.states.async_set(entity, value)
         await hass.async_block_till_done()
         if entity == metric and previous.state != value:
             counts["shared_input_changes"] += 1
             counts["shared_input_evaluations"] += counts["condition_evaluations"] - evaluations
+            counts["shared_input_policy_evaluations"] += (
+                counts["policy_condition_evaluations"] - policy_evaluations
+            )
 
     async def batch():
         nonlocal runtime
@@ -168,22 +192,29 @@ async def test_profile(hass, tmp_path, freezer, monkeypatch):
             await source(gate, "off")
         assert counts["operator_state_changed"] == before["operator_state_changed"]
         assert counts["operator_native_traces"] == before["operator_native_traces"]
-        snapshot = hass.states.get(health)
+        snapshot = hass.states.get(reason)
         await source(metric, "21")
         await source(metric, "20")
-        assert hass.states.get(health).last_updated == snapshot.last_updated
-        assert hass.states.get(health).attributes == snapshot.attributes
+        assert hass.states.get(reason).last_updated == snapshot.last_updated
+        assert hass.states.get(reason).attributes == snapshot.attributes
         assert counts["operator_state_changed"] == before["operator_state_changed"]
         assert counts["operator_native_traces"] == before["operator_native_traces"]
         await source(metric, "5")
-        assert hass.states.get(health).state == "unhealthy"
-        await source(metric, "unavailable")
-        assert hass.states.get(health).state == "unknown"
-        await source(metric, "20")
-        assert hass.states.get(health).state == "healthy"
-        assert counts["shared_input_evaluations"] - before["shared_input_evaluations"] == 5 * (
-            counts["shared_input_changes"] - before["shared_input_changes"]
+        assert (
+            runtime.explain("resource")["resources"]["resource"]["selection"]["source_id"] is None
         )
+        await source(metric, "unavailable")
+        assert (
+            runtime.explain("resource")["resources"]["resource"]["selection"]["source_id"] is None
+        )
+        await source(metric, "20")
+        assert (
+            runtime.explain("resource")["resources"]["resource"]["selection"]["source_id"]
+            == "policy3"
+        )
+        assert counts["shared_input_policy_evaluations"] - before[
+            "shared_input_policy_evaluations"
+        ] == 4 * (counts["shared_input_changes"] - before["shared_input_changes"])
         old_checks = set(instances)
         old = runtime
         assert await hass.config_entries.async_reload(entry.entry_id)
@@ -225,6 +256,8 @@ async def test_profile(hass, tmp_path, freezer, monkeypatch):
             "entry_reloads",
             "shared_input_changes",
             "shared_input_evaluations",
+            "shared_input_policy_evaluations",
+            "policy_condition_evaluations",
             "operator_native_traces",
         ),
         0,
@@ -238,18 +271,22 @@ async def test_profile(hass, tmp_path, freezer, monkeypatch):
     if output:
         result = {
             "workload": workload,
+            "comparison_scope": "new native policy probe; not legacy detector/Health parity",
             "measurement": measure,
             "batches": count,
+            "warmup_batches": 1,
             "counts": measured,
             "wall_seconds": elapsed_wall,
             "cpu_seconds": elapsed_cpu,
             "memory": memory,
             "ha_version": version("homeassistant"),
             "fixture_version": version("pytest-homeassistant-custom-component"),
-            "configuration": config,
-            "scope": "Candidate-only native HA evaluator: four health checks sharing one metric, "
+            "configuration": {"resource": config, "policies": policies},
+            "scope": "Candidate-only native HA evaluator: four native state-policy conditions "
+            "sharing one metric, "
             "one command gate, five idle ticks, five unchanged "
-            "report pairs, two same-result value changes, three health threshold/availability "
+            "report pairs, two same-result value changes, three policy eligibility "
+            "threshold/availability "
             "transitions and one reload "
             "per batch. No Recorder, devices, network, actuation intent or production soak. "
             "Final unload excluded. Weak references observe checker cleanup.",
@@ -261,3 +298,4 @@ async def test_profile(hass, tmp_path, freezer, monkeypatch):
                 profile.dump_stats(str(Path(output).with_suffix(".cprof")))
 
         await hass.async_add_executor_job(save)
+    loop.set_debug(previous_debug)

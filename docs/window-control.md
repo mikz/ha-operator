@@ -34,90 +34,51 @@ their service call when the observed state already matches. This can leave an
 older opening request active after a device closes autonomously. A group's
 average position also does not establish that every member reached its target.
 
-## Automatic requests and confirmation
+## Native policies and confirmation
 
-Native policies can own the qualification clocks. In the policy form, choose
-**Qualified numeric sensor** for a state policy or **Timer episode** for an
-occurrence policy. The next form shows only that input's settings. Remove the
-old helper eligibility fields when converting a policy; no helper values or
-history are imported. Reconfiguration keeps the policy ID and common settings.
+Use continuous native `conditions` on a state policy, referencing existing native
+sensors or helpers. Configure those entities independently. For timed requests,
+use optional native `triggers`, admission-only `conditions`, a positive `duration`,
+and optional `cancel_triggers` on an occurrence policy. The
+[native policy example](native-policies.md) shows the saved subentry data.
+There is no custom qualification or timer episode engine.
 
-A numeric input requires a sensor, a threshold, an exact source unit, and a
-positive qualification delay. It compares strictly below the threshold. Warm
-reports reset qualification; unknown reports preserve the episode. Recovery
-requires a fresh numeric report before the saved qualification becomes eligible.
+A native state trigger matching timer `active` for a minute can qualify again
+after resume. An active-to-active restart does not necessarily restart the wait.
+Natural finish before qualification prevents admission; after admission it leaves
+the frozen request expiry intact unless configured cancellation matches. Native
+pending waits reset on reload/restart. Real restoration events follow HA behavior;
+Operator does not synthesize startup admissions. Approve these differences before
+migrating legacy timer inputs.
 
-A timer input requires a timer, a positive qualification delay, and a positive
-request duration. A fresh start begins a new episode. Pause or cancel withdraws
-it; resume does not open another window. Natural completion keeps an accepted
-request until its expiry. The request expires one qualification delay plus one
-request duration after the fresh start.
+Each policy has at most one stored trigger-owned request. A qualifying callback
+replaces it with a frozen target and expiry measured from callback time. Rejected
+conditions or an invalid target leave the earlier accepted request untouched.
+Cancellation withdraws only that policy's trigger-owned request. External request
+IDs and deduplication keep their existing behavior.
 
-A full Home Assistant restart retains accepted timer requests with their original
-absolute expiry. Operator discards pending timer qualification and waits for a
-fresh start. Restoring an active timer does not create an opening. Numeric
-qualification retains its deadline but requires a fresh finite report before it
-becomes eligible. Restored or optimistic device feedback does not confirm movement.
+Observe mode, shadow lock, disable, and live reload detach pending waits and
+withdraw trigger-owned requests. Returning live attaches fresh without replay.
+Shutdown preserves accepted absolute expiry through the existing Store behavior.
+A service response does not wait for a disk save; crash recovery uses the last
+saved snapshot. Existing manual leases and unrelated desired controls retain
+their persistence rules.
 
-Reloading or unloading the integration while Home Assistant runs interrupts
-pending and accepted timer episodes. Operator closes admissions, drains active
-services, and saves current suppression through Store before replacement workers
-start. Activity records each interruption. Enabling a disabled diagnostic entity
-can reload the entry and interrupt a timer episode. Manual leases, fan settings,
-and sleep intent survive ordinary reload.
+Cover resources can configure **Return confirmation**: the highest target to
+monitor and the warning delay. Confirmation uses raw position and the resource's
+tolerance. An overdue return creates one notification and turns on **Return
+overdue**. Raw confirmation clears both. Retrying or unchanged telemetry does not
+restart the deadline. Virtual targets or group averages cannot prove that every
+physical cover returned.
 
-Store logs write failures through Home Assistant. Crash recovery uses the last
-saved state, so a command or withdrawal made before a delayed save can be lost.
-The SIGKILL lab cases wait for a normal save before crashing HA.
+### Existing external helper recipes
 
-Cover resources can also configure **Return confirmation**: the highest target
-to monitor and the warning delay in seconds. Confirmation uses raw position and
-the resource's position tolerance. An overdue return creates one notification
-and turns on the **Return overdue** problem sensor. Physical confirmation clears
-both. Retrying a command or reporting an unchanged position keeps the deadline.
-
-These settings are optional. Existing helper recipes remain supported as
-described below. Keep one controller for each function during a transfer.
-
-### Existing helper recipes
-
-The timer recipe gives each fresh start, including a restart while active, an
-identity and absolute expiry. Pause, cancel, and replacement suppress the prior
-occurrence. A paused marker distinguishes resume from active restart. It is saved
-before withdrawal, so a failed withdrawal cannot turn resume into a new opening.
-Startup reconciles that marker with the restored timer state and invalidates
-unadmitted qualifications. A timestamp rejects events captured before readiness.
-Operator restores already accepted occurrences through Home Assistant Store.
-
-The temperature recipe keeps a qualification deadline in a native helper. A
-fresh numeric HA report is required after startup. Unknown values preserve the
-episode rather than becoming zero. Counting an offline interval toward the
-deadline assumes continuity; it does not prove uninterrupted temperature or
-fresh physical measurement. Manual leases retain precedence over the resulting
-ordinary policy.
-
-Create each clock's readiness helper and the cold eligibility boolean with
-`initial: false`. Startup clears unadmitted timer state or establishes temperature
-freshness, then enables that clock's readiness helper last. Qualification actions
-reject a closed or unavailable readiness gate. After installing or reloading
-these automations, initialize their records before enabling readiness.
-The timer record starts as `{"v":1,"phase":"idle","initialized_at":UTC_EPOCH}`;
-use `"paused"` when the existing timer is paused. Set `UTC_EPOCH` to the actual
-initialization time. Unknown or malformed timer records inhibit admission.
-
-Native helpers track qualification and alert clocks. The Operator response
-establishes runtime acceptance of a request or occurrence. Ordinary Store saves
-preserve state for reload; a service response does not wait for a disk save.
-
-The confirmation helper reads raw positions individually. It reports true when
-any known raw position exceeds the configured threshold, false only when every
-raw position is known and within it, and unavailable otherwise. Desired state,
-virtual targets, and group averages cannot confirm physical position.
-
-The return alert keeps a separate deadline for an unconfirmed return target,
-notifies once per episode, and dismisses the notification on recovery. Its
-message includes the current Operator explanation. Repeated telemetry does not
-restart the alert clock.
+The recipes in `window_recipe.py` remain independent deployment configuration for
+external occurrence submissions and native helper predicates. Operator does not
+provision or own their scripts, automations, or helpers. Their legacy episode
+semantics differ from native trigger admission; do not silently exchange them.
+Keep one writer for each function. Preserve consumer definitions and histories
+until their replacement and rollback paths are verified.
 
 ## Validate the configuration
 
@@ -144,33 +105,14 @@ and unrelated accessory identities.
 
 ### Synthetic native policy demonstration
 
-The `windows` lab keeps the helper compatibility checks, then disables their
-writers and reconfigures the same policy IDs through the native two-step forms.
-Its temperature comes from the simulator's independent `window_temperature`
-sensor, with a `°C` unit. Read-only diagnostics provide episode and return
-deadlines; diagnostic entities stay disabled.
+The `windows` scenario exercises native conditions and timer state-for admission,
+cancellation, pending-wait loss on reload, observe-mode fencing, and accepted
+expiry. Independently configured fixture helpers supply continuous cold eligibility;
+the simulator supplies physical feedback. Accelerated waits validate ordering,
+not a production-duration observation period.
 
-The native checks use a two-second qualification, a 12-second opening request,
-and a six-second return warning. The dashboard demonstration uses an 18-second
-request. Accepted restart checks use a 180-second request so the original expiry
-can survive HA startup. These are accelerated configurations, not observations
-of production timing. The existing ten-minute soak remains a separate release
-gate with production retry intervals.
-
-Open `/window-native/return` in the retained isolated lab. Its native Lovelace
-cards show desired position, raw observed position, reason, effective expiry,
-return overdue, and the public ventilation timer. The runner saves five states:
-opening, refused opening, expired request with the 7% baseline, overdue return,
-and confirmed raw return. It also saves `window-native-evidence.json` with the
-clock settings, ordered explanations, typed deadlines, and simulator journal
-markers. `window-native-dashboard.json` records the native dashboard definition.
-
-The refusal demonstration injects raw positions through simulator controls and
-records that choice in its journal. Commands and physical movement remain
-independently journaled. Unknown raw feedback and a virtual cover at 7% cannot
-clear the return warning. Clearing refusal permits a paced retry, physical
-movement to 7%, and dismissal of the stable notification.
-
-Both supported HA versions must complete the native window cases and save all
-five screenshots. Preparing a lab image or passing helper tests alone does not
-establish native policy acceptance.
+Native dashboard cards show desired and observed position, Reason, effective
+expiry, return overdue, and the public timer. Each value opens its underlying
+entity details and history. Screenshots and journals establish physical effects,
+refusal, expiry, and recovery. Run the exact package on the supported 2026.10.2
+baseline; image preparation or helper unit tests alone do not establish acceptance.

@@ -1,4 +1,4 @@
-"""Native command permission and health stay separate from selected intent and I/O."""
+"""Native command permission stays separate from selected intent and I/O."""
 
 # ruff: noqa: F811 - imported pytest fixtures are injected by name
 
@@ -6,15 +6,13 @@ import asyncio
 import json
 
 import pytest
-from homeassistant.components.trace.const import DATA_TRACE
-from homeassistant.helpers import entity_registry as er
 from homeassistant.util import dt as dt_util
 
 from custom_components.ha_operator.core import Target
 from custom_components.ha_operator.diagnostics import async_get_config_entry_diagnostics
 from custom_components.ha_operator.fan import OperatorFan
 
-from .helpers import async_add_physical_cover, async_setup_operator, managed_id
+from .helpers import async_add_physical_cover, async_setup_operator
 from .test_runtime_completion_pacing import relay_bundle  # noqa: F401
 from .test_runtime_reconciliation import advance, reported, runtime_factory  # noqa: F401
 
@@ -402,170 +400,90 @@ async def test_relay_safety_off_bypasses_off_gate_and_on_gate_rechecks_after_dea
     assert runtime.decisions["relay"].target.profile == "reverse"
 
 
-async def test_health_frozen_on_semantic_changes_explain_fresh_and_diagnostics_private(
-    hass, tmp_path
-):
-    await async_add_physical_cover(hass)
-    hass.states.async_set(
-        "sensor.metric",
-        "12",
-        {"friendly_name": "Private frame metric", "unit_of_measurement": "fps"},
-    )
-    checks = [
-        {
-            "alias": "Private frames",
-            "conditions": [
-                {"condition": "numeric_state", "entity_id": "sensor.metric", "above": 10}
-            ],
-        }
-    ]
-    entry = await async_setup_operator(
-        hass,
-        tmp_path,
-        resources={
-            "roof": {
-                "name": "Roof",
-                "kind": "cover",
-                "entity_id": "cover.physical_roof",
-                "health_checks": checks,
-            }
-        },
-    )
-    runtime = entry.runtime_data
-    health_id = managed_id(hass, "sensor", key="health")
-    reason_id = managed_id(hass, "sensor", key="reason")
-    initial = hass.states.get(health_id)
-    assert initial.state == "healthy"
-    traces = hass.data[DATA_TRACE]["script.roof_reason"].runs
-    before_traces = len(traces)
-    events = []
-    remove = hass.bus.async_listen("state_changed", events.append)
-    hass.states.async_set(
-        "sensor.metric",
-        "13",
-        {"friendly_name": "Private frame metric", "unit_of_measurement": "fps"},
-    )
-    await hass.async_block_till_done()
-    assert hass.states.get(health_id) is initial
-    assert not [event for event in events if event.data["entity_id"] in {health_id, reason_id}]
-    assert len(traces) == before_traces
-    fresh = runtime.explain("roof")["resources"]["roof"]["conditions"]
-    assert (
-        fresh["health"]["checks"][0]["conditions"]["conditions"][0]["sources"]["sensor.metric"][
-            "state"
-        ]
-        == "13"
-    )
-    hass.states.async_set("sensor.metric", "1")
-    await hass.async_block_till_done()
-    assert hass.states.get(health_id).state == "unhealthy"
-    assert len([event for event in events if event.data["entity_id"] == health_id]) == 1
-    assert len(traces) == before_traces + 1
-    assert not runtime.attempts and not runtime.last_commands
-    diagnostic = json.dumps(await async_get_config_entry_diagnostics(hass, entry))
-    for private in ("Private", "sensor.metric", "value_template", "above"):
-        assert private not in diagnostic
-    assert "unhealthy" in diagnostic
-    remove()
-
-
-async def test_unhealthy_live_resource_keeps_selected_on_without_restart(hass, runtime_factory):
-    hass.states.async_set("sensor.metric", "20")
-    runtime, commands = await switch_runtime(
-        hass,
-        runtime_factory,
-        health_checks=[
-            {
-                "alias": "Rate",
-                "conditions": [
-                    {"condition": "numeric_state", "entity_id": "sensor.metric", "above": 10}
-                ],
-            }
-        ],
-        policies={
-            "follow": {
-                "name": "Follow",
-                "resource_id": "plug",
-                "kind": "state",
-                "target": {"on": True},
-            }
-        },
-    )
-    hass.states.async_set("switch.raw", "on")
-    await runtime.async_set_mode("plug", "live")
-    await hass.async_block_till_done()
-    assert runtime.decisions["plug"].status == "satisfied"
-    hass.states.async_set("sensor.metric", "1")
-    await hass.async_block_till_done()
-    assert runtime.health_details("plug")["status"] == "unhealthy"
-    assert runtime.decisions["plug"].status == "satisfied"
-    assert runtime.decisions["plug"].target == Target(on=True)
-    assert not commands and not runtime.attempts and not runtime.last_commands
-
-
-async def test_health_registry_removal_readdition_and_user_disable_preserved(hass, tmp_path):
-    await async_add_physical_cover(hass)
-    data = {"name": "Roof", "kind": "cover", "entity_id": "cover.physical_roof"}
-    checks = [
-        {
-            "alias": "Check",
-            "conditions": [{"condition": "template", "value_template": "{{ true }}"}],
-        }
-    ]
-    entry = await async_setup_operator(
-        hass, tmp_path, resources={"roof": {**data, "health_checks": checks}}
-    )
-    registry = er.async_get(hass)
-    entity_id = managed_id(hass, "sensor", key="health")
-    old_runtime = entry.runtime_data
-    old_checkers = [
-        checker for checks in old_runtime._native_lists().values() for checker in checks
-    ]
-    original = entry.subentries["roof"]
-    hass.config_entries.async_update_subentry(entry, original, data=data)
-    await hass.async_block_till_done()
-    assert old_runtime._closed and all(
-        checker._closed and not checker._unsubscribers for checker in old_checkers
-    )
-    assert registry.async_get(entity_id).disabled_by is er.RegistryEntryDisabler.INTEGRATION
-    hass.config_entries.async_update_subentry(
-        entry, entry.subentries["roof"], data={**data, "health_checks": checks}
-    )
-    await hass.async_block_till_done()
-    assert managed_id(hass, "sensor", key="health") == entity_id
-    assert registry.async_get(entity_id).disabled_by is None
-    registry.async_update_entity(entity_id, disabled_by=er.RegistryEntryDisabler.USER)
-    hass.config_entries.async_update_subentry(entry, entry.subentries["roof"], data=data)
-    await hass.async_block_till_done()
-    hass.config_entries.async_update_subentry(
-        entry, entry.subentries["roof"], data={**data, "health_checks": checks}
-    )
-    await hass.async_block_till_done()
-    assert registry.async_get(entity_id).disabled_by is er.RegistryEntryDisabler.USER
-
-
-@pytest.mark.parametrize("qualified_health", [False, True])
-async def test_diagnostic_condition_and_qualification_errors_are_allowlisted(
-    hass, runtime_factory, qualified_health
-):
+async def test_diagnostic_condition_errors_are_allowlisted(hass, runtime_factory):
     data = {
         "command_conditions": {
             "turn_on": [{"condition": "template", "value_template": "{{ 1 / 0 }}"}]
         }
     }
-    if qualified_health:
-        data["health_checks"] = [
-            {
-                "alias": "Private health",
-                "conditions": [],
-                "qualification": [{"condition": "template", "value_template": "{{ 1 / 0 }}"}],
-            }
-        ]
     runtime, _ = await switch_runtime(hass, runtime_factory, **data)
     diagnostics = await async_get_config_entry_diagnostics(hass, runtime.entry)
     resource = next(iter(diagnostics["resources"].values()))
     assert resource["command_conditions"]["turn_on"]["evaluation_error"]
-    if qualified_health:
-        assert resource["health"]["checks"][0]["evaluation_error"]
     assert "Private" not in json.dumps(diagnostics)
     assert "value_template" not in json.dumps(diagnostics)
+
+
+@pytest.mark.parametrize("user_disabled", [False, True])
+async def test_retired_health_registry_history_identity_and_native_source_preserved(
+    hass, tmp_path, user_disabled
+):
+    """Retire only Operator's projection; independently configured data remains."""
+    from homeassistant.helpers import entity_registry as er
+
+    await async_add_physical_cover(hass)
+    hass.states.async_set("binary_sensor.native_processing", "on", {"friendly_name": "Processing"})
+    entry = await async_setup_operator(hass, tmp_path)
+    registry = er.async_get(hass)
+    historical = registry.async_get_or_create(
+        "sensor",
+        "ha_operator",
+        "roof_health",
+        suggested_object_id="historical_health",
+        config_entry=entry,
+        config_subentry_id="roof",
+        disabled_by=er.RegistryEntryDisabler.USER if user_disabled else None,
+    )
+    registry.async_update_entity(historical.entity_id, name="Retained observations")
+    native = hass.states.get("binary_sensor.native_processing")
+    assert await hass.config_entries.async_reload(entry.entry_id)
+    await hass.async_block_till_done()
+    retained = registry.async_get(historical.entity_id)
+    assert retained.unique_id == "roof_health"
+    assert retained.name == "Retained observations"
+    assert retained.disabled_by is (
+        er.RegistryEntryDisabler.USER if user_disabled else er.RegistryEntryDisabler.INTEGRATION
+    )
+    assert hass.states.get("binary_sensor.native_processing") is native
+    assert "health" not in entry.runtime_data.condition_details("roof")
+
+
+@pytest.mark.parametrize(
+    "platform,suffix",
+    [("sensor", "input_phase"), ("sensor", "qualification_due"), ("binary_sensor", "qualified")],
+)
+@pytest.mark.parametrize("user_disabled", [False, True])
+async def test_retired_detector_registry_keeps_identity_and_user_disable(
+    hass, tmp_path, platform, suffix, user_disabled
+):
+    from homeassistant.helpers import entity_registry as er
+
+    await async_add_physical_cover(hass)
+    entry = await async_setup_operator(
+        hass,
+        tmp_path,
+        policies={
+            "p": {
+                "name": "Native",
+                "kind": "state",
+                "resource_id": "roof",
+                "target": {"position": 7},
+            }
+        },
+    )
+    registry = er.async_get(hass)
+    historical = registry.async_get_or_create(
+        platform,
+        "ha_operator",
+        f"p_{suffix}",
+        config_entry=entry,
+        config_subentry_id="p",
+        disabled_by=er.RegistryEntryDisabler.USER if user_disabled else None,
+    )
+    hass.states.async_set(historical.entity_id, "unavailable", {"restored": True})
+    assert await hass.config_entries.async_reload(entry.entry_id)
+    await hass.async_block_till_done()
+    assert registry.async_get(historical.entity_id).disabled_by is (
+        er.RegistryEntryDisabler.USER if user_disabled else er.RegistryEntryDisabler.INTEGRATION
+    )
+    assert hass.states.get(historical.entity_id) is None

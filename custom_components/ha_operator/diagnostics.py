@@ -8,8 +8,6 @@ from typing import TYPE_CHECKING, Any, cast, overload
 from homeassistant.core import HomeAssistant
 
 from . import OperatorConfigEntry
-from .data import PolicyConfig
-from .policy_inputs import NumericState, TimerState
 
 if TYPE_CHECKING:
     from .runtime import OperatorRuntime
@@ -64,13 +62,15 @@ def _target(value: object) -> dict[str, object] | None:
     if not isinstance(value, dict):
         return None
     clean: dict[str, object] = {}
-    for key in ("position", "percentage"):
+    for key in ("position", "percentage", "value"):
         if _number(value.get(key)) is not None:
             clean[key] = value[key]
     if isinstance(value.get("on"), bool):
         clean["on"] = value["on"]
     if value.get("direction") in {"forward", "reverse"}:
         clean["direction"] = value["direction"]
+    if value.get("option") is not None:
+        clean["option"] = _identifier(value["option"])
     if value.get("profile") is not None:
         clean["profile"] = _identifier(value["profile"])
     return clean
@@ -82,51 +82,6 @@ def _status(value: object) -> str:
 
 def _condition_error(result: dict[str, Any]) -> bool:
     return bool(result["error"] or any(item["error"] for item in result["conditions"]))
-
-
-def _policy_input(
-    runtime: OperatorRuntime, identifier: str, config: PolicyConfig
-) -> dict[str, object] | None:
-    """Export the bounded input contract and current state with opaque identifiers."""
-    source = config.get("input")
-    if source is None:
-        return None
-    state = runtime.policy_input(identifier)
-    result: dict[str, object] = {
-        "type": source["type"],
-        "entity": _identifier(source["entity_id"]),
-        "qualification_seconds": _number(source["qualification_seconds"]),
-        "state": None,
-    }
-    if source["type"] == "qualified_numeric":
-        result.update(
-            threshold=_number(source["threshold"]),
-            comparison="below",
-            unit=_identifier(source["unit"]),
-        )
-        if state is not None:
-            # Startup and owned input writes pair the numeric model with this source.
-            numeric = cast(NumericState, state)
-            result["state"] = {
-                "phase": numeric.phase,
-                "due_at": _number(numeric.due_at),
-                "qualified": numeric.qualified,
-                "source_quality": numeric.source_quality,
-                "recovery_pending": numeric.recovery_pending,
-            }
-    else:
-        result["request_seconds"] = _number(source["request_seconds"])
-        if state is not None:
-            # The same validated/owned pairing holds for timer records.
-            timer = cast(TimerState, state)
-            result["state"] = {
-                "phase": timer.phase,
-                "due_at": _number(timer.due_at),
-                "expires_at": _number(timer.expires_at),
-                "finish_at": _number(timer.finish_at),
-                "episode_id": _identifier(timer.episode_id),
-            }
-    return result
 
 
 async def async_get_config_entry_diagnostics(
@@ -161,7 +116,7 @@ async def async_get_config_entry_diagnostics(
         command = runtime.last_commands.get(identifier)
         resources[_identifier(identifier)] = {
             "kind": config["kind"]
-            if config["kind"] in {"cover", "fan", "relay_fan", "switch"}
+            if config["kind"] in {"cover", "fan", "relay_fan", "switch", "number", "select"}
             else "unknown",
             "mode": "live" if runtime.mode(identifier) == "live" else "observe",
             "status": _status(decision.status if decision else None),
@@ -205,25 +160,6 @@ async def async_get_config_entry_diagnostics(
                 }
                 for command, result in details["command_conditions"].items()
             }
-            if health := details["health"]:
-                resources[_identifier(identifier)]["health"] = {
-                    "status": health["status"],
-                    "checks": [
-                        {
-                            "check": _identifier(check["alias"]),
-                            "status": check["status"],
-                            "condition_status": check["conditions"]["status"],
-                            "qualification_status": check["qualification"]["status"]
-                            if check["qualification"]
-                            else None,
-                            "evaluation_error": _condition_error(check["conditions"])
-                            or bool(
-                                check["qualification"] and _condition_error(check["qualification"])
-                            ),
-                        }
-                        for check in health["checks"]
-                    ],
-                }
     requirements: dict[str, dict[str, object]] = {}
     for identifier in runtime.requirements:
         result = runtime.requirement_results.get(identifier)
@@ -243,7 +179,6 @@ async def async_get_config_entry_diagnostics(
         "policies": {
             _identifier(key): {
                 "enabled": bool(runtime.policy_enabled(key)),
-                "input": _policy_input(runtime, key, config),
             }
             for key, config in runtime.policies.items()
         },

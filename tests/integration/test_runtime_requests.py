@@ -397,7 +397,9 @@ async def test_occurrence_eligibility_and_unavailable_target(runtime_factory, ha
                 "name": "Morning",
                 "kind": "occurrence",
                 "target_entity": "sensor.target",
-                "eligibility_entity": "binary_sensor.schedule",
+                "conditions": [
+                    {"condition": "state", "entity_id": "binary_sensor.schedule", "state": "on"}
+                ],
             }
         }
     )

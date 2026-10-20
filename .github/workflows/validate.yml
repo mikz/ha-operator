@@ -209,6 +209,14 @@ jobs:
           version: "0.12.15"
           python-version: "3.14.7"
       - run: uv sync --locked --group lab --python 3.14.7
+      - name: Fetch immutable migration baseline before runtime isolation
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p artifacts/migration-baseline
+          gh release download v0.3.0 --repo mikz/ha-operator --dir artifacts/migration-baseline --pattern ha_operator.zip --pattern ha_operator.manifest.json
+          echo 'd0ee7d568b77f3f41956810eca6a082969bb8c0b38a8d1f0d5998c9eb150d44f  artifacts/migration-baseline/ha_operator.zip' | sha256sum --check
+          .venv/bin/python scripts/release.py verify --artifact artifacts/migration-baseline/ha_operator.zip --manifest artifacts/migration-baseline/ha_operator.manifest.json
       - name: Prepare images before runtime isolation
         run: .venv/bin/python scripts/lab.py prepare --ha-version "${{ matrix.ha }}"
       - name: Verify isolation and run core acceptance scenarios
@@ -219,8 +227,8 @@ jobs:
         run: .venv/bin/python scripts/lab.py test --ha-version "${{ matrix.ha }}" --scenario observability --timeout 600
       - name: Verify desired controls and source-only migration
         run: .venv/bin/python scripts/lab.py test --ha-version "${{ matrix.ha }}" --scenario sleep --timeout 900
-      - name: Verify native command conditions and health
-        run: .venv/bin/python scripts/lab.py test --ha-version "${{ matrix.ha }}" --scenario conditions --timeout 600
+      - name: Verify supported configuration migration and native backup rollback
+        run: .venv/bin/python scripts/lab.py test --ha-version "${{ matrix.ha }}" --scenario migration --timeout 1200 --baseline-artifact artifacts/migration-baseline/ha_operator.zip --baseline-manifest artifacts/migration-baseline/ha_operator.manifest.json
       - name: Observe retries at production timing
         if: matrix.ha == '2026.10.2'
         run: .venv/bin/python scripts/lab.py test --ha-version "${{ matrix.ha }}" --scenario soak --timeout 1500

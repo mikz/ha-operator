@@ -446,7 +446,7 @@ async def test_policy_attribute_target_changes_without_state_transition(hass, ru
                 "target_entity": "schedule.day",
                 "target_attribute": "position",
                 "target_field": "position",
-                "eligibility_entity": "schedule.day",
+                "conditions": [{"condition": "state", "entity_id": "schedule.day", "state": "on"}],
             }
         }
     )

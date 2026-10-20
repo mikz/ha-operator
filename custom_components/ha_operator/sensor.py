@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING
 
 from homeassistant.components.sensor import SensorDeviceClass, SensorEntity, SensorStateClass
 from homeassistant.const import PERCENTAGE, EntityCategory
@@ -59,30 +59,21 @@ async def async_setup_entry(
             ],
             config_subentry_id=identifier,
         )
-        if runtime.resources[identifier].get("health_checks"):
-            async_add_entities(
-                [HealthSensor(runtime, identifier, "health")], config_subentry_id=identifier
-            )
     for identifier in runtime.requirements:
         async_add_entities(
             [RequirementSensor(runtime, identifier, key) for key in REQUIREMENT_SENSORS],
             config_subentry_id=identifier,
         )
-    for identifier, policy in runtime.policies.items():
-        if "input" in policy:
-            async_add_entities(
-                [
-                    PolicyInputSensor(runtime, identifier, key)
-                    for key in ("input_phase", "qualification_due")
-                ],
-                config_subentry_id=identifier,
-            )
 
 
 def target_value(target: Target | None) -> float | str | None:
     """Compact scalar state; exact structured desired values remain attributes."""
     if target is None:
         return None
+    if target.value is not None:
+        return target.value
+    if target.option is not None:
+        return target.option
     if target.profile is not None:
         return target.profile
     if target.position is not None:
@@ -159,8 +150,24 @@ class ResourceSensor(OperatorEntity, SensorEntity):
             self.async_set_context(Context())
 
     @property
+    def native_unit_of_measurement(self) -> str | None:
+        config = self.runtime.resources[self.identifier]
+        if config["kind"] == "number" and self.key in {"desired", "observed"}:
+            if self.key == "desired":
+                return config["unit_of_measurement"]
+            native = self.hass.states.get(config["entity_id"])
+            unit = native.attributes.get("unit_of_measurement") if native else None
+            return unit if isinstance(unit, str) else None
+        return super().native_unit_of_measurement
+
+    @property
     def available(self) -> bool:
         if self.key == "observed":
+            if self.runtime.resources[self.identifier]["kind"] == "number":
+                observation = self.runtime.observations.get(self.identifier)
+                return (
+                    not self.runtime._closed and observation is not None and observation.available
+                )
             return self.runtime.source_available(self.identifier)
         return True
 
@@ -206,12 +213,21 @@ class ResourceSensor(OperatorEntity, SensorEntity):
                 **(self.runtime.selection_attributes(self.identifier) if selection else {}),
                 **self.linked_entities,
             }
+            if self.runtime.resources[self.identifier]["kind"] == "number":
+                config = self.runtime.resources[self.identifier]
+                native = self.hass.states.get(config["entity_id"])
+                attributes.update(
+                    target_unit=config["unit_of_measurement"],
+                    observed_unit=native.attributes.get("unit_of_measurement") if native else None,
+                )
             if self.key == "reason":
                 attributes.update(self.runtime.reason_details(self.identifier))
                 if checks := self.runtime.condition_details(self.identifier, published=True):
                     attributes["conditions"] = checks
                 config = self.runtime.resources[self.identifier]
                 fields = {
+                    "number": ("value",),
+                    "select": ("option",),
                     "cover": ("position",),
                     "switch": ("on",),
                     "fan": ("on", "percentage", "direction"),
@@ -251,56 +267,6 @@ class ResourceSensor(OperatorEntity, SensorEntity):
                 else None
             )
         return None
-
-
-class HealthSensor(OperatorEntity, SensorEntity):
-    """Health observations are diagnostic and never supply a control target."""
-
-    _attr_device_class = SensorDeviceClass.ENUM
-    _attr_entity_category = EntityCategory.DIAGNOSTIC
-    _attr_options = ["healthy", "unhealthy", "unknown", "waiting", "skipped"]
-
-    @property
-    def native_value(self) -> str | None:
-        if self.runtime._closed:
-            return None
-        status = self.runtime.health_details(self.identifier).get("status", "unknown")
-        return cast(str, status)
-
-    @property
-    def extra_state_attributes(self) -> dict[str, object]:
-        return {
-            "checks": self.runtime.health_details(self.identifier).get("checks", []),
-            **self.linked_entities,
-        }
-
-
-class PolicyInputSensor(OperatorEntity, SensorEntity):
-    """Read current input phase and deadline; execution never depends on this entity."""
-
-    def __init__(self, runtime: OperatorRuntime, identifier: str, key: str) -> None:
-        super().__init__(runtime, identifier, key)
-        self.key = key
-        self._attr_entity_category = EntityCategory.DIAGNOSTIC
-        self._attr_entity_registry_enabled_default = False
-        if key == "input_phase":
-            self._attr_device_class = SensorDeviceClass.ENUM
-            self._attr_options = (
-                ["idle", "qualifying", "qualified", "recovering"]
-                if runtime.policies[identifier]["input"]["type"] == "qualified_numeric"
-                else ["idle", "qualifying", "accepted", "suppressed", "expired"]
-            )
-        else:
-            self._attr_device_class = SensorDeviceClass.TIMESTAMP
-
-    @property
-    def native_value(self) -> str | datetime | None:
-        state = self.runtime.policy_input(self.identifier)
-        if state is None:
-            return None
-        if self.key == "input_phase":
-            return state.phase
-        return _timestamp(state.due_at)
 
 
 class RequirementSensor(OperatorEntity, SensorEntity):

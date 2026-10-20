@@ -10,9 +10,10 @@ from scripts.evidence import (
     ALL_SCENARIOS,
     CELLAR_SCENARIOS,
     CONDITION_FILES,
-    CONDITION_SCENARIOS,
     INITIAL_SCENARIOS,
     LAB_CASES,
+    MIGRATION_FILES,
+    MIGRATION_SCENARIOS,
     MUTANTS,
     OBSERVABILITY_FILES,
     OBSERVABILITY_SCENARIOS,
@@ -22,6 +23,7 @@ from scripts.evidence import (
     SLEEP_SCENARIOS,
     STATIC_FILES,
     TEST_FILES,
+    TYPED_FILES,
     WINDOW_FILES,
     WINDOW_SCENARIOS,
     build_evidence,
@@ -120,18 +122,77 @@ def complete_evidence(tmp_path):
             if scenario == "sleep"
             else WINDOW_SCENARIOS
             if scenario == "windows"
-            else CONDITION_SCENARIOS
-            if scenario == "conditions"
+            else MIGRATION_SCENARIOS
+            if scenario == "migration"
             else INITIAL_SCENARIOS | {"LAB-REALISTIC-SOAK"}
         )
-        for name in OBSERVABILITY_FILES | SLEEP_FILES | WINDOW_FILES | CONDITION_FILES:
+        for name in (
+            OBSERVABILITY_FILES
+            | SLEEP_FILES
+            | WINDOW_FILES
+            | CONDITION_FILES
+            | TYPED_FILES
+            | MIGRATION_FILES
+        ):
             (run / name).write_text("{}")
         write_json(
             run / "conditions-evidence.json",
             {
-                "schema": 1,
+                "schema": 2,
+                "status": "passed",
+                "events": [],
+                "blocked": {"decision": {"status": "restricted"}},
                 "provenance": "simulator_generated",
                 "physical_effects": "simulator_observed",
+            },
+        )
+        write_json(
+            run / "typed-evidence.json",
+            {
+                "schema": 1,
+                "status": "passed",
+                "physical_effects": "simulator_observed",
+                "snapshots": [{"decision": "observed"}],
+                "events": [],
+                "awaited_supersession_commands": [{"value": 20}],
+                "preserved_external_registry": {"number.actor": "retained"},
+            },
+        )
+        write_json(
+            run / "recorder-unchanged-evidence.json",
+            {
+                "schema": 1,
+                "status": "passed",
+                "entities": ["sensor.reason"],
+                "baseline_counts": {"sensor.reason": 0},
+                "current_counts": {"sensor.reason": 0},
+                "additional_rows": 0,
+                "window": {
+                    "start": "2026-10-20T00:00:00Z",
+                    "end": "2026-10-20T00:00:06Z",
+                    "settle_seconds": 6,
+                    "input_updates": 3,
+                },
+            },
+        )
+        write_json(
+            run / "migration-evidence.json",
+            {
+                "schema": 1,
+                "status": "passed",
+                "snapshots": {},
+                "resource_id": "resource",
+                "policy_id": "policy",
+                "native_backup_id": "backup",
+                "proven": [
+                    "genuine_v3_form_configuration",
+                    "uncleared_preflight_rejection_without_persisted_mutation",
+                    "same_id_v3_clearing",
+                    "version_four_migration",
+                    "manual_store_preservation",
+                    "refused_upgrade_rollback",
+                    "native_backup_successful_migration_rollback",
+                ],
             },
         )
         write_json(
@@ -861,3 +922,43 @@ def test_lab_rejects_matching_stale_manifest_hashes(complete_evidence):
         change(run / name, release_manifest_sha256="0" * 64)
     with pytest.raises(ValueError, match="prepared release manifest hash"):
         validate_lab(run, manifest, digest(manifest_path.read_bytes()))
+
+
+@pytest.mark.parametrize(
+    "filename,updates,message",
+    [
+        ("conditions-evidence.json", {"schema": 1}, "Conditions evidence"),
+        ("typed-evidence.json", {"awaited_supersession_commands": []}, "Typed evidence"),
+        ("typed-evidence.json", {"preserved_external_registry": {}}, "Typed evidence"),
+        ("recorder-unchanged-evidence.json", {"additional_rows": 1}, "Unchanged Recorder"),
+        (
+            "recorder-unchanged-evidence.json",
+            {"current_counts": {"sensor.reason": 1}},
+            "Unchanged Recorder",
+        ),
+        (
+            "recorder-unchanged-evidence.json",
+            {"baseline_counts": {"sensor.reason": False}},
+            "Unchanged Recorder",
+        ),
+    ],
+)
+def test_native_composition_evidence_requires_new_bounded_proofs(
+    complete_evidence, filename, updates, message
+):
+    run = next(run for run in complete_evidence["labs"] if run.name.endswith("-all"))
+    change(run / filename, **updates)
+    with pytest.raises(ValueError, match=message):
+        build_evidence(**complete_evidence)
+
+
+@pytest.mark.parametrize(
+    "field,value", [("proven", []), ("native_backup_id", ""), ("status", "running")]
+)
+def test_native_migration_evidence_requires_completed_native_rollback(
+    complete_evidence, field, value
+):
+    run = next(run for run in complete_evidence["labs"] if run.name.endswith("-migration"))
+    change(run / "migration-evidence.json", **{field: value})
+    with pytest.raises(ValueError, match="Migration evidence"):
+        build_evidence(**complete_evidence)

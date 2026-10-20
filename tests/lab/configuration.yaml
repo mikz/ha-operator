@@ -5,6 +5,7 @@ frontend:
 lovelace:
   mode: storage
 config:
+backup:
 diagnostics:
 schedule:
 automation: !include automations.yaml
@@ -40,3 +41,33 @@ homekit:
       include_domains: [cover, fan]
       include_entities: [switch.lab_central_sleep_public, switch.lab_room_sleep_public]
       exclude_entity_globs: ["cover.sim_*", "fan.sim_*"]
+
+template:
+  - binary_sensor:
+      - name: Lab native cold qualified
+        unique_id: lab_native_cold_qualified
+        state: "{{ states('sensor.sim_window_temperature') | float(100) < 16 }}"
+        availability: "{{ has_value('sensor.sim_window_temperature') }}"
+        delay_on:
+          seconds: 2
+  - sensor:
+      - name: Lab setpoint observer
+        unique_id: lab_setpoint_observer
+        state: "{{ states('number.sim_setpoint') }}"
+  - switch:
+      - name: Lab awaited actor
+        unique_id: lab_awaited_actor
+        state: "{{ is_state('switch.sim_room_lighting', 'on') }}"
+        availability: "{{ has_value('switch.sim_room_lighting') }}"
+        turn_on:
+          - wait_template: "{{ is_state('binary_sensor.sim_cellar_demand', 'on') }}"
+            timeout:
+              seconds: 30
+            continue_on_timeout: false
+          - action: switch.turn_on
+            target:
+              entity_id: switch.sim_room_lighting
+        turn_off:
+          - action: switch.turn_off
+            target:
+              entity_id: switch.sim_room_lighting
