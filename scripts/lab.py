@@ -334,6 +334,9 @@ def swap_package(container, run_id, image, archive, manifest, staging, image_dig
                 "--read-only",
                 "--cap-drop",
                 "ALL",
+                # docker cp can retain foreign ownership; all other capabilities stay dropped.
+                "--cap-add",
+                "DAC_OVERRIDE",
                 "--security-opt",
                 "no-new-privileges",
                 "--label",
@@ -347,7 +350,8 @@ def swap_package(container, run_id, image, archive, manifest, staging, image_dig
                 image,
                 "-c",
                 cleanup_code,
-            ]
+            ],
+            capture=False,
         )
         if output(["docker", "ps", "-aq", "--filter", f"name=^{helper}$"]):
             raise RuntimeError("Package installation helper survived removal")
@@ -365,6 +369,7 @@ def swap_package(container, run_id, image, archive, manifest, staging, image_dig
         "maintenance_container": {
             "name": helper,
             "network": "none",
+            "capabilities": ["DAC_OVERRIDE"],
             "config_volume": volume,
             "removed": True,
         },

@@ -254,6 +254,11 @@ def test_package_swap_verifies_and_scopes_stopped_install(monkeypatch, tmp_path,
         assert helper[helper.index("--network") + 1] == "none"
         assert "--rm" in helper and "--read-only" in helper and "--pull=never" in helper
         assert helper.count("--mount") == 1
+        assert helper[helper.index("--cap-drop") + 1] == "ALL"
+        assert helper.count("--cap-add") == 1
+        assert helper[helper.index("--cap-add") + 1] == "DAC_OVERRIDE"
+        assert helper[helper.index("--security-opt") + 1] == "no-new-privileges"
+        assert receipt["maintenance_container"]["capabilities"] == ["DAC_OVERRIDE"]
         assert commands[-1] == ["docker", "start", "ha-container"]
 
 

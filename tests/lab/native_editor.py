@@ -128,13 +128,19 @@ async def exercise_policy_conditions(lab, title, policy_id):
 async def clear_v3_migration_fields(lab, policy_title, resource_title):
     """Use the released 0.3 selectors before the incompatible upgrade."""
     await open_subentry_editor(lab, policy_title)
-    await lab.page.get_by_label("Policy input", exact=True).click()
+    (ARTIFACTS / (policy_title.replace(" ", "-") + "-v3-input-ui.txt")).write_text(
+        await lab.page.locator("body").aria_snapshot()
+    )
+    await lab.page.get_by_role("button", name="Policy input", exact=True).click()
     await lab.page.get_by_text("Existing state or submitted occurrence", exact=True).click()
     await lab.page.screenshot(
         path=str(ARTIFACTS / "migration-v3-legacy-input-selected.png"), full_page=True
     )
     await save_subentry_editor(lab)
     await open_subentry_editor(lab, resource_title)
+    (ARTIFACTS / "migration-v3-resource-before-clear-ui.txt").write_text(
+        await lab.page.locator("body").aria_snapshot()
+    )
     check = lab.page.locator("ha-selector-object").filter(has_text="Synthetic telemetry")
     await check.get_by_role("button", name="Delete", exact=True).click()
     await lab.page.screenshot(
@@ -311,7 +317,10 @@ async def prove_native_occurrence(lab, resource, policy_id, event_prefix):
 
 async def clear_v3_timer_input(lab, title):
     await open_subentry_editor(lab, title)
-    await lab.page.get_by_label("Policy input", exact=True).click()
+    (ARTIFACTS / (title.replace(" ", "-") + "-v3-input-ui.txt")).write_text(
+        await lab.page.locator("body").aria_snapshot()
+    )
+    await lab.page.get_by_role("button", name="Policy input", exact=True).click()
     await lab.page.get_by_text("Existing state or submitted occurrence", exact=True).click()
     await lab.page.screenshot(
         path=str(ARTIFACTS / "migration-v3-timer-input-cleared.png"), full_page=True
@@ -321,13 +330,15 @@ async def clear_v3_timer_input(lab, title):
 
 async def clear_v3_occurrence_eligibility(lab, title):
     await open_subentry_editor(lab, title)
-    # The released form has eligibility first, target source second.
-    await (
-        lab.page.locator("ha-selector-entity")
-        .first.get_by_role("button", name="Clear", exact=True)
-        .click()
+    (ARTIFACTS / "migration-v3-occurrence-before-clear-ui.txt").write_text(
+        await lab.page.locator("body").aria_snapshot()
     )
-    field = lab.page.get_by_label("Eligible state", exact=True)
+    # Released form order: eligibility first, target source second. The pinned
+    # native picker exposes its clear affordance as an icon without a label.
+    picker = lab.page.locator("ha-selector-entity").first
+    await expect(picker).to_have_js_property("value", "binary_sensor.sim_cellar_policy")
+    await picker.locator("ha-picker-field ha-icon-button.clear").click()
+    field = lab.page.get_by_role("textbox", name="Eligible state", exact=True)
     await field.fill("")
     await field.press("Tab")
     await lab.page.screenshot(
