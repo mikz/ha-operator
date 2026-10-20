@@ -131,7 +131,12 @@ async def clear_v3_migration_fields(lab, policy_title, resource_title):
     (ARTIFACTS / (policy_title.replace(" ", "-") + "-v3-input-ui.txt")).write_text(
         await lab.page.locator("body").aria_snapshot()
     )
-    await lab.page.get_by_role("button", name="Policy input", exact=True).click()
+    await (
+        lab.page.locator("ha-selector-select")
+        .filter(has_text="Policy input")
+        .locator("ha-picker-field")
+        .click()
+    )
     await lab.page.get_by_text("Existing state or submitted occurrence", exact=True).click()
     await lab.page.screenshot(
         path=str(ARTIFACTS / "migration-v3-legacy-input-selected.png"), full_page=True
@@ -320,7 +325,12 @@ async def clear_v3_timer_input(lab, title):
     (ARTIFACTS / (title.replace(" ", "-") + "-v3-input-ui.txt")).write_text(
         await lab.page.locator("body").aria_snapshot()
     )
-    await lab.page.get_by_role("button", name="Policy input", exact=True).click()
+    await (
+        lab.page.locator("ha-selector-select")
+        .filter(has_text="Policy input")
+        .locator("ha-picker-field")
+        .click()
+    )
     await lab.page.get_by_text("Existing state or submitted occurrence", exact=True).click()
     await lab.page.screenshot(
         path=str(ARTIFACTS / "migration-v3-timer-input-cleared.png"), full_page=True
