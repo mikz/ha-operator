@@ -12,6 +12,7 @@ import sys
 import time
 import tomllib
 import xml.etree.ElementTree as ET
+from datetime import datetime
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -713,6 +714,7 @@ def validate_native_composition(directory: Path) -> None:
         and recorder.get("status") == "passed"
         and isinstance(entities, list)
         and bool(entities)
+        and all(isinstance(entity, str) and entity for entity in entities)
         and len(entities) == len(set(entities))
         and isinstance(baseline, dict)
         and isinstance(current, dict)
@@ -728,6 +730,65 @@ def validate_native_composition(directory: Path) -> None:
         and window.get("input_updates") == 3,
         "Unchanged Recorder evidence must compare the same closed window without new rows",
     )
+
+    positive = recorder.get("positive_history", {})
+    require(isinstance(positive, dict), "Positive Recorder evidence must be an object")
+    roles = {
+        "number_managed",
+        "number_desired",
+        "number_observed",
+        "number_reason",
+        "select_managed",
+        "select_desired",
+        "select_observed",
+        "select_reason",
+    }
+    mapped = positive.get("entities", {})
+    counts = positive.get("counts", {})
+    states = positive.get("distinct_states", {})
+    disabled = recorder.get("disabled_registry_entities")
+    require(
+        isinstance(mapped, dict)
+        and set(mapped) == roles
+        and all(isinstance(entity, str) and entity for entity in mapped.values())
+        and len(set(mapped.values())) == len(roles)
+        and mapped["number_managed"].startswith("number.")
+        and mapped["select_managed"].startswith("select.")
+        and all(
+            mapped[role].startswith("sensor.") for role in roles if not role.endswith("_managed")
+        )
+        and set(mapped.values()) <= set(entities)
+        and isinstance(disabled, list)
+        and all(isinstance(entity, str) and entity for entity in disabled)
+        and len(disabled) == len(set(disabled))
+        and set(disabled).isdisjoint(entities)
+        and isinstance(counts, dict)
+        and set(counts) == set(mapped.values())
+        and all(type(count) is int and count > 0 for count in counts.values())
+        and isinstance(states, dict)
+        and set(states) == set(counts)
+        and all(
+            isinstance(values, list)
+            and values
+            and all(isinstance(value, str) for value in values)
+            and len(values) == len(set(values))
+            for values in states.values()
+        ),
+        "Positive Recorder evidence must cover all eight enabled typed core entities",
+    )
+    try:
+        prior_start = datetime.fromisoformat(positive["start"])
+        prior_end = datetime.fromisoformat(positive["end"])
+        unchanged_start = datetime.fromisoformat(window["start"])
+        valid_window = (
+            prior_start.tzinfo is not None
+            and prior_end.tzinfo is not None
+            and unchanged_start.tzinfo is not None
+            and prior_start < prior_end <= unchanged_start
+        )
+    except KeyError, TypeError, ValueError:
+        valid_window = False
+    require(valid_window, "Positive Recorder history must precede the unchanged window")
 
 
 def validate_lab(directory: Path, manifest: dict, manifest_sha256: str) -> tuple[str, str]:

@@ -158,14 +158,29 @@ def complete_evidence(tmp_path):
                 "preserved_external_registry": {"number.actor": "retained"},
             },
         )
+        positive_entities = {
+            f"{kind}_{role}": f"{kind if role == 'managed' else 'sensor'}.{kind}_{role}"
+            for kind in ("number", "select")
+            for role in ("managed", "desired", "observed", "reason")
+        }
         write_json(
             run / "recorder-unchanged-evidence.json",
             {
                 "schema": 1,
                 "status": "passed",
-                "entities": ["sensor.reason"],
-                "baseline_counts": {"sensor.reason": 0},
-                "current_counts": {"sensor.reason": 0},
+                "entities": list(positive_entities.values()),
+                "disabled_registry_entities": ["sensor.disabled_attempts"],
+                "positive_history": {
+                    "start": "2026-10-19T23:59:00Z",
+                    "end": "2026-10-20T00:00:00Z",
+                    "entities": positive_entities,
+                    "counts": dict.fromkeys(positive_entities.values(), 2),
+                    "distinct_states": {
+                        entity: ["0", "1"] for entity in positive_entities.values()
+                    },
+                },
+                "baseline_counts": dict.fromkeys(positive_entities.values(), 0),
+                "current_counts": dict.fromkeys(positive_entities.values(), 0),
                 "additional_rows": 0,
                 "window": {
                     "start": "2026-10-20T00:00:00Z",
@@ -961,4 +976,66 @@ def test_native_migration_evidence_requires_completed_native_rollback(
     run = next(run for run in complete_evidence["labs"] if run.name.endswith("-migration"))
     change(run / "migration-evidence.json", **{field: value})
     with pytest.raises(ValueError, match="Migration evidence"):
+        build_evidence(**complete_evidence)
+
+
+@pytest.mark.parametrize(
+    "fault",
+    [
+        "missing_positive",
+        "invalid_positive",
+        "missing_role",
+        "duplicate_entity",
+        "disabled",
+        "not_enabled",
+        "missing_count",
+        "zero_count",
+        "boolean_count",
+        "empty_states",
+        "missing_states",
+        "empty_window",
+        "late_window",
+        "invalid_window",
+    ],
+)
+def test_recorder_positive_control_rejects_missing_or_invalid_prior_history(
+    complete_evidence, fault
+):
+    run = next(run for run in complete_evidence["labs"] if run.name.endswith("-all"))
+    path = run / "recorder-unchanged-evidence.json"
+    recorder = json.loads(path.read_text())
+    positive = recorder["positive_history"]
+    entity = positive["entities"]["number_reason"]
+    if fault == "missing_positive":
+        recorder.pop("positive_history")
+    elif fault == "invalid_positive":
+        recorder["positive_history"] = None
+    elif fault == "missing_role":
+        positive["entities"].pop("number_reason")
+    elif fault == "duplicate_entity":
+        positive["entities"]["number_reason"] = positive["entities"]["number_desired"]
+    elif fault == "disabled":
+        recorder["disabled_registry_entities"].append(entity)
+    elif fault == "not_enabled":
+        recorder["entities"].remove(entity)
+        recorder["baseline_counts"].pop(entity)
+        recorder["current_counts"].pop(entity)
+    elif fault == "missing_count":
+        positive["counts"].pop(entity)
+    elif fault == "zero_count":
+        positive["counts"][entity] = 0
+    elif fault == "boolean_count":
+        positive["counts"][entity] = True
+    elif fault == "empty_states":
+        positive["distinct_states"][entity] = []
+    elif fault == "missing_states":
+        positive["distinct_states"].pop(entity)
+    elif fault == "empty_window":
+        positive["start"] = positive["end"]
+    elif fault == "late_window":
+        positive["end"] = recorder["window"]["end"]
+    else:
+        positive["start"] = "invalid"
+    write_json(path, recorder)
+    with pytest.raises(ValueError, match="Positive Recorder"):
         build_evidence(**complete_evidence)
