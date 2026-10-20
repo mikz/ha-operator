@@ -213,18 +213,38 @@ def complete_evidence(tmp_path):
         write_json(
             run / "window-native-evidence.json",
             {
-                "schema": 1,
+                "schema": 2,
                 "status": "passed",
-                "clock": "real wall clock, accelerated configured durations",
+                "clock": "real wall clock, accelerated native durations",
+                "behavior_changes": [
+                    "Numeric qualification belongs to an independent native Template "
+                    "binary sensor.",
+                    "Restarting an already active timer does not reset HA's state-for trigger.",
+                    "Only configured cancel/pause events withdraw accepted trigger requests; "
+                    "natural finish does not renew them.",
+                    "Reload withdraws trigger-owned requests; no legacy episode restoration "
+                    "or catch-up claim.",
+                ],
                 "snapshots": [
                     {
                         "label": label,
-                        "at": index,
+                        "at": (10, 11, 21, 31, 35)[index],
                         "explain": {
-                            "decision": {"target": {"position": desired}},
+                            "decision": {
+                                "target": {"position": desired},
+                                "source": "policy:timed:native:example"
+                                if index < 2
+                                else "policy:baseline",
+                            },
+                            "selection": {
+                                "source_kind": "occurrence" if index < 2 else "policy",
+                                "source_id": "timed" if index < 2 else "baseline",
+                                "occurrence_id": "native:example" if index < 2 else None,
+                                "request_id": None,
+                                "expires_at": 20 if index < 2 else None,
+                            },
                             "observation": {"target": {"position": observed}},
                         },
-                        "timer": {"expires_at": 20},
                         "return": {"due_at": 30, "overdue": label == "overdue"},
                     }
                     for index, (label, desired, observed) in enumerate(
@@ -734,7 +754,14 @@ def test_windows_native_evidence_files_are_required(complete_evidence, missing):
 
 
 @pytest.mark.parametrize(
-    "update", [{"status": "pending"}, {"clock": "unspecified"}, {"snapshots": []}]
+    "update",
+    [
+        {"schema": 1},
+        {"status": "pending"},
+        {"clock": "unspecified"},
+        {"snapshots": []},
+        {"behavior_changes": []},
+    ],
 )
 def test_windows_incomplete_demonstration_cannot_pass(complete_evidence, update):
     run = next(path for path in complete_evidence["labs"] if path.name.endswith("windows"))
@@ -744,7 +771,10 @@ def test_windows_incomplete_demonstration_cannot_pass(complete_evidence, update)
         build_evidence(**complete_evidence)
 
 
-@pytest.mark.parametrize("field", ["chronology", "desired", "raw", "expiry", "warning"])
+@pytest.mark.parametrize(
+    "field",
+    ["chronology", "desired", "raw", "expiry", "warning", "identity", "non_native", "expired"],
+)
 def test_native_windows_inconsistent_snapshots_cannot_pass(complete_evidence, field):
     run = next(path for path in complete_evidence["labs"] if path.name.endswith("windows"))
     native = json.loads((run / "window-native-evidence.json").read_text())
@@ -756,7 +786,14 @@ def test_native_windows_inconsistent_snapshots_cannot_pass(complete_evidence, fi
     elif field == "raw":
         snapshots[3]["explain"]["observation"]["target"]["position"] = 7
     elif field == "expiry":
-        snapshots[1]["timer"]["expires_at"] += 10
+        snapshots[1]["explain"]["selection"]["expires_at"] += 10
+    elif field == "identity":
+        snapshots[1]["explain"]["selection"]["source_id"] = "different_policy"
+    elif field == "non_native":
+        snapshots[0]["explain"]["selection"]["occurrence_id"] = "external_occurrence"
+    elif field == "expired":
+        for snapshot in snapshots[:2]:
+            snapshot["explain"]["selection"]["expires_at"] = 10
     else:
         snapshots[3]["return"]["due_at"] += 10
     write_json(run / "window-native-evidence.json", native)

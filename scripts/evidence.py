@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import re
 import shutil
@@ -118,14 +119,9 @@ WINDOW_SCENARIOS = INITIAL_SCENARIOS | {
     "WINDOW-REGISTRY-OWNER-TRANSFER",
     "WINDOW-RELOAD-PRESERVES-RELAY-FAN",
     "WINDOW-NATIVE-CONFIGURATION",
-    "WINDOW-NATIVE-NUMERIC-QUALIFICATION",
-    "WINDOW-NATIVE-NUMERIC-UNKNOWN-RECOVERY",
-    "WINDOW-NATIVE-TIMER-LIFECYCLE",
-    "WINDOW-NATIVE-TIMER-PRECEDENCE",
-    "WINDOW-NATIVE-TIMER-RESTART",
-    "WINDOW-NATIVE-TIMER-KILL",
-    "WINDOW-NATIVE-PENDING-RELOAD",
-    "WINDOW-NATIVE-OBSERVE-ZERO",
+    "WINDOW-NATIVE-HELPER-QUALIFICATION",
+    "WINDOW-NATIVE-TIMER-QUALIFY-CANCEL-EXPIRY",
+    "WINDOW-NATIVE-PENDING-RELOAD-OBSERVE",
     "WINDOW-NATIVE-DASHBOARD",
     "WINDOW-NATIVE-RETURN-DEMO",
     "WINDOW-NATIVE-RETURN-UNKNOWN-VIRTUAL",
@@ -902,10 +898,23 @@ def validate_lab(directory: Path, manifest: dict, manifest_sha256: str) -> tuple
             require((directory / name).is_file(), f"Missing {name}")
         native = read_json(directory / "window-native-evidence.json")
         require(
-            native.get("schema") == 1
+            native.get("schema") == 2
             and native.get("status") == "passed"
-            and native.get("clock") == "real wall clock, accelerated configured durations",
+            and native.get("clock") == "real wall clock, accelerated native durations",
             "Native window evidence must identify the accelerated clock and completed run",
+        )
+        require(
+            isinstance(native.get("behavior_changes"), list)
+            and {
+                "Numeric qualification belongs to an independent native Template binary sensor.",
+                "Restarting an already active timer does not reset HA's state-for trigger.",
+                "Only configured cancel/pause events withdraw accepted trigger requests; "
+                "natural finish does not renew them.",
+                "Reload withdraws trigger-owned requests; no legacy episode restoration "
+                "or catch-up claim.",
+            }
+            <= set(native["behavior_changes"]),
+            "Native window evidence must state the native behavior changes",
         )
         labels = {item.get("label") for item in native.get("snapshots", [])}
         require(
@@ -941,11 +950,32 @@ def validate_lab(directory: Path, manifest: dict, manifest_sha256: str) -> tuple
             == [7, 100, 100, 7],
             "Native window evidence must separate refused targets from raw return feedback",
         )
+        opening = demo["opening"]["explain"].get("selection", {})
+        refusal = demo["refusal"]["explain"].get("selection", {})
+        expiry = opening.get("expires_at")
         require(
-            demo["opening"].get("timer", {}).get("expires_at") is not None
-            and demo["opening"]["timer"]["expires_at"]
-            == demo["refusal"].get("timer", {}).get("expires_at")
-            and demo["baseline"].get("return", {}).get("due_at") is not None
+            opening.get("source_kind") == refusal.get("source_kind") == "occurrence"
+            and isinstance(opening.get("source_id"), str)
+            and bool(opening["source_id"])
+            and opening["source_id"] == refusal.get("source_id")
+            and isinstance(opening.get("occurrence_id"), str)
+            and opening["occurrence_id"].startswith("native:")
+            and opening["occurrence_id"] == refusal.get("occurrence_id")
+            and opening.get("request_id") is None
+            and refusal.get("request_id") is None
+            and type(expiry) in (int, float)
+            and math.isfinite(expiry)
+            and expiry == refusal.get("expires_at")
+            and demo["refusal"]["at"] < expiry <= demo["baseline"]["at"]
+            and all(
+                demo[label]["explain"]["decision"].get("source")
+                == f"policy:{opening['source_id']}:{opening['occurrence_id']}"
+                for label in ("opening", "refusal")
+            ),
+            "Native window evidence must retain selected native occurrence identity and expiry",
+        )
+        require(
+            demo["baseline"].get("return", {}).get("due_at") is not None
             and demo["baseline"]["return"]["due_at"]
             == demo["overdue"].get("return", {}).get("due_at")
             and demo["overdue"].get("return", {}).get("overdue") is True
