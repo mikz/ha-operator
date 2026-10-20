@@ -127,7 +127,7 @@
         "config_on_must_be_true_or_false": "on must be true or false",
         "config_direction_must_be_forward_or_reverse": "direction must be forward or reverse",
         "config_must_be_positive": "{field} must be positive",
-        "config_kind_must_be_cover_switch_fan_or_relay_fan": "kind must be cover, switch, fan, or relay_fan",
+        "config_kind_must_be_cover_switch_fan_or_relay_fan": "Resource kind must be cover, switch, fan, relay_fan, number, or select",
         "config_manual_control_must_be_true_or_false": "manual_control must be true or false",
         "config_policy_must_reference_an_existing_resource": "policy must reference an existing resource",
         "config_policy_kind_must_be_state_or_occurrence": "policy kind must be state or occurrence",
@@ -157,7 +157,7 @@
         "config_profile_direction_must_be_forward_or_reverse": "profile direction must be forward or reverse",
         "config_native_fan_requires_a_configured_default_target": "native fan requires a configured default_target",
         "config_cover_requires_non_optimistic_position_control": "cover requires non-optimistic position control",
-        "config_target_field_must_be_position_on_percentage_or_direction": "target_field must be position, on, percentage, or direction",
+        "config_target_field_must_be_position_on_percentage_or_direction": "Target field must be position, on, percentage, direction, value, or option",
         "config_provide_target_or_target_entity_target_attributes_require_target_entity": "provide target or target_entity; target attributes require target_entity",
         "config_provider_must_reference_an_existing_resource": "provider must reference an existing resource",
         "config_passive_providers_cannot_have_actuator_targets": "passive providers cannot have actuator targets",
@@ -212,7 +212,7 @@
             "target": "Target object for the resource, such as position set to 0 or on set to true. A target source or desired control can supply a dynamic target instead.",
             "target_entity": "Read the target from this source entity state or its configured attribute. Telemetry does not create manual ownership.",
             "target_attribute": "Optional source attribute. Omit to read the source state; requires a target entity.",
-            "target_field": "Target field to populate: position, on, percentage, or direction. Defaults to position; requires a target entity and matching resource capability.",
+            "target_field": "Target field to populate: position, on, percentage, direction, value, or option. Defaults to position; requires a target entity and matching resource capability.",
             "intent_id": "Desired control subentry ID for a state policy controlling a switch. Replaces all other target fields; uses the current Boolean value.",
             "conditions": "State policies evaluate continuously. Occurrence conditions are checked only at admission; external submissions have no trigger variables.",
             "duration": "Positive fixed lifetime from native trigger admission. Not required for externally submitted occurrences."
@@ -243,7 +243,7 @@
             "target": "Target object for the resource, such as position set to 0 or on set to true. A target source or desired control can supply a dynamic target instead.",
             "target_entity": "Read the target from this source entity state or its configured attribute. Telemetry does not create manual ownership.",
             "target_attribute": "Optional source attribute. Omit to read the source state; requires a target entity.",
-            "target_field": "Target field to populate: position, on, percentage, or direction. Defaults to position; requires a target entity and matching resource capability.",
+            "target_field": "Target field to populate: position, on, percentage, direction, value, or option. Defaults to position; requires a target entity and matching resource capability.",
             "intent_id": "Desired control subentry ID for a state policy controlling a switch. Replaces all other target fields; uses the current Boolean value.",
             "conditions": "State policies evaluate continuously. Occurrence conditions are checked only at admission; external submissions have no trigger variables.",
             "duration": "Positive fixed lifetime from native trigger admission. Not required for externally submitted occurrences."
@@ -266,7 +266,7 @@
         "config_on_must_be_true_or_false": "on must be true or false",
         "config_direction_must_be_forward_or_reverse": "direction must be forward or reverse",
         "config_must_be_positive": "{field} must be positive",
-        "config_kind_must_be_cover_switch_fan_or_relay_fan": "kind must be cover, switch, fan, or relay_fan",
+        "config_kind_must_be_cover_switch_fan_or_relay_fan": "Resource kind must be cover, switch, fan, relay_fan, number, or select",
         "config_manual_control_must_be_true_or_false": "manual_control must be true or false",
         "config_policy_must_reference_an_existing_resource": "policy must reference an existing resource",
         "config_policy_kind_must_be_state_or_occurrence": "policy kind must be state or occurrence",
@@ -296,7 +296,7 @@
         "config_profile_direction_must_be_forward_or_reverse": "profile direction must be forward or reverse",
         "config_native_fan_requires_a_configured_default_target": "native fan requires a configured default_target",
         "config_cover_requires_non_optimistic_position_control": "cover requires non-optimistic position control",
-        "config_target_field_must_be_position_on_percentage_or_direction": "target_field must be position, on, percentage, or direction",
+        "config_target_field_must_be_position_on_percentage_or_direction": "Target field must be position, on, percentage, direction, value, or option",
         "config_provide_target_or_target_entity_target_attributes_require_target_entity": "provide target or target_entity; target attributes require target_entity",
         "config_provider_must_reference_an_existing_resource": "provider must reference an existing resource",
         "config_passive_providers_cannot_have_actuator_targets": "passive providers cannot have actuator targets",
@@ -372,7 +372,7 @@
         "config_on_must_be_true_or_false": "on must be true or false",
         "config_direction_must_be_forward_or_reverse": "direction must be forward or reverse",
         "config_must_be_positive": "{field} must be positive",
-        "config_kind_must_be_cover_switch_fan_or_relay_fan": "kind must be cover, switch, fan, or relay_fan",
+        "config_kind_must_be_cover_switch_fan_or_relay_fan": "Resource kind must be cover, switch, fan, relay_fan, number, or select",
         "config_manual_control_must_be_true_or_false": "manual_control must be true or false",
         "config_policy_must_reference_an_existing_resource": "policy must reference an existing resource",
         "config_policy_kind_must_be_state_or_occurrence": "policy kind must be state or occurrence",
@@ -402,7 +402,7 @@
         "config_profile_direction_must_be_forward_or_reverse": "profile direction must be forward or reverse",
         "config_native_fan_requires_a_configured_default_target": "native fan requires a configured default_target",
         "config_cover_requires_non_optimistic_position_control": "cover requires non-optimistic position control",
-        "config_target_field_must_be_position_on_percentage_or_direction": "target_field must be position, on, percentage, or direction",
+        "config_target_field_must_be_position_on_percentage_or_direction": "Target field must be position, on, percentage, direction, value, or option",
         "config_provide_target_or_target_entity_target_attributes_require_target_entity": "provide target or target_entity; target attributes require target_entity",
         "config_provider_must_reference_an_existing_resource": "provider must reference an existing resource",
         "config_passive_providers_cannot_have_actuator_targets": "passive providers cannot have actuator targets",
@@ -474,7 +474,7 @@
         "config_on_must_be_true_or_false": "on must be true or false",
         "config_direction_must_be_forward_or_reverse": "direction must be forward or reverse",
         "config_must_be_positive": "{field} must be positive",
-        "config_kind_must_be_cover_switch_fan_or_relay_fan": "kind must be cover, switch, fan, or relay_fan",
+        "config_kind_must_be_cover_switch_fan_or_relay_fan": "Resource kind must be cover, switch, fan, relay_fan, number, or select",
         "config_manual_control_must_be_true_or_false": "manual_control must be true or false",
         "config_policy_must_reference_an_existing_resource": "policy must reference an existing resource",
         "config_policy_kind_must_be_state_or_occurrence": "policy kind must be state or occurrence",
@@ -504,7 +504,7 @@
         "config_profile_direction_must_be_forward_or_reverse": "profile direction must be forward or reverse",
         "config_native_fan_requires_a_configured_default_target": "native fan requires a configured default_target",
         "config_cover_requires_non_optimistic_position_control": "cover requires non-optimistic position control",
-        "config_target_field_must_be_position_on_percentage_or_direction": "target_field must be position, on, percentage, or direction",
+        "config_target_field_must_be_position_on_percentage_or_direction": "Target field must be position, on, percentage, direction, value, or option",
         "config_provide_target_or_target_entity_target_attributes_require_target_entity": "provide target or target_entity; target attributes require target_entity",
         "config_provider_must_reference_an_existing_resource": "provider must reference an existing resource",
         "config_passive_providers_cannot_have_actuator_targets": "passive providers cannot have actuator targets",
@@ -594,7 +594,7 @@
     },
     "config_kind_must_be_cover_switch_fan_or_relay_fan": {
       "title": "Invalid HA Operator configuration",
-      "description": "kind must be cover, switch, fan, or relay_fan. Correct the configuration, then reload the integration. No actuator worker runs until setup succeeds."
+      "description": "Resource kind must be cover, switch, fan, relay_fan, number, or select. Correct the configuration, then reload the integration. No actuator worker runs until setup succeeds."
     },
     "config_manual_control_must_be_true_or_false": {
       "title": "Invalid HA Operator configuration",
@@ -714,7 +714,7 @@
     },
     "config_target_field_must_be_position_on_percentage_or_direction": {
       "title": "Invalid HA Operator configuration",
-      "description": "target_field must be position, on, percentage, or direction. Correct the configuration, then reload the integration. No actuator worker runs until setup succeeds."
+      "description": "Target field must be position, on, percentage, direction, value, or option. Correct the configuration, then reload the integration. No actuator worker runs until setup succeeds."
     },
     "config_provide_target_or_target_entity_target_attributes_require_target_entity": {
       "title": "Invalid HA Operator configuration",
@@ -1194,14 +1194,14 @@
         },
         "entity_id": {
           "name": "Managed resource entity",
-          "description": "The managed cover, fan, or switch belonging to one resource. Choose this or Resource ID, not both."
+          "description": "The managed cover, fan, switch, number, or select belonging to one resource. Choose this or Resource ID, not both."
         },
         "mode": {
           "name": "Mode"
         },
         "target": {
           "name": "Requested target",
-          "description": "Target object with position, on, percentage, direction, or a configured fan profile. Required in target mode; omit for hands-off mode."
+          "description": "Target object with position, on, percentage, direction, profile, value, or option. Fields must match the resource capability. Required in target mode; omit for hands-off mode."
         },
         "duration": {
           "name": "Duration",
@@ -1235,7 +1235,7 @@
         },
         "entity_id": {
           "name": "Managed resource entity",
-          "description": "The managed cover, fan, or switch belonging to one resource. Choose this or Resource ID, not both."
+          "description": "The managed cover, fan, switch, number, or select belonging to one resource. Choose this or Resource ID, not both."
         },
         "config_entry_id": {
           "name": "Configuration entry",
@@ -1297,7 +1297,7 @@
         },
         "entity_id": {
           "name": "Managed resource entity",
-          "description": "The managed cover, fan, or switch belonging to one resource. Choose this or Resource ID, not both."
+          "description": "The managed cover, fan, switch, number, or select belonging to one resource. Choose this or Resource ID, not both."
         },
         "config_entry_id": {
           "name": "Configuration entry",
@@ -1315,7 +1315,7 @@
         },
         "entity_id": {
           "name": "Managed resource entity",
-          "description": "The managed cover, fan, or switch belonging to one resource. Choose this or Resource ID, not both."
+          "description": "The managed cover, fan, switch, number, or select belonging to one resource. Choose this or Resource ID, not both."
         },
         "config_entry_id": {
           "name": "Configuration entry",
