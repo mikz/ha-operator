@@ -18,6 +18,10 @@ import zipfile
 from pathlib import Path
 
 REDACTED = "[REDACTED]"
+# JUnit machine metadata is unrelated to testcase identity or outcomes.
+_JUNIT_HOSTNAME = re.compile(
+    r"""(<testsuites?\b[^>]*?)\s+hostname\s*=\s*(?:"[^"]*"|'[^']*')""", re.IGNORECASE
+)
 _PIN = re.compile(r"(?<!\d)\d{3}-\d{2}-\d{3}(?!\d)")
 _BEARER = re.compile(r"\b(Bearer[ \t]+)[A-Za-z0-9._~+/=-]+", re.IGNORECASE)
 _JWT = re.compile(
@@ -168,6 +172,7 @@ def sanitize_artifacts(root: Path, secrets: list[str], *, check: bool = False) -
         return value
 
     def redact(text: str, depth: int = 0) -> str:
+        text = _JUNIT_HOSTNAME.sub(r"\1", text)
         if depth > 128:
             raise ValueError("artifact encoded JSON nesting exceeds sanitization limit")
         if text.lstrip().startswith(("{", "[")):

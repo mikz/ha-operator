@@ -16,6 +16,40 @@ class ArtifactRedactionTests(unittest.TestCase):
         self.addCleanup(self.directory.cleanup)
         self.root = Path(self.directory.name)
 
+    def test_junit_export_removes_machine_metadata_preserves_results(self):
+        import shutil
+        import xml.etree.ElementTree as ET
+
+        original = self.root / "original.xml"
+        original.write_text(
+            '<testsuites><testsuite name="fixture" tests="2" failures="1"\n'
+            ' hostname="synthetic-machine.invalid" time="0.2">'
+            '<testcase classname="example" name="passing" time="0.1" />'
+            '<testcase classname="example" name="failing" time="0.1">'
+            '<failure message="expected">traceback</failure></testcase>'
+            "</testsuite></testsuites>"
+        )
+        preserved = original.read_bytes()
+        exported = self.root / "export"
+        exported.mkdir()
+        shutil.copyfile(original, exported / "junit.xml")
+        with zipfile.ZipFile(exported / "results.zip", "w") as archive:
+            archive.writestr("junit.xml", preserved)
+        with self.assertRaisesRegex(ValueError, "requires redaction"):
+            sanitize_artifacts(exported, [], check=True)
+        sanitize_artifacts(exported, [])
+        sanitize_artifacts(exported, [], check=True)
+        expected = ET.fromstring(preserved)
+        del expected.find("testsuite").attrib["hostname"]
+        self.assertEqual(
+            ET.tostring(ET.parse(exported / "junit.xml").getroot()), ET.tostring(expected)
+        )
+        with zipfile.ZipFile(exported / "results.zip") as archive:
+            self.assertEqual(
+                ET.tostring(ET.fromstring(archive.read("junit.xml"))), ET.tostring(expected)
+            )
+        self.assertEqual(original.read_bytes(), preserved)
+
     def test_redacts_late_docker_logs_exact_secret_and_pin(self):
         logs = self.root / "docker" / "ha.log"
         logs.parent.mkdir()
