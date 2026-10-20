@@ -444,3 +444,55 @@ async def test_number_form_unitless_binding_suggestion_and_wrong_explicit_unit(h
     edit = await entry.start_subentry_reconfigure_flow(hass, resource.subentry_id)
     key = next(key for key in edit["data_schema"].schema if key == "unit_of_measurement")
     assert key.description["suggested_value"] == ""
+
+
+@pytest.mark.parametrize("ingress", ["native", "external"])
+@pytest.mark.parametrize("new_value", [20, 1000])
+async def test_number_unit_drift_rejects_new_occurrences_without_replacing_accepted_intent(
+    hass, runtime_factory, ingress, new_value
+):
+    from copy import deepcopy
+
+    from homeassistant.util import dt as dt_util
+
+    number(hass, 20)
+    hass.states.async_set("sensor.desired", "20", {"unit_of_measurement": "°C"})
+    factory, _ = runtime_factory
+    runtime = await factory(
+        resources={"n": number_config()},
+        policies={
+            "p": {
+                "name": "Dynamic setpoint",
+                "kind": "occurrence",
+                "resource_id": "n",
+                "target_entity": "sensor.desired",
+                "target_field": "value",
+                "triggers": [{"trigger": "event", "event_type": "typed_admit"}],
+                "duration": {"minutes": 5},
+            }
+        },
+    )
+    await runtime.async_set_mode("n", "live")
+    await hass.async_block_till_done()
+    expiry = dt_util.utcnow().timestamp() + 300
+    if ingress == "native":
+        hass.bus.async_fire("typed_admit")
+    else:
+        await runtime.async_submit_occurrence("p", "accepted", expiry)
+    await hass.async_block_till_done()
+    accepted = deepcopy(runtime._state["occurrences"])
+    assert len(accepted) == 1
+    assert next(iter(accepted.values()))["target"] == {"value": 20}
+    number(hass, 20, "°F")
+    hass.states.async_set("sensor.desired", str(new_value), {"unit_of_measurement": "°C"})
+    await hass.async_block_till_done()
+    if ingress == "native":
+        hass.bus.async_fire("typed_admit")
+    else:
+        with pytest.raises(ServiceValidationError) as raised:
+            await runtime.async_submit_occurrence("p", "invalid", expiry + 10)
+        assert raised.value.translation_key == "occurrence_target_unavailable"
+    await hass.async_block_till_done()
+    assert runtime._state["occurrences"] == accepted
+    assert runtime.decisions["n"].target == Target(value=20)
+    assert runtime.decisions["n"].status == "unavailable"

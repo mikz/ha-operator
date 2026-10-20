@@ -268,7 +268,9 @@ class OperatorRuntime:
         self._close_task: asyncio.Task[bool] | None = None
         self._withdraw_trigger_requests = False
         self._generation = dict.fromkeys(self.resources, 0)
-        self._signatures: dict[str, tuple[Target | None, str | None, str | None, str, bool]] = {}
+        self._signatures: dict[
+            str, tuple[Target | None, str | None, str | None, str | None, float | None, str, bool]
+        ] = {}
         self._last_send: dict[str, float] = {}
         self._motion_started: dict[str, float] = {}
         self._last_identity: dict[str, tuple[Target, str | None]] = {}
@@ -477,7 +479,6 @@ class OperatorRuntime:
             contexts = {("occurrence", policy_id, occurrence_id): context} if context else None
             if contexts:
                 self._contexts.update(contexts)
-        self._generation[resource_id] += 1
         self._recompute()
         self._wake_all()
         self._notify(contexts)
@@ -590,7 +591,14 @@ class OperatorRuntime:
                     )
         self._recompute()
         self._sync_policy_triggers()
-        await asyncio.gather(*(owner.task for owner in self._trigger_owners.values()))
+        try:
+            await asyncio.shield(
+                asyncio.gather(*(owner.task for owner in self._trigger_owners.values()))
+            )
+        except asyncio.CancelledError:
+            # Fence first; normal close retains registration until native removers return.
+            await self.async_close()
+            raise
         self._tasks = [
             self.entry.async_create_background_task(
                 self.hass, self._worker(key), f"ha_operator:{key}"
@@ -1410,7 +1418,11 @@ class OperatorRuntime:
         return state.attributes.get(attribute) if attribute else state.state
 
     def _eligible(self, config: PolicyConfig, policy_id: str) -> bool:
-        self._policy_results[policy_id] = result = self._policy_checks[policy_id].evaluate()
+        self._policy_results[policy_id] = result = (
+            ConditionEvaluation("skipped")
+            if config["kind"] == "state" and not config.get("conditions")
+            else self._policy_checks[policy_id].evaluate()
+        )
         return result.permits_command
 
     def _policy_target(self, config: PolicyConfig) -> Target | None:
@@ -1449,7 +1461,11 @@ class OperatorRuntime:
         try:
             adapter = self.adapter(config["resource_id"])
             requested = Target.from_dict(target)
-            if isinstance(adapter, NumberAdapter) and not adapter.unit_compatible:
+            if (
+                config["kind"] == "state"
+                and isinstance(adapter, NumberAdapter)
+                and not adapter.unit_compatible
+            ):
                 return requested
             return adapter.normalize(requested)
         except ValueError, TypeError, HomeAssistantError:
@@ -1878,6 +1894,8 @@ class OperatorRuntime:
                 decision.target,
                 decision.source,
                 self.selections[key].request_id,
+                self.selections[key].occurrence_id,
+                self.selections[key].expires_at,
                 self.mode(key),
                 decision.status
                 in {

@@ -351,3 +351,37 @@ async def test_native_numeric_trigger_freezes_genuine_source_evidence(hass, runt
     hass.states.async_set("sensor.native_source", "21", {"unit_of_measurement": "°C"})
     await hass.async_block_till_done()
     assert runtime.reason_details("roof")["source_value"] == "20"
+
+
+@pytest.mark.parametrize(
+    "conditions",
+    [[], [{"condition": "template", "value_template": "{{ false }}", "enabled": False}]],
+)
+async def test_unconditional_state_policy_avoids_empty_evaluation_and_keeps_reason_evidence(
+    hass, runtime_factory, monkeypatch, conditions
+):
+    from unittest.mock import Mock
+
+    reported(hass)
+    factory, _ = runtime_factory
+    runtime = await factory(
+        policies={
+            "p": {
+                "name": "Unconditional",
+                "kind": "state",
+                "resource_id": "roof",
+                "target": {"position": 7},
+                "conditions": conditions,
+            }
+        }
+    )
+    checker = runtime._policy_checks["p"]
+    evaluate = Mock(wraps=checker.evaluate)
+    monkeypatch.setattr(checker, "evaluate", evaluate)
+    for _ in range(3):
+        await runtime.async_reconcile()
+    assert bool(evaluate.call_count) is bool(conditions)
+    assert runtime.decisions["roof"].target.position == 7
+    evidence = runtime.reason_details("roof")["policy_conditions"]
+    assert evidence["status"] == "skipped"
+    assert len(evidence["conditions"]) == len(conditions)

@@ -46,7 +46,10 @@ cancel_triggers:
 
 One stored trigger-owned request per policy is replaced on a new qualifying
 callback and retired on cancellation/expiry. Rejected callbacks leave the previous
-request intact. Cancellation affects no manual or externally submitted request.
+request intact. Accepted or cancelled work that remains masked by a manual winner
+does not interrupt that manual operation. Changes to the selected occurrence identity
+or expiry fence its execution, even when the target value is unchanged.
+Cancellation affects no manual or externally submitted request.
 It does not cancel a pending native `for` wait unless that wait's predicate changes.
 
 Admission requires an enabled policy and an effectively live resource. Observe,
