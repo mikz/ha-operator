@@ -4,9 +4,9 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from types import MappingProxyType
-from typing import Any
+from typing import Any, cast
 
-import voluptuous as vol
+import probatio as vol
 from homeassistant.config_entries import (
     ConfigEntry,
     ConfigEntryState,
@@ -21,9 +21,15 @@ from homeassistant.core import callback
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import selector
 
-from .configuration import KINDS, RESOURCE_DEFAULTS, ConfigurationError, validate_configuration
+from .configuration import (
+    COMMANDS,
+    KINDS,
+    RESOURCE_DEFAULTS,
+    ConfigurationError,
+    validate_configuration,
+)
 from .const import DOMAIN, NAME
-from .data import SubentryConfig
+from .data import ResourceConfig, SubentryConfig
 
 
 def _entity(*, domains: list[str] | None = None, multiple: bool = False) -> selector.EntitySelector:
@@ -169,6 +175,31 @@ class OperatorSubentryFlow(ConfigSubentryFlow):
         if user_input is not None:
             try:
                 data = self._validated_data(user_input, current)
+                if self.kind == "resource":
+                    from .native_conditions import NativeConditionList
+
+                    resource = cast(ResourceConfig, data)
+                    lists = list(resource.get("command_conditions", {}).values())
+                    for check in resource.get("health_checks", []):
+                        lists.append(check["conditions"])
+                        if "qualification" in check:
+                            lists.append(check["qualification"])
+                    for configs in lists:
+                        native = NativeConditionList(self.hass, configs)
+                        try:
+                            await native.async_setup()
+                            if native.setup_error:
+                                raise ConfigurationError(
+                                    "invalid_conditions",
+                                    native.setup_error,
+                                    translation_key="config_invalid_conditions",
+                                    placeholders={
+                                        "field": "conditions",
+                                        "error": native.setup_error,
+                                    },
+                                )
+                        finally:
+                            native.async_unload()
             except ConfigurationError as err:
                 errors["base"] = err.translation_key
                 placeholders.update(err.translation_placeholders)
@@ -193,6 +224,12 @@ class ResourceFlow(OperatorSubentryFlow):
     kind = "resource"
 
     def _schema(self) -> vol.Schema:
+        current = self._get_reconfigure_subentry() if self.source == "reconfigure" else None
+        commands = (
+            COMMANDS[current.data["kind"]]
+            if current
+            else tuple(dict.fromkeys(command for values in COMMANDS.values() for command in values))
+        )
         fields: dict[Any, Any] = {
             vol.Required("name"): selector.TextSelector(),
             vol.Required("kind"): selector.SelectSelector(
@@ -206,6 +243,26 @@ class ResourceFlow(OperatorSubentryFlow):
             vol.Optional("restriction_entity"): _entity(),
             vol.Optional("fault_entity"): _entity(),
             vol.Optional("manual_control", default=True): selector.BooleanSelector(),
+            vol.Optional("command_conditions"): selector.ObjectSelector(
+                {
+                    "fields": {
+                        command: {"selector": selector.ConditionSelector()} for command in commands
+                    },
+                    "translation_key": "command_conditions",
+                }
+            ),
+            vol.Optional("health_checks"): selector.ObjectSelector(
+                {
+                    "multiple": True,
+                    "label_field": "alias",
+                    "fields": {
+                        "alias": {"selector": selector.TextSelector(), "required": True},
+                        "conditions": {"selector": selector.ConditionSelector(), "required": True},
+                        "qualification": {"selector": selector.ConditionSelector()},
+                    },
+                    "translation_key": "health_checks",
+                }
+            ),
             vol.Optional("return_monitor"): selector.ObjectSelector(
                 {
                     "fields": {

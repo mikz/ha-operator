@@ -144,7 +144,7 @@ Build the release ZIP, then prepare dependencies before starting the offline lab
 
 ```sh
 .venv/bin/python scripts/release.py build
-.venv/bin/python scripts/lab.py prepare --ha-version 2026.9.3
+.venv/bin/python scripts/lab.py prepare --ha-version 2026.10.2
 .venv/bin/python scripts/lab.py test --scenario observability --keep
 .venv/bin/python scripts/lab_preview.py <run-id>
 ```

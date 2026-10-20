@@ -26,6 +26,12 @@ recovery. Offline downstream devices do not make the whole integration fail setu
 
 ## Configure a resource
 
+Optional [command conditions and health checks](conditions-health.md) use native
+condition editors in the resource form. `command_conditions` maps supported command
+names to condition lists. `health_checks` contains named `alias`/`conditions` objects
+with optional startup `qualification` conditions. Health reports evidence separately
+from the observed device state, selected target, and command permission.
+
 Each resource needs `name` and `kind`. Choose one of the following adapters.
 Names are your labels; references use stable subentry IDs.
 

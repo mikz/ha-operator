@@ -19,8 +19,7 @@ capture is not physical feedback, and successful pairing is not HAP control.
 | Lab | The exact release ZIP in isolated Home Assistant, real API/UI/HomeKit routes, and an independent simulator effects journal. |
 | Migration | Read-only inventory and an explicitly authorized, bounded ownership transfer on the actual installation. |
 
-Pure and HA tests use the baseline Home Assistant 2026.9.3 fixture pairing and the
-2026.9.4 compatibility pairing from the lock files. Lab runs use the same archive
+Pure and HA tests use the Home Assistant 2026.10.2 fixture pairing from `uv.lock`. Lab runs use the same archive
 hash on both versions. New contracts require new cases even if an older private
 test collection is unavailable; an inaccessible test-file count is not coverage.
 

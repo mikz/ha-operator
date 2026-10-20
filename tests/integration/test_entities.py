@@ -82,6 +82,7 @@ def fake_runtime():
         selections={},
         selection_attributes=lambda key: runtime.selections[key].attributes(),
         reason_details=lambda key: {},
+        condition_details=lambda key, **kwargs: {},
         begin_reason_publication=lambda *args: None,
         requirement_results={"air": result},
         next_attempts={},

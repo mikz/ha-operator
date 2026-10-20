@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from hashlib import sha256
-from typing import TYPE_CHECKING, cast, overload
+from typing import TYPE_CHECKING, Any, cast, overload
 
 from homeassistant.core import HomeAssistant
 
@@ -78,6 +78,10 @@ def _target(value: object) -> dict[str, object] | None:
 
 def _status(value: object) -> str:
     return value if isinstance(value, str) and value in _STATUSES else "unknown"
+
+
+def _condition_error(result: dict[str, Any]) -> bool:
+    return bool(result["error"] or any(item["error"] for item in result["conditions"]))
 
 
 def _policy_input(
@@ -192,6 +196,34 @@ async def async_get_config_entry_diagnostics(
                 "due_at": _number(monitor.due_at),
                 "overdue": monitor.overdue,
             }
+        if details := runtime.condition_details(identifier, published=True):
+            resources[_identifier(identifier)]["command_conditions"] = {
+                command: {
+                    "status": result["status"],
+                    "evaluation_error": _condition_error(result),
+                    "evaluated_condition_count": len(result["conditions"]),
+                }
+                for command, result in details["command_conditions"].items()
+            }
+            if health := details["health"]:
+                resources[_identifier(identifier)]["health"] = {
+                    "status": health["status"],
+                    "checks": [
+                        {
+                            "check": _identifier(check["alias"]),
+                            "status": check["status"],
+                            "condition_status": check["conditions"]["status"],
+                            "qualification_status": check["qualification"]["status"]
+                            if check["qualification"]
+                            else None,
+                            "evaluation_error": _condition_error(check["conditions"])
+                            or bool(
+                                check["qualification"] and _condition_error(check["qualification"])
+                            ),
+                        }
+                        for check in health["checks"]
+                    ],
+                }
     requirements: dict[str, dict[str, object]] = {}
     for identifier in runtime.requirements:
         result = runtime.requirement_results.get(identifier)

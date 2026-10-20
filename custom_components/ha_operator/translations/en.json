@@ -43,7 +43,9 @@
             "tolerance": "Position tolerance (percentage points)",
             "manual_duration": "Default manual duration (seconds)",
             "manual_control": "Allow manual control",
-            "return_monitor": "Return confirmation"
+            "return_monitor": "Return confirmation",
+            "command_conditions": "Command conditions",
+            "health_checks": "Health checks"
           },
           "data_description": {
             "manual_control": "Turn off for a follower controlled by a source. Removes managed command entities, manual status, expiry, and resume controls; manual request actions are rejected.",
@@ -60,7 +62,9 @@
             "command_interval": "Positive seconds between normal commands for one resource. Defaults to 30. A supported STOP invalidates pending commands and bypasses this interval.",
             "movement_timeout": "Positive seconds to defer another command while raw feedback reports movement. Defaults to 120. A target-not-reached decision can already exist; this guard bounds the wait before retry.",
             "manual_duration": "Positive seconds for a manual lease when no duration or absolute expiry is supplied. Defaults to 1800. Expiry withdraws the override; a policy must supply any return target.",
-            "tolerance": "Allowed cover-position difference from the target, from 0 to 100 percentage points. Defaults to 2. Independent physical feedback remains required."
+            "tolerance": "Allowed cover-position difference from the target, from 0 to 100 percentage points. Defaults to 2. Independent physical feedback remains required.",
+            "command_conditions": "Conditions for individual supported commands. Blocked commands retain the selected target. STOP and relay interlock shutdown keep their safety behavior.",
+            "health_checks": "Named observations, independent of desired targets and command permission. Qualification conditions can defer a check during startup. Checks never issue commands."
           }
         },
         "reconfigure": {
@@ -82,7 +86,9 @@
             "tolerance": "Position tolerance (percentage points)",
             "manual_duration": "Default manual duration (seconds)",
             "manual_control": "Allow manual control",
-            "return_monitor": "Return confirmation"
+            "return_monitor": "Return confirmation",
+            "command_conditions": "Command conditions",
+            "health_checks": "Health checks"
           },
           "data_description": {
             "manual_control": "Turn off for a follower controlled by a source. Removes managed command entities, manual status, expiry, and resume controls; manual request actions are rejected.",
@@ -99,7 +105,9 @@
             "command_interval": "Positive seconds between normal commands for one resource. Defaults to 30. A supported STOP invalidates pending commands and bypasses this interval.",
             "movement_timeout": "Positive seconds to defer another command while raw feedback reports movement. Defaults to 120. A target-not-reached decision can already exist; this guard bounds the wait before retry.",
             "manual_duration": "Positive seconds for a manual lease when no duration or absolute expiry is supplied. Defaults to 1800. Expiry withdraws the override; a policy must supply any return target.",
-            "tolerance": "Allowed cover-position difference from the target, from 0 to 100 percentage points. Defaults to 2. Independent physical feedback remains required."
+            "tolerance": "Allowed cover-position difference from the target, from 0 to 100 percentage points. Defaults to 2. Independent physical feedback remains required.",
+            "command_conditions": "Conditions for individual supported commands. Blocked commands retain the selected target. STOP and relay interlock shutdown keep their safety behavior.",
+            "health_checks": "Named observations, independent of desired targets and command permission. Qualification conditions can defer a check during startup. Checks never issue commands."
           }
         }
       },
@@ -175,7 +183,9 @@
         "config_number_minimum": "{field} must be a finite number greater than or equal to {minimum}",
         "config_entity_domain": "{field} must name an entity in the {domain} domain",
         "config_relay_profile_signatures": "Relay profiles must have distinct output combinations",
-        "config_relay_profile_speed": "Relay profile speed must agree with its on/off outputs"
+        "config_relay_profile_speed": "Relay profile speed must agree with its on/off outputs",
+        "config_invalid_conditions": "Invalid {field}: {error}",
+        "config_invalid_health_checks": "Health checks must be a list with unique aliases."
       },
       "abort": {
         "no_resources": "Add a resource before creating a policy.",
@@ -869,6 +879,14 @@
     "config_relay_profile_speed": {
       "title": "Invalid HA Operator configuration",
       "description": "Relay profile speed must agree with its on/off outputs. Correct the configuration, then reload the integration. No actuator worker runs until setup succeeds."
+    },
+    "config_invalid_conditions": {
+      "title": "Invalid HA Operator configuration",
+      "description": "Invalid {field}: {error}. Correct the resource configuration, then reload the integration."
+    },
+    "config_invalid_health_checks": {
+      "title": "Invalid HA Operator configuration",
+      "description": "Health checks must be a list with unique aliases. Correct the resource configuration, then reload the integration."
     }
   },
   "exceptions": {
@@ -1255,6 +1273,12 @@
     },
     "config_relay_profile_speed": {
       "message": "Relay profile speed must agree with its on/off outputs"
+    },
+    "config_invalid_conditions": {
+      "message": "Invalid {field}: {error}"
+    },
+    "config_invalid_health_checks": {
+      "message": "Health checks must be a list with unique aliases."
     }
   },
   "services": {
@@ -1432,6 +1456,38 @@
           "name": "Warn after (seconds)"
         }
       }
+    },
+    "command_conditions": {
+      "fields": {
+        "turn_on": {
+          "name": "Turn on"
+        },
+        "turn_off": {
+          "name": "Turn off"
+        },
+        "set_direction": {
+          "name": "Set direction"
+        },
+        "set_percentage": {
+          "name": "Set percentage"
+        },
+        "set_cover_position": {
+          "name": "Set cover position"
+        }
+      }
+    },
+    "health_checks": {
+      "fields": {
+        "alias": {
+          "name": "Check name"
+        },
+        "conditions": {
+          "name": "Health conditions"
+        },
+        "qualification": {
+          "name": "Startup qualification"
+        }
+      }
     }
   },
   "entity": {
@@ -1539,6 +1595,16 @@
       },
       "qualification_due": {
         "name": "Qualification due"
+      },
+      "health": {
+        "name": "Health",
+        "state": {
+          "healthy": "Healthy",
+          "unhealthy": "Unhealthy",
+          "unknown": "Unknown",
+          "waiting": "Waiting for qualification",
+          "skipped": "Skipped"
+        }
       }
     },
     "binary_sensor": {

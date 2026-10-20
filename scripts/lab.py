@@ -19,7 +19,7 @@ sys.path.insert(0, str(ROOT))
 from tests.lab.isolation import validate_compose, validate_inspect, validate_routes  # noqa: E402
 from tests.lab.redaction import sanitize_artifacts  # noqa: E402
 
-SUPPORTED = ("2026.9.3", "2026.9.4")
+SUPPORTED = ("2026.10.2",)
 
 
 def command(args, *, env=None, capture=True, timeout=900, check=True):
@@ -476,6 +476,7 @@ def main():
             "observe",
             "observability",
             "sleep",
+            "conditions",
         ),
         default="all",
     )

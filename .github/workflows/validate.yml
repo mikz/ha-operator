@@ -45,12 +45,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - ha: "2026.9.3"
+          - ha: "2026.10.2"
             project: .
             python: .venv/bin/python
-          - ha: "2026.9.4"
-            project: compat/ha2026.9.4
-            python: compat/ha2026.9.4/.venv/bin/python
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
@@ -90,12 +87,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - ha: "2026.9.3"
+          - ha: "2026.10.2"
             project: .
             python: .venv/bin/python
-          - ha: "2026.9.4"
-            project: compat/ha2026.9.4
-            python: compat/ha2026.9.4/.venv/bin/python
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
@@ -199,7 +193,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        ha: ["2026.9.3", "2026.9.4"]
+        ha: ["2026.10.2"]
     steps:
       - uses: actions/checkout@v4
       - name: Pin the disposable runner's Docker Engine
@@ -225,8 +219,10 @@ jobs:
         run: .venv/bin/python scripts/lab.py test --ha-version "${{ matrix.ha }}" --scenario observability --timeout 600
       - name: Verify desired controls and source-only migration
         run: .venv/bin/python scripts/lab.py test --ha-version "${{ matrix.ha }}" --scenario sleep --timeout 900
+      - name: Verify native command conditions and health
+        run: .venv/bin/python scripts/lab.py test --ha-version "${{ matrix.ha }}" --scenario conditions --timeout 600
       - name: Observe retries at production timing
-        if: matrix.ha == '2026.9.3'
+        if: matrix.ha == '2026.10.2'
         run: .venv/bin/python scripts/lab.py test --ha-version "${{ matrix.ha }}" --scenario soak --timeout 1500
       - name: Confirm release bytes remain identical
         if: always()
@@ -303,10 +299,10 @@ jobs:
                   labs.append(summary.parent)
           build_evidence(
               root, labs,
-              [root / f"evidence/tests-ha-{version}/tests-{version}" for version in ("2026.9.3", "2026.9.4")],
+              [root / f"evidence/tests-ha-{version}/tests-{version}" for version in ("2026.10.2",)],
               root / "evidence/guard-mutations/mutations.json", validators,
               dist / "ha_operator-evidence.zip",
-              static=[root / f"evidence/static-ha-{version}/static-{version}" for version in ("2026.9.3", "2026.9.4")],
+              static=[root / f"evidence/static-ha-{version}/static-{version}" for version in ("2026.10.2",)],
           )
           PY
       - name: Check artifact privacy

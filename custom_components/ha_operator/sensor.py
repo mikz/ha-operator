@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 from homeassistant.components.sensor import SensorDeviceClass, SensorEntity, SensorStateClass
 from homeassistant.const import PERCENTAGE, EntityCategory
@@ -59,6 +59,10 @@ async def async_setup_entry(
             ],
             config_subentry_id=identifier,
         )
+        if runtime.resources[identifier].get("health_checks"):
+            async_add_entities(
+                [HealthSensor(runtime, identifier, "health")], config_subentry_id=identifier
+            )
     for identifier in runtime.requirements:
         async_add_entities(
             [RequirementSensor(runtime, identifier, key) for key in REQUIREMENT_SENSORS],
@@ -204,6 +208,8 @@ class ResourceSensor(OperatorEntity, SensorEntity):
             }
             if self.key == "reason":
                 attributes.update(self.runtime.reason_details(self.identifier))
+                if checks := self.runtime.condition_details(self.identifier, published=True):
+                    attributes["conditions"] = checks
                 config = self.runtime.resources[self.identifier]
                 fields = {
                     "cover": ("position",),
@@ -245,6 +251,28 @@ class ResourceSensor(OperatorEntity, SensorEntity):
                 else None
             )
         return None
+
+
+class HealthSensor(OperatorEntity, SensorEntity):
+    """Health observations are diagnostic and never supply a control target."""
+
+    _attr_device_class = SensorDeviceClass.ENUM
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+    _attr_options = ["healthy", "unhealthy", "unknown", "waiting", "skipped"]
+
+    @property
+    def native_value(self) -> str | None:
+        if self.runtime._closed:
+            return None
+        status = self.runtime.health_details(self.identifier).get("status", "unknown")
+        return cast(str, status)
+
+    @property
+    def extra_state_attributes(self) -> dict[str, object]:
+        return {
+            "checks": self.runtime.health_details(self.identifier).get("checks", []),
+            **self.linked_entities,
+        }
 
 
 class PolicyInputSensor(OperatorEntity, SensorEntity):

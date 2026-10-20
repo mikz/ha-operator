@@ -10,7 +10,7 @@ from contextvars import ContextVar
 from typing import TypeGuard, cast
 
 from homeassistant.components.cover import CoverEntityFeature
-from homeassistant.components.fan import FanEntityFeature
+from homeassistant.components.fan.const import FanEntityFeature
 from homeassistant.const import STATE_UNAVAILABLE, STATE_UNKNOWN
 from homeassistant.core import Context, Event, EventStateChangedData, HomeAssistant, State, callback
 from homeassistant.exceptions import HomeAssistantError
@@ -67,6 +67,8 @@ class Adapter:
         self.config = config
         self.entity_id: str = config.get("entity_id", "")
         self._source_entities = tuple(config.get("outputs", (self.entity_id,)))
+        self.command_allowed: Callable[[str], bool] | None = None
+        self.on_dispatch: Callable[[], None] | None = None
 
     @property
     def supported_features(self) -> int:
@@ -110,17 +112,34 @@ class Adapter:
     async def async_apply(self, target: Target, still_current: Callable[[], bool]) -> bool:
         raise NotImplementedError
 
+    def commands_for(self, target: Target) -> tuple[str, ...]:
+        """Commands required for the complete target, before a transaction starts."""
+        return ("turn_on" if target.on else "turn_off",)
+
     async def async_stop(self) -> None:
         raise HomeAssistantError(translation_domain=DOMAIN, translation_key="stop_unsupported")
 
     async def _call(
-        self, domain: str, service: str, data: dict[str, object], current: Callable[[], bool]
+        self,
+        domain: str,
+        service: str,
+        data: dict[str, object],
+        current: Callable[[], bool],
+        *,
+        commands: tuple[str, ...] | None = None,
     ) -> bool:
+        if self.command_allowed is not None and not all(
+            self.command_allowed(command)
+            for command in (commands if commands is not None else (service,))
+        ):
+            return False
         # Re-read restrictions immediately before every individual physical command.
         if not current():
             return False
         if self._restriction():
             raise HomeAssistantError(translation_domain=DOMAIN, translation_key="device_restricted")
+        if self.on_dispatch is not None:
+            self.on_dispatch()
         await self._async_service(domain, service, data)
         # The command was sent even if synchronous feedback satisfied the target
         # or a newer generation arrived while the service was running.
@@ -165,6 +184,9 @@ class Adapter:
 
 class CoverAdapter(Adapter):
     """Percentage-position covers with honest native STOP support."""
+
+    def commands_for(self, target: Target) -> tuple[str, ...]:
+        return ("set_cover_position",)
 
     @property
     def supported_features(self) -> int:
@@ -370,12 +392,18 @@ class FanAdapter(Adapter):
 
     async def async_apply(self, target: Target, still_current: Callable[[], bool]) -> bool:
         target = self.normalize(target)
+        operation = "turn_on" if target.on else "turn_off"
+        if self.command_allowed is not None and not all(
+            self.command_allowed(command) for command in self.commands_for(target)
+        ):
+            return False
         if target.direction is not None:
             if not await self._call(
                 "fan",
                 "set_direction",
                 {"entity_id": self.entity_id, "direction": target.direction},
                 still_current,
+                commands=(operation, "set_direction"),
             ):
                 return False
         feature = FanEntityFeature.TURN_ON if target.on else FanEntityFeature.TURN_OFF
@@ -385,12 +413,29 @@ class FanAdapter(Adapter):
                 "set_percentage",
                 {"entity_id": self.entity_id, "percentage": target.percentage if target.on else 0},
                 still_current,
+                commands=(operation, "set_percentage"),
             )
         service = "turn_on" if target.on else "turn_off"
         data: dict[str, object] = {"entity_id": self.entity_id}
         if target.on and target.percentage is not None:
             data["percentage"] = target.percentage
-        return await self._call("fan", service, data, still_current)
+        return await self._call(
+            "fan",
+            service,
+            data,
+            still_current,
+            commands=(operation, "set_percentage") if "percentage" in data else (operation,),
+        )
+
+    def commands_for(self, target: Target) -> tuple[str, ...]:
+        operation = "turn_on" if target.on else "turn_off"
+        feature = FanEntityFeature.TURN_ON if target.on else FanEntityFeature.TURN_OFF
+        commands = [operation]
+        if target.direction is not None:
+            commands.append("set_direction")
+        if (target.on and target.percentage is not None) or not self.supported_features & feature:
+            commands.append("set_percentage")
+        return tuple(commands)
 
 
 class RelayFanAdapter(Adapter):
@@ -580,13 +625,23 @@ class RelayFanAdapter(Adapter):
         # Every successful relay normalization returns _target(configured_name).
         profile = cast(str, target.profile)
         expected = self.profiles[profile]["outputs"]
+        if self.command_allowed is not None and not self.command_allowed(
+            "turn_on" if target.on else "turn_off"
+        ):
+            return False
         if not still_current():
             return False
         if self._feedback() == expected:
             return False
         # Always command the entire bundle off. Never infer this from a service response.
         for output in self.outputs:
-            if not await self._call("switch", "turn_off", {"entity_id": output}, still_current):
+            if not await self._call(
+                "switch",
+                "turn_off",
+                {"entity_id": output},
+                still_current,
+                commands=() if target.on else ("turn_off",),
+            ):
                 return False
         if not target.on:
             return True

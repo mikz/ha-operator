@@ -16,6 +16,11 @@ all six integration actions, and request acceptance. Follow the
 [removal instructions](docs/removal.md) to transfer ownership before uninstalling.
 For recovery steps, see [Troubleshooting](docs/troubleshooting.md).
 
+[Command conditions and health checks](docs/conditions-health.md) explains native
+command permission, named health observations, and startup qualification. A blocked
+command retains its selected target; health checks report evidence without issuing
+device commands. These optional settings require Home Assistant 2026.10.2 or later.
+
 The [quality checklist](docs/quality-scale.md) is a custom-integration
 self-assessment, not an official Home Assistant medal.
 
@@ -164,10 +169,9 @@ and dispatch guards; inspect its report rather than treating execution as proof
 that every mutation was detected.
 
 The configured test paths include unit tests, HA integration fixtures, and the
-lab isolation validator tests. They do not start the packaged lab. CI repeats
-the fixture suite using the independently locked
-[2026.9.4 compatibility environment](compat/ha2026.9.4/pyproject.toml), runs HACS
-and hassfest validation, and requires the separate packaged lab jobs.
+lab isolation validator tests. They do not start the packaged lab. The supported baseline is Home Assistant 2026.10.2, pinned with its native fixture
+in `uv.lock`. CI runs HACS and hassfest validation and requires the separate
+packaged lab jobs on that baseline.
 
 Build and verify the release artifact:
 
@@ -186,11 +190,9 @@ JSON, and YAML files. It does not replace the archive hash.
 Prepare images before testing the isolated runtime:
 
 ```sh
-uv run python scripts/lab.py prepare --ha-version 2026.9.3
-uv run python scripts/lab.py test --ha-version 2026.9.3 --scenario all --timeout 1800
-uv run python scripts/lab.py test --ha-version 2026.9.3 --scenario soak --timeout 1500
-uv run python scripts/lab.py prepare --ha-version 2026.9.4
-uv run python scripts/lab.py test --ha-version 2026.9.4 --scenario all --timeout 1800
+uv run python scripts/lab.py prepare --ha-version 2026.10.2
+uv run python scripts/lab.py test --ha-version 2026.10.2 --scenario all --timeout 1800
+uv run python scripts/lab.py test --ha-version 2026.10.2 --scenario soak --timeout 1500
 ```
 
 Lab results belong under `artifacts/lab/<run_id>/`. Preserve the summary,

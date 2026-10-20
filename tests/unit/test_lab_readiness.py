@@ -178,12 +178,31 @@ def native_diagnostics():
     return {
         "resources": {
             "a" * 12: {
+                "command_conditions": {
+                    "turn_on": {
+                        "status": "passed",
+                        "evaluation_error": False,
+                        "evaluated_condition_count": 1,
+                    }
+                },
+                "health": {
+                    "status": "unknown",
+                    "checks": [
+                        {
+                            "check": "f" * 12,
+                            "status": "unknown",
+                            "condition_status": "unknown",
+                            "qualification_status": None,
+                            "evaluation_error": True,
+                        }
+                    ],
+                },
                 "return_monitor": {
                     "phase": "overdue",
                     "target_position": 7,
                     "due_at": 300,
                     "overdue": True,
-                }
+                },
             }
         },
         "policies": {
@@ -236,6 +255,49 @@ def test_native_diagnostics_accepts_only_known_anonymized_records():
     data["policies"]["d" * 12]["input"]["state"] = None
     data["policies"]["e" * 12]["input"]["state"]["episode_id"] = None
     validate_native_diagnostics(data)
+    data["resources"]["a" * 12]["command_conditions"] = {}
+    data["resources"]["a" * 12]["health"]["checks"][0]["qualification_status"] = "passed"
+    validate_native_diagnostics(data)
+    data["resources"]["a" * 12].pop("command_conditions")
+    data["resources"]["a" * 12].pop("health")
+    validate_native_diagnostics(data)
+
+
+@pytest.mark.parametrize(
+    "path,value",
+    [
+        (("command_conditions",), []),
+        (("command_conditions",), {"sensor.private": {}}),
+        (("command_conditions", "turn_on"), []),
+        (("command_conditions", "turn_on", "status"), "healthy"),
+        (("command_conditions", "turn_on", "evaluation_error"), 1),
+        (("command_conditions", "turn_on", "evaluated_condition_count"), True),
+        (("command_conditions", "turn_on", "evaluated_condition_count"), -1),
+        (("command_conditions", "turn_on", "evaluated_condition_count"), 1.5),
+        (("command_conditions", "turn_on", "conditions"), [{"entity_id": "sensor.private"}]),
+        (("health",), []),
+        (("health", "status"), "passed"),
+        (("health", "checks"), {}),
+        (("health", "checks", 0), []),
+        (("health", "checks", 0, "check"), "Private check alias"),
+        (("health", "checks", 0, "status"), "passed"),
+        (("health", "checks", 0, "condition_status"), "healthy"),
+        (("health", "checks", 0, "qualification_status"), "waiting"),
+        (("health", "checks", 0, "evaluation_error"), 1),
+        (("health", "checks", 0, "alias"), "Private check alias"),
+        (("health", "checks", 0, "sources"), {"sensor.private": {"state": "on"}}),
+    ],
+)
+def test_native_condition_diagnostics_rejects_private_fields_and_invalid_shapes(path, value):
+    from tests.lab.runner import validate_native_diagnostics
+
+    data = native_diagnostics()
+    record = data["resources"]["a" * 12]
+    for key in path[:-1]:
+        record = record[key]
+    record[path[-1]] = value
+    with pytest.raises(AssertionError):
+        validate_native_diagnostics(data)
 
 
 @pytest.mark.parametrize(

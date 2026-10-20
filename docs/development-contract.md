@@ -26,6 +26,53 @@ old leases are pruned before the source follower becomes active.
 Cover resource data can include `return_monitor`: `target_at_most` (0–100) and
 positive `warning_after_seconds`. It uses the existing resource tolerance.
 
+Resource `command_conditions` optionally maps supported command names to native HA
+condition lists. Keys are `turn_on`/`turn_off` for switch and relay fan,
+`set_cover_position` for cover, and `turn_on`/`turn_off`/`set_direction`/
+`set_percentage` for native fan. Fan ON/OFF guards also apply when HA requires the
+percentage-service fallback. An ON guard applies before a fan or relay transaction
+starts and before each energizing output. A deliberate relay OFF obeys `turn_off`;
+the mandatory all-off interlock leg of an ON/reversal transaction keeps its existing
+safety behavior. Supported STOP bypasses these guards. Guards apply equally to
+manual requests and policies, and never replace the selected target with OFF.
+Enabled command conditions use Home Assistant's native semantics. A false result
+or an evaluation error exposed to Operator blocks that operation. The selected
+native condition handles missing or unavailable entities; they are not a universal
+availability veto. Use an explicit availability/state condition when absence must block.
+Native target conditions using `behavior: all` can pass when no available targets
+remain. Preserve that native result; use a single-entity state condition or
+`behavior: any` for each required target joined by native AND when presence matters.
+Native empty or disabled top-level condition lists permit commands.
+Recheck command permission, restrictions,
+and generation immediately before physical dispatch and generation after awaits.
+
+Resource `health_checks` optionally contains objects with a unique `alias`, native
+`conditions`, and optional native `qualification` conditions. Native repeatable
+object selectors expose the condition editors in resource add/reconfigure forms.
+Persist the original serializable HA condition configuration. Native compiled
+checkers own evaluation, dependency tracking, and cleanup; bounded polling covers
+checkers whose native `needs_polling` is true. Reject `condition: trigger`, including
+inside compounds: reconciliation has no automation trigger context. Core 2026.10.2
+is the minimum; there is no earlier condition implementation fallback.
+
+Qualification that is false means waiting, errors mean unknown, and disabled or
+empty qualification means skipped. A qualified check reports healthy, unhealthy,
+unknown, or skipped; disabled/empty checks never establish health. Native compound
+truth remains authoritative, including OR conditions that handle optional inputs.
+A known unhealthy check remains visible alongside unknown or waiting checks.
+Health never changes selected targets or command permission and never dispatches
+STOP/restart. Only resources with configured health checks gain a diagnostic,
+read-only Health entity; existing entity identities and histories remain intact.
+
+Check evidence reports the native config, results/errors, and bounded factual source
+snapshots, never a device diagnosis. Native static entity extraction is incomplete
+for templates, expanded targets, and some entity-valued bounds; label its provenance
+without claiming complete dependencies or that every referenced branch ran. An
+unchanged sensor's `last_changed` is not proof of stale data. Publish frozen evidence
+only on meaningful health/permission transitions, while `explain` may refresh source
+facts. Do not rerun native conditions for explanation traces or mutate a caller's
+native automation trace. Downloadable diagnostics retain their privacy allowlist.
+
 Intent data: `name`, required boolean `initial_value`, optional `on_targets` list
 of other intent IDs. Values are held until explicit command. An OFF-to-ON command
 updates attached controls as one in-memory state change. Repeated ON and source OFF
@@ -152,4 +199,4 @@ Package evidence reflects real execution; no unrun check can be labelled passed.
 The coordinating owner owns final acceptance. Workers run bounded meaningful
 tests and report exact commands and results. Preserve other workers' changes.
 Route platform and lifecycle questions to the coordinating owner when no
-persistent platform advisor exists. Keep the HA 2026.9.3 and 2026.9.4 gates.
+persistent platform advisor exists. Require the native HA 2026.10.2 baseline; earlier versions are unsupported.

@@ -90,6 +90,86 @@ async def test_resource_errors_then_creation_and_reconfigure(hass, native_source
     assert duplicate["errors"] == {"base": "config_an_output_is_already_owned_by_another_resource"}
 
 
+async def test_native_check_ui_add_edit_remove_preserves_resource(hass, native_sources):
+    from homeassistant.helpers import selector
+
+    entry = MockConfigEntry(domain=DOMAIN)
+    entry.add_to_hass(hass)
+    form = await _start(hass, entry, "resource")
+    fields = {key.schema: value for key, value in form["data_schema"].schema.items()}
+    health = fields["health_checks"]
+    assert health.config["multiple"]
+    assert isinstance(health.config["fields"]["conditions"]["selector"], selector.ConditionSelector)
+    assert isinstance(
+        health.config["fields"]["qualification"]["selector"], selector.ConditionSelector
+    )
+    command = fields["command_conditions"]
+    assert isinstance(
+        command.config["fields"]["set_cover_position"]["selector"], selector.ConditionSelector
+    )
+    data = {
+        "name": "Window",
+        "kind": "cover",
+        "entity_id": "cover.raw",
+        "command_conditions": {
+            "set_cover_position": [
+                {"condition": "state", "entity_id": "binary_sensor.inlet", "state": "on"}
+            ]
+        },
+        "health_checks": [
+            {
+                "alias": "Feedback",
+                "conditions": [{"condition": "template", "value_template": "{{ true }}"}],
+            }
+        ],
+    }
+    result = await hass.config_entries.subentries.async_configure(form["flow_id"], data)
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    original = next(iter(entry.subentries.values()))
+    edit = await entry.start_subentry_reconfigure_flow(hass, original.subentry_id)
+    data["health_checks"][0]["alias"] = "Reporting"
+    result = await hass.config_entries.subentries.async_configure(edit["flow_id"], data)
+    assert result["reason"] == "reconfigure_successful"
+    assert entry.subentries[original.subentry_id].data["health_checks"][0]["alias"] == "Reporting"
+    edit = await entry.start_subentry_reconfigure_flow(hass, original.subentry_id)
+    result = await hass.config_entries.subentries.async_configure(
+        edit["flow_id"], {"name": "Window", "kind": "cover", "entity_id": "cover.raw"}
+    )
+    assert result["reason"] == "reconfigure_successful"
+    assert "health_checks" not in entry.subentries[original.subentry_id].data
+    assert "command_conditions" not in entry.subentries[original.subentry_id].data
+
+
+async def test_native_qualification_compile_error_stays_in_resource_form(hass, native_sources):
+    entry = MockConfigEntry(domain=DOMAIN)
+    entry.add_to_hass(hass)
+    form = await _start(hass, entry, "resource")
+    result = await hass.config_entries.subentries.async_configure(
+        form["flow_id"],
+        {
+            "name": "Window",
+            "kind": "cover",
+            "entity_id": "cover.raw",
+            "health_checks": [
+                {
+                    "alias": "Startup",
+                    "conditions": [],
+                    "qualification": [
+                        {
+                            "condition": "template",
+                            "value_template": "{{ true }}",
+                            "enabled": "{{ 1 / 0 }}",
+                        }
+                    ],
+                }
+            ],
+        },
+    )
+    assert result["type"] is FlowResultType.FORM
+    assert result["errors"] == {"base": "config_invalid_conditions"}
+    assert not entry.subentries
+
+
 async def test_policy_needs_resource_then_creates(hass, native_sources):
     entry = MockConfigEntry(domain=DOMAIN)
     entry.add_to_hass(hass)

@@ -24,7 +24,7 @@ STATE = Path("/state")
 
 
 def validate_native_diagnostics(data):
-    """Allow only the bounded, anonymized native input and return-monitor records."""
+    """Allow only bounded, anonymized input, monitor, condition, and health records."""
 
     def number(value):
         return value is None or type(value) in (int, float) and math.isfinite(value)
@@ -32,14 +32,57 @@ def validate_native_diagnostics(data):
     def opaque(value):
         return isinstance(value, str) and re.fullmatch(r"[0-9a-f]{12}", value) is not None
 
+    condition_statuses = {"passed", "failed", "unknown", "skipped"}
+    health_statuses = {"healthy", "unhealthy", "unknown", "waiting", "skipped"}
     for row in data["resources"].values():
-        if "return_monitor" not in row:
-            continue
-        state = row["return_monitor"]
-        assert set(state) == {"phase", "target_position", "due_at", "overdue"}
-        assert state["phase"] in {"idle", "waiting", "overdue"}
-        assert type(state["overdue"]) is bool
-        assert number(state["target_position"]) and number(state["due_at"])
+        if "command_conditions" in row:
+            commands = row["command_conditions"]
+            assert isinstance(commands, dict)
+            assert set(commands) <= {
+                "turn_on",
+                "turn_off",
+                "set_direction",
+                "set_percentage",
+                "set_cover_position",
+            }
+            for result in commands.values():
+                assert isinstance(result, dict)
+                assert set(result) == {"status", "evaluation_error", "evaluated_condition_count"}
+                assert result["status"] in condition_statuses
+                assert type(result["evaluation_error"]) is bool
+                assert (
+                    type(result["evaluated_condition_count"]) is int
+                    and result["evaluated_condition_count"] >= 0
+                )
+        if "health" in row:
+            health = row["health"]
+            assert isinstance(health, dict)
+            assert set(health) == {"status", "checks"}
+            assert health["status"] in health_statuses
+            assert isinstance(health["checks"], list)
+            for check in health["checks"]:
+                assert isinstance(check, dict)
+                assert set(check) == {
+                    "check",
+                    "status",
+                    "condition_status",
+                    "qualification_status",
+                    "evaluation_error",
+                }
+                assert opaque(check["check"])
+                assert check["status"] in health_statuses
+                assert check["condition_status"] in condition_statuses
+                assert (
+                    check["qualification_status"] is None
+                    or check["qualification_status"] in condition_statuses
+                )
+                assert type(check["evaluation_error"]) is bool
+        if "return_monitor" in row:
+            state = row["return_monitor"]
+            assert set(state) == {"phase", "target_position", "due_at", "overdue"}
+            assert state["phase"] in {"idle", "waiting", "overdue"}
+            assert type(state["overdue"]) is bool
+            assert number(state["target_position"]) and number(state["due_at"])
     for row in data["policies"].values():
         assert type(row["enabled"]) is bool
         source = row.get("input")
@@ -711,7 +754,7 @@ class Lab:
             }
             assert all(
                 set(row)
-                == resource_fields | ({"return_monitor"} if "return_monitor" in row else set())
+                == resource_fields | ({"return_monitor", "command_conditions", "health"} & set(row))
                 for row in data["resources"].values()
             )
             assert all(
@@ -833,6 +876,12 @@ async def main():
             lab = Lab(session, page)
             try:
                 await lab.bootstrap()
+                if os.environ["LAB_SCENARIO"] == "conditions":
+                    from .scenarios_conditions import run_conditions
+
+                    await run_conditions(lab)
+                    await lab.diagnostics()
+                    return
                 if os.environ["LAB_SCENARIO"] == "sleep":
                     from .scenarios_sleep import run_sleep
 

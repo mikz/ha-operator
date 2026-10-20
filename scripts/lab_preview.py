@@ -45,7 +45,7 @@ while True:
 
 
 def validate_preview(run_id: str) -> str:
-    if not re.fullmatch(r"lab-2026-9-[34]-[0-9a-f]{8}", run_id):
+    if not re.fullmatch(r"lab-2026-10-2-[0-9a-f]{8}", run_id):
         raise ValueError("Expected a lab controller run ID")
     evidence = ROOT / "artifacts/lab" / run_id
     summary = json.loads((evidence / "summary.json").read_text())

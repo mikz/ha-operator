@@ -24,6 +24,9 @@
       },
       "input_phase": {
         "default": "mdi:state-machine"
+      },
+      "health": {
+        "default": "mdi:heart-pulse"
       }
     },
     "binary_sensor": {

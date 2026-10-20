@@ -65,11 +65,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: OperatorConfigEntry) -> 
         registry = er.async_get(hass)
         for identifier, resource in runtime.resources.items():
             domain = "fan" if resource["kind"] == "relay_fan" else resource["kind"]
-            for platform, suffix in (
-                (domain, "managed"),
-                ("binary_sensor", "manual"),
-                ("sensor", "expiry"),
-                ("button", "release"),
+            for platform, suffix, enabled in (
+                (domain, "managed", runtime.manual_control(identifier)),
+                ("binary_sensor", "manual", runtime.manual_control(identifier)),
+                ("sensor", "expiry", runtime.manual_control(identifier)),
+                ("button", "release", runtime.manual_control(identifier)),
+                ("sensor", "health", bool(resource.get("health_checks"))),
             ):
                 entity_id = registry.async_get_entity_id(platform, DOMAIN, f"{identifier}_{suffix}")
                 if entity_id is None:
@@ -77,16 +78,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: OperatorConfigEntry) -> 
                 registered = registry.async_get(entity_id)
                 if registered is None:
                     continue
-                if not runtime.manual_control(identifier) and registered.disabled_by is None:
+                if not enabled and registered.disabled_by is None:
                     registry.async_update_entity(
                         entity_id, disabled_by=er.RegistryEntryDisabler.INTEGRATION
                     )
-                elif (
-                    runtime.manual_control(identifier)
-                    and registered.disabled_by is er.RegistryEntryDisabler.INTEGRATION
-                ):
+                elif enabled and registered.disabled_by is er.RegistryEntryDisabler.INTEGRATION:
                     registry.async_update_entity(entity_id, disabled_by=None)
-                if not runtime.manual_control(identifier):
+                if not enabled:
                     # HA retains an unavailable placeholder when unloading an entity;
                     # disabling a registry entry does not clear that restored state.
                     if (state := hass.states.get(entity_id)) and state.attributes.get("restored"):

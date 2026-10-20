@@ -9,6 +9,8 @@ import pytest
 from scripts.evidence import (
     ALL_SCENARIOS,
     CELLAR_SCENARIOS,
+    CONDITION_FILES,
+    CONDITION_SCENARIOS,
     INITIAL_SCENARIOS,
     LAB_CASES,
     MUTANTS,
@@ -56,13 +58,6 @@ def complete_evidence(tmp_path):
         '[tool.ruff]\ntarget-version = "py314"\nline-length = 100\n'
         '[tool.ruff.lint]\nselect = ["E", "F", "I", "UP", "B", "ASYNC"]\n'
     )
-    compat = root / "compat/ha2026.9.4"
-    compat.mkdir(parents=True)
-    (compat / "pyproject.toml").write_text(
-        '[project]\nname = "compat-fixture"\nversion = "0.1.0"\n'
-        'dependencies = ["mypy==2.3.1", "ruff==0.16.9"]\n'
-    )
-    (compat / "uv.lock").write_text("compat-locked")
     manifest = build(root, root / "dist")
     manifest["source_commit"] = "a" * 40
     write_json(root / "dist/ha_operator.manifest.json", manifest)
@@ -125,10 +120,20 @@ def complete_evidence(tmp_path):
             if scenario == "sleep"
             else WINDOW_SCENARIOS
             if scenario == "windows"
+            else CONDITION_SCENARIOS
+            if scenario == "conditions"
             else INITIAL_SCENARIOS | {"LAB-REALISTIC-SOAK"}
         )
-        for name in OBSERVABILITY_FILES | SLEEP_FILES | WINDOW_FILES:
+        for name in OBSERVABILITY_FILES | SLEEP_FILES | WINDOW_FILES | CONDITION_FILES:
             (run / name).write_text("{}")
+        write_json(
+            run / "conditions-evidence.json",
+            {
+                "schema": 1,
+                "provenance": "simulator_generated",
+                "physical_effects": "simulator_observed",
+            },
+        )
         write_json(
             run / "window-native-evidence.json",
             {
@@ -213,7 +218,7 @@ def complete_evidence(tmp_path):
         (run / "control/secrets.json").write_text('["never-package-control-secret"]')
         labs.append(run)
     tests = []
-    for version in ("2026.9.3", "2026.9.4"):
+    for version in ("2026.10.2",):
         directory = root / "artifacts" / f"tests-{version}"
         directory.mkdir()
         (directory / "junit.xml").write_text(
@@ -254,7 +259,7 @@ def complete_evidence(tmp_path):
         tests.append(directory)
     static = []
     identity = static_identity(root, manifest)
-    for version in ("2026.9.3", "2026.9.4"):
+    for version in ("2026.10.2",):
         directory = root / "artifacts" / f"static-{version}"
         directory.mkdir()
         for name, contents in static_success(identity["modules"]).items():
@@ -354,8 +359,8 @@ def test_bundle_contains_only_selected_successes_and_preserves_release_bytes(com
             if name.endswith("ha.log"):
                 assert b"accidental-test-token" not in bundle.read(name)
                 assert b"[REDACTED]" in bundle.read(name)
-        assert first["checks"]["strict_static"] == ["2026.9.3", "2026.9.4"]
-        for version in ("2026.9.3", "2026.9.4"):
+        assert first["checks"]["strict_static"] == ["2026.10.2"]
+        for version in ("2026.10.2",):
             for name in STATIC_FILES:
                 assert f"evidence/static/{version}/{name}" in bundle.namelist()
         for run in arguments["labs"]:
@@ -379,7 +384,7 @@ def test_rejects_mixed_archive_and_missing_required_runs(complete_evidence):
     with pytest.raises(ValueError, match="another archive"):
         build_evidence(**complete_evidence)
     complete_evidence["labs"] = complete_evidence["labs"][1:]
-    with pytest.raises(ValueError, match="Need both"):
+    with pytest.raises(ValueError, match="Need HA"):
         build_evidence(**complete_evidence)
 
 
@@ -438,7 +443,9 @@ def test_sanitized_junit_has_explicit_provenance_and_valid_delivered_hashes(comp
         extracted = complete_evidence["root"] / "delivered"
         bundle.extractall(extracted)
         manifest = json.loads((extracted / "ha_operator.manifest.json").read_text())
-        assert validate_tests(extracted / prefix, manifest, complete_evidence["root"]) == "2026.9.3"
+        assert (
+            validate_tests(extracted / prefix, manifest, complete_evidence["root"]) == "2026.10.2"
+        )
     assert (directory / "result.json").read_bytes() == original_receipt
     assert junit.read_bytes() == original_junit
     assert len(index["evidence_builder"]["source_sha256"]) == 5
@@ -479,7 +486,7 @@ def test_sanitization_cannot_change_executed_results(complete_evidence, monkeypa
 
     def faulty_sanitizer(directory, secrets):
         original(directory, secrets)
-        tests = directory / "tests/2026.9.3"
+        tests = directory / "tests/2026.10.2"
         if target == "receipt":
             change(tests / "result.json", status="failed")
         else:
@@ -632,7 +639,7 @@ def test_lock_receipt_must_prove_no_commands_at_all_lifecycle_boundaries(complet
         build_evidence(**complete_evidence)
 
 
-@pytest.mark.parametrize("version", ["2026.9.3", "2026.9.4"])
+@pytest.mark.parametrize("version", ["2026.10.2"])
 def test_native_windows_are_required_on_both_pins(complete_evidence, version):
     run = next(path for path in complete_evidence["labs"] if path.name == version + "-windows")
     scenarios = json.loads((run / "scenarios.json").read_text())
@@ -681,10 +688,10 @@ def test_native_windows_inconsistent_snapshots_cannot_pass(complete_evidence, fi
         build_evidence(**complete_evidence)
 
 
-@pytest.mark.parametrize("version", ["2026.9.3", "2026.9.4"])
+@pytest.mark.parametrize("version", ["2026.10.2"])
 def test_both_native_static_results_are_required(complete_evidence, version):
     complete_evidence["static"] = [p for p in complete_evidence["static"] if version not in p.name]
-    with pytest.raises(ValueError, match="both native HA strict static"):
+    with pytest.raises(ValueError, match="all supported HA strict static"):
         build_evidence(**complete_evidence)
 
 
@@ -697,7 +704,7 @@ def test_both_native_static_results_are_required(complete_evidence, version):
         {"source_commit": "other"},
         {"identity": {}},
         {"commands": {}},
-        {"environment": {"ha": "2026.9.3", "mypy": "1.19"}},
+        {"environment": {"ha": "2026.10.2", "mypy": "1.19"}},
         {"exit_codes": {"mypy": 0}},
         {"exit_codes": {"mypy": 0, "ruff_lint": 1, "ruff_format": 0}},
     ],
@@ -820,7 +827,7 @@ def test_static_proof_rejects_unchecked_production_module(complete_evidence):
 
 def test_static_proof_rejects_changed_lock(complete_evidence):
     root = complete_evidence["root"]
-    (root / "compat/ha2026.9.4/uv.lock").write_text("changed lock")
+    (root / "uv.lock").write_text("changed lock")
     manifest = json.loads((root / "dist/ha_operator.manifest.json").read_text())
     with pytest.raises(ValueError, match="dependency lock changed"):
         validate_static(complete_evidence["static"][0], manifest, root)

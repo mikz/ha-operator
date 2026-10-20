@@ -23,19 +23,26 @@ from scripts.mutation_gate import MUTANTS  # noqa: E402
 from scripts.release import archive_bytes, digest, integration_files, verify  # noqa: E402
 from tests.lab.redaction import sanitize_artifacts  # noqa: E402
 
-VERSIONS = {"2026.9.3", "2026.9.4"}
+VERSIONS = {"2026.10.2"}
 LAB_CASES = {
-    ("2026.9.3", "all"),
-    ("2026.9.4", "all"),
-    ("2026.9.3", "soak"),
-    ("2026.9.3", "observability"),
-    ("2026.9.4", "observability"),
-    ("2026.9.3", "sleep"),
-    ("2026.9.4", "sleep"),
-    ("2026.9.3", "windows"),
-    ("2026.9.4", "windows"),
+    ("2026.10.2", "all"),
+    ("2026.10.2", "soak"),
+    ("2026.10.2", "observability"),
+    ("2026.10.2", "sleep"),
+    ("2026.10.2", "windows"),
+    ("2026.10.2", "conditions"),
 }
 INITIAL_SCENARIOS = {"LAB-ONBOARDING", "LAB-NATIVE-CONFIG-FLOW", "LAB-RESOURCE-CONFIGURATION"}
+CONDITION_SCENARIOS = INITIAL_SCENARIOS | {
+    "CONDITIONS-NATIVE-CONFIGURATION",
+    "CONDITIONS-BLOCKED-ON-RETAINS-DESIRED",
+    "CONDITIONS-HEALTH-DOES-NOT-ACTUATE",
+    "CONDITIONS-OFF-WITH-FALSE-START-GATE",
+    "CONDITIONS-NATIVE-HEALTH-MORE-INFO",
+    "CONDITIONS-RECONFIGURE-IDENTITY",
+    "LAB-DIAGNOSTICS",
+}
+CONDITION_FILES = {"conditions-evidence.json", "conditions-health-more-info.png"}
 SLEEP_SCENARIOS = INITIAL_SCENARIOS | {
     "SLEEP-EXISTING-GROUPS-HAP",
     "SLEEP-NATIVE-SETUP-OBSERVE",
@@ -164,6 +171,7 @@ LAB_FILES = (
     | OBSERVABILITY_FILES
     | SLEEP_FILES
     | WINDOW_FILES
+    | CONDITION_FILES
     | {
         "summary.json",
         "sanitized.json",
@@ -193,7 +201,7 @@ LAB_FILES = (
 STATIC_FILES = {"result.json", "static.log", "ruff-lint.log", "ruff-format.log", "dependencies.txt"}
 MYPY_VERSION = "2.3.1"
 RUFF_VERSION = "0.16.9"
-STATIC_CONFIGS = ("pyproject.toml", "compat/ha2026.9.4/pyproject.toml")
+STATIC_CONFIGS = ("pyproject.toml",)
 
 TEST_FILES = {"result.json", "coverage.json", "junit.xml", "pytest.log", "dependencies.txt"}
 
@@ -425,18 +433,16 @@ def static_identity(root: Path, manifest: dict) -> dict:
     )
     projects = {name: tomllib.loads((root / name).read_text()) for name in STATIC_CONFIGS}
     require(
-        f"mypy=={MYPY_VERSION}" in projects["pyproject.toml"]["dependency-groups"]["dev"]
-        and f"mypy=={MYPY_VERSION}" in projects[STATIC_CONFIGS[1]]["project"]["dependencies"],
-        "Both native environments must pin the static checker",
+        f"mypy=={MYPY_VERSION}" in projects["pyproject.toml"]["dependency-groups"]["dev"],
+        "The native environment must pin the static checker",
     )
     require(
-        f"ruff=={RUFF_VERSION}" in projects["pyproject.toml"]["dependency-groups"]["dev"]
-        and f"ruff=={RUFF_VERSION}" in projects[STATIC_CONFIGS[1]]["project"]["dependencies"],
-        "Both native environments must pin the lint/format checker",
+        f"ruff=={RUFF_VERSION}" in projects["pyproject.toml"]["dependency-groups"]["dev"],
+        "The native environment must pin the lint/format checker",
     )
     require(
-        {"uv.lock", "compat/ha2026.9.4/uv.lock"} <= set(manifest["locks"]),
-        "Static proof requires both native environment locks",
+        {"uv.lock"} <= set(manifest["locks"]),
+        "Static proof requires the native environment lock",
     )
     for name, expected in manifest["locks"].items():
         require(
@@ -698,6 +704,17 @@ def validate_lab(directory: Path, manifest: dict, manifest_sha256: str) -> tuple
         ):
             require((directory / name).is_file(), f"Missing {name}")
         validate_observe_effects(directory, manifest)
+    elif case[1] == "conditions":
+        required = CONDITION_SCENARIOS
+        for name in CONDITION_FILES:
+            require((directory / name).is_file(), f"Missing {name}")
+        conditions = read_json(directory / "conditions-evidence.json")
+        require(
+            conditions.get("schema") == 1
+            and conditions.get("provenance") == "simulator_generated"
+            and conditions.get("physical_effects") == "simulator_observed",
+            "Conditions evidence must identify independent simulator observations",
+        )
     elif case[1] == "observability":
         required = OBSERVABILITY_SCENARIOS
         for name in OBSERVABILITY_FILES:
@@ -900,17 +917,18 @@ def build_evidence(
     ]
     require(
         len(selected) == len(LAB_CASES) and set(selected) == LAB_CASES,
-        "Need both HA all/windows/observability/sleep runs and the HA 2026.9.3 soak (nine runs)",
+        "Need HA 2026.10.2 all/windows/observability/sleep/conditions runs and soak (six runs)",
     )
     versions = [validate_tests(directory, manifest, root) for directory in tests]
     require(
-        len(versions) == 2 and set(versions) == VERSIONS, "Need both compatibility test results"
+        len(versions) == len(VERSIONS) and set(versions) == VERSIONS,
+        "Need all supported HA test results",
     )
     static = static or []
     static_versions = [validate_static(directory, manifest, root) for directory in static]
     require(
-        len(static_versions) == 2 and set(static_versions) == VERSIONS,
-        "Need both native HA strict static results",
+        len(static_versions) == len(VERSIONS) and set(static_versions) == VERSIONS,
+        "Need all supported HA strict static results",
     )
     mutation = read_json(mutations)
     require(mutation.get("status") == "passed", "Mutation gate did not pass")

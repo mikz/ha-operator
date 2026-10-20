@@ -11,7 +11,7 @@ from collections import deque
 from collections.abc import Callable, Iterable, Mapping
 from copy import deepcopy
 from dataclasses import asdict, replace
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Any, Literal, TypedDict, TypeGuard, cast
 from uuid import uuid4
 
@@ -36,6 +36,7 @@ from homeassistant.helpers.event import (
     async_call_later,
     async_track_state_change_event,
     async_track_state_report_event,
+    async_track_time_interval,
 )
 from homeassistant.helpers.start import async_at_started
 from homeassistant.helpers.storage import Store
@@ -80,6 +81,12 @@ from .data import (
     TimerInputConfig,
 )
 from .intents import IntentValidationError, apply_command
+from .native_conditions import (
+    ConditionEvaluation,
+    NativeConditionList,
+    aggregate_health,
+    health_status,
+)
 from .policy_inputs import (
     NumericInput,
     NumericReport,
@@ -249,6 +256,39 @@ class OperatorRuntime:
         self._adapters = {
             key: create_adapter(hass, key, config) for key, config in self.resources.items()
         }
+        self._command_checks = {
+            key: {
+                command: NativeConditionList(hass, conditions)
+                for command, conditions in config.get("command_conditions", {}).items()
+            }
+            for key, config in self.resources.items()
+            if config.get("command_conditions")
+        }
+        self._health_checks = {
+            key: [
+                (
+                    check,
+                    NativeConditionList(hass, check["conditions"]),
+                    NativeConditionList(hass, check["qualification"])
+                    if "qualification" in check
+                    else None,
+                )
+                for check in config["health_checks"]
+            ]
+            for key, config in self.resources.items()
+            if config.get("health_checks")
+        }
+        self._command_results: dict[str, dict[str, ConditionEvaluation]] = {}
+        self._health_results: dict[str, dict[str, Any]] = {}
+        self._published_health: dict[str, dict[str, Any]] = {}
+        self._published_conditions: dict[str, dict[str, Any]] = {}
+        self._condition_signatures: dict[str, object] = {}
+        self._command_signatures: dict[str, object] = {}
+        self._health_signatures: dict[str, object] = {}
+        for key in self._command_checks:
+            self._adapters[key].command_allowed = lambda command, key=key: self._check_command(
+                key, command
+            )
         self._listeners: set[Callable[[], None]] = set()
         self._unsubscribers: list[Callable[[], None]] = []
         self._timers: dict[str, Callable[[], None]] = {}
@@ -267,6 +307,7 @@ class OperatorRuntime:
         self._last_identity: dict[str, tuple[Target, str | None]] = {}
         self._applying: set[str] = set()
         self._errors: dict[str, str] = {}
+        self._delivery_retries: dict[str, float] = {}
         self._emergency_hands_off: dict[str, ManualLease] = {}
         self._memory: dict[str, RequirementMemory] = {}
         self._closed = False
@@ -275,6 +316,7 @@ class OperatorRuntime:
         self._state = cast(RuntimeSnapshot, empty_state())
         self._input_flush: asyncio.Task[None] | None = None
         self._pending_resources: set[str] = set()
+        self._pending_conditions: set[str] = set()
         self._policy_events: deque[tuple[str, PolicyEvent, float, Context | None, bool]] = deque()
         self._input_ingress = dict.fromkeys(self.resources, 0)
         self._input_processed = dict.fromkeys(self.resources, 0)
@@ -776,6 +818,7 @@ class OperatorRuntime:
                         self._numeric_reports[policy_id] = self._numeric_report(
                             cast(NumericInputConfig, self.policies[policy_id]["input"]), native
                         )
+        await self._async_setup_conditions()
         self._recompute()
         self._tasks = [
             self.entry.async_create_background_task(
@@ -784,6 +827,179 @@ class OperatorRuntime:
             for key in self.resources
         ]
         self._wake_all()
+
+    def _native_lists(self) -> dict[str, list[NativeConditionList]]:
+        resources = set(self._command_checks) | set(self._health_checks)
+        return {
+            key: [
+                *self._command_checks.get(key, {}).values(),
+                *(
+                    checker
+                    for _, conditions, qualification in self._health_checks.get(key, [])
+                    for checker in (conditions, qualification)
+                    if checker is not None
+                ),
+            ]
+            for key in resources
+        }
+
+    async def _async_setup_conditions(self) -> None:
+        for key, checks in self._native_lists().items():
+
+            @callback
+            def changed(key: str = key) -> None:
+                self._conditions_changed(key)
+
+            @callback
+            def poll(_: datetime, key: str = key) -> None:
+                self._conditions_changed(key)
+
+            for checker in checks:
+                await checker.async_setup()
+                await checker.async_track_changes(changed)
+            self._refresh_conditions(key)
+            if any(checker.needs_polling for checker in checks):
+                self._unsubscribers.append(
+                    async_track_time_interval(
+                        self.hass,
+                        poll,
+                        timedelta(seconds=1),
+                    )
+                )
+
+    @callback
+    def _conditions_changed(self, resource_id: str) -> None:
+        if self._closed:
+            return
+        self._pending_conditions.add(resource_id)
+        self._queue_reconciliation(set())
+
+    def _evaluate_health(self, resource_id: str) -> dict[str, Any]:
+        checks = []
+        statuses = []
+        for config, conditions, qualification in self._health_checks.get(resource_id, []):
+            qualified = qualification.evaluate() if qualification is not None else None
+            result = (
+                conditions.evaluate()
+                if qualified is None or qualified.status == "passed"
+                else ConditionEvaluation("skipped")
+            )
+            status = health_status(result, qualified)
+            statuses.append(status)
+            checks.append(
+                {
+                    "alias": config["alias"],
+                    "status": status,
+                    "conditions": asdict(result),
+                    "qualification": asdict(qualified) if qualified else None,
+                }
+            )
+        return {"status": aggregate_health(statuses), "checks": checks}
+
+    def _refresh_conditions(self, resource_id: str) -> bool:
+        self._command_results[resource_id] = {
+            command: checker.evaluate()
+            for command, checker in self._command_checks.get(resource_id, {}).items()
+        }
+        if resource_id in self._health_checks:
+            self._health_results[resource_id] = self._evaluate_health(resource_id)
+        return self._publish_conditions(resource_id)
+
+    @staticmethod
+    def _check_signature(result: Mapping[str, Any]) -> tuple[object, ...]:
+        def error_kind(error: str | None) -> str | None:
+            return error.split(":", 1)[0] if error else None
+
+        return (
+            result["status"],
+            error_kind(result.get("error")),
+            tuple(
+                (item["status"], error_kind(item.get("error")))
+                for item in result.get("conditions", [])
+            ),
+        )
+
+    def _publish_conditions(self, resource_id: str) -> bool:
+        commands = {
+            command: asdict(result)
+            for command, result in self._command_results.get(resource_id, {}).items()
+        }
+        health = self._health_results.get(resource_id)
+        health_signature = (
+            None
+            if health is None
+            else (
+                health["status"],
+                tuple(
+                    (
+                        item["status"],
+                        self._check_signature(item["conditions"]),
+                        self._check_signature(item["qualification"])
+                        if item["qualification"]
+                        else None,
+                    )
+                    for item in health["checks"]
+                ),
+            )
+        )
+        if health is not None and self._health_signatures.get(resource_id) != health_signature:
+            self._health_signatures[resource_id] = health_signature
+            self._published_health[resource_id] = deepcopy(health)
+        command_signature = tuple(
+            (command, self._check_signature(result)) for command, result in commands.items()
+        )
+        self._command_signatures[resource_id] = command_signature
+        signature = (command_signature, health_signature)
+        if self._condition_signatures.get(resource_id) == signature:
+            return False
+        self._condition_signatures[resource_id] = signature
+        self._published_conditions[resource_id] = deepcopy(
+            {"command_conditions": commands, "health": health}
+        )
+        return True
+
+    def _check_command(self, resource_id: str, command: str) -> bool:
+        checker = self._command_checks.get(resource_id, {}).get(command)
+        if checker is None:
+            return True
+        result = checker.evaluate()
+        self._command_results.setdefault(resource_id, {})[command] = result
+        self._publish_conditions(resource_id)
+        return result.permits_command
+
+    def _commands_permitted(
+        self, resource_id: str, target: Target, *, refresh: bool = False
+    ) -> bool:
+        if resource_id not in self._command_checks:
+            return True
+        return all(
+            self._check_command(resource_id, command)
+            if refresh
+            else self._command_results.get(resource_id, {})
+            .get(command, ConditionEvaluation("skipped"))
+            .permits_command
+            for command in self.adapter(resource_id).commands_for(target)
+        )
+
+    def condition_details(self, resource_id: str, *, published: bool = False) -> dict[str, Any]:
+        if published:
+            return deepcopy(self._published_conditions.get(resource_id, {}))
+        return (
+            {
+                "command_conditions": {
+                    command: asdict(checker.evaluate())
+                    for command, checker in self._command_checks.get(resource_id, {}).items()
+                },
+                "health": self._evaluate_health(resource_id)
+                if resource_id in self._health_checks
+                else None,
+            }
+            if resource_id in self._command_checks or resource_id in self._health_checks
+            else {}
+        )
+
+    def health_details(self, resource_id: str) -> dict[str, Any]:
+        return deepcopy(self._published_health.get(resource_id, {}))
 
     async def async_close(self, *, interrupt_timer_inputs: bool = False) -> bool:
         """Fence synchronously, then finish the first boundary's owned cleanup."""
@@ -806,10 +1022,14 @@ class OperatorRuntime:
         if flush is not None:
             flush.cancel()
         self._pending_resources.clear()
+        self._pending_conditions.clear()
         self._policy_events.clear()
         for unsubscribe in self._unsubscribers:
             unsubscribe()
         self._unsubscribers.clear()
+        for checks in self._native_lists().values():
+            for checker in checks:
+                checker.async_unload()
         for cancel in self._timers.values():
             cancel()
         self._timers.clear()
@@ -1752,9 +1972,25 @@ class OperatorRuntime:
         # Keep ownership across input state changes; arriving edges join this drain.
         try:
             affected = set()
+            changed_conditions = False
             while not self._closed:
                 affected.update(self._pending_resources)
                 self._pending_resources.clear()
+                pending_conditions = self._pending_conditions.copy()
+                self._pending_conditions.clear()
+                for key in pending_conditions:
+                    previous_commands = self._command_signatures.get(key)
+                    changed_conditions |= self._refresh_conditions(key)
+                    if previous_commands != self._command_signatures.get(key):
+                        affected.add(key)
+                if (
+                    pending_conditions
+                    and not changed_conditions
+                    and not affected
+                    and not self._policy_events
+                    and not self._return_dirty
+                ):
+                    return
                 while self._policy_events and not self._closed:
                     policy_id, event, captured_at, context, admissible = (
                         self._policy_events.popleft()
@@ -1770,6 +2006,7 @@ class OperatorRuntime:
                         await self._apply_return_monitors()
                 if (
                     not self._pending_resources
+                    and not self._pending_conditions
                     and not self._policy_events
                     and not self._return_dirty
                 ):
@@ -1797,7 +2034,12 @@ class OperatorRuntime:
             if (
                 not self._closed
                 and not self.fault
-                and (self._pending_resources or self._policy_events or self._return_dirty)
+                and (
+                    self._pending_resources
+                    or self._pending_conditions
+                    or self._policy_events
+                    or self._return_dirty
+                )
             ):
                 self._queue_reconciliation(set())
 
@@ -2020,6 +2262,30 @@ class OperatorRuntime:
                 )
         self.decisions = dict(result.decisions)
         for key, decision in self.decisions.items():
+            if (
+                key in self._command_checks or key in self._health_checks
+            ) and self._reason_identity(previous_selections.get(key)) != self._reason_identity(
+                self.selections[key]
+            ):
+                self._refresh_conditions(key)
+                self._published_conditions[key] = deepcopy(
+                    {
+                        "command_conditions": {
+                            command: asdict(item)
+                            for command, item in self._command_results.get(key, {}).items()
+                        },
+                        "health": self._health_results.get(key),
+                    }
+                )
+            if (
+                decision.status == "pending"
+                and decision.target is not None
+                and not self._commands_permitted(key, decision.target)
+            ):
+                decision = replace(
+                    decision, status="restricted", reason="command_conditions_blocked"
+                )
+                self.decisions[key] = decision
             signature = (
                 decision.target,
                 decision.source,
@@ -2049,8 +2315,10 @@ class OperatorRuntime:
                     )
                 self.decisions[key] = decision
             else:
-                self.next_attempts.pop(key, None)
-                self._last_identity.pop(key, None)
+                if decision.reason != "command_conditions_blocked":
+                    self.next_attempts.pop(key, None)
+                    self._last_identity.pop(key, None)
+                    self._delivery_retries.pop(key, None)
                 if cancel := self._timers.pop(key, None):
                     cancel()
             old = previous_decisions.get(key)
@@ -2332,7 +2600,12 @@ class OperatorRuntime:
             return None
         selection = self.selections[resource_id]
         decision = self.decisions[resource_id]
-        signature = (self._reason_identity(selection), selection.active_inputs, decision.target)
+        signature = (
+            self._reason_identity(selection),
+            selection.active_inputs,
+            decision.target,
+            self._condition_signatures.get(resource_id),
+        )
         if self._explanation_signatures.get(resource_id) == signature:
             return None
         self._explanation_signatures[resource_id] = signature
@@ -2357,6 +2630,8 @@ class OperatorRuntime:
                     for output in outputs
                 },
             }
+            if resource_id in self._published_conditions:
+                facts["conditions"] = self.condition_details(resource_id, published=True)
             context, task = start_trace(
                 self.hass,
                 self._explanation_scripts[resource_id],
@@ -2489,7 +2764,11 @@ class OperatorRuntime:
                 self._last_identity.get(resource_id) == identity
                 and resource_id in self.next_attempts
             ):
-                due = max(due, self._last_send[resource_id] + config["retry_interval"])
+                due = max(
+                    due,
+                    self._last_send.get(resource_id, -math.inf) + config["retry_interval"],
+                    self._delivery_retries.get(resource_id, -math.inf),
+                )
             if self.observations[resource_id].moving:
                 due = max(due, self._motion_started[resource_id] + config["movement_timeout"])
             if due > now:
@@ -2513,34 +2792,59 @@ class OperatorRuntime:
                 )
 
             self._applying.add(resource_id)
-            self.attempts[resource_id] = self.attempts.get(resource_id, 0) + 1
-            self._last_identity[resource_id] = identity
-            self._last_send[resource_id] = now
-            self.next_attempts[resource_id] = now + max(
-                config["retry_interval"], config["command_interval"]
-            )
+            attempted = False
+
+            def record_dispatch(identity: tuple[Target, str | None] = identity) -> None:
+                nonlocal attempted, now
+                if attempted:
+                    return
+                attempted = True
+                now = _now()
+                self.attempts[resource_id] = self.attempts.get(resource_id, 0) + 1
+                self._last_identity[resource_id] = identity
+                self._delivery_retries.pop(resource_id, None)
+                self._last_send[resource_id] = now
+                self.next_attempts[resource_id] = now + max(
+                    config["retry_interval"], config["command_interval"]
+                )
+
             context_token = DISPATCH_PARENT.set(self._selection_context(resource_id))
+            adapter = self.adapter(resource_id)
+            adapter.on_dispatch = record_dispatch
             try:
                 async with self._actuator_locks[resource_id]:
-                    sent = await self.adapter(resource_id).async_apply(target, still_current)
+                    sent = False
+                    if self._commands_permitted(resource_id, target, refresh=True):
+                        sent = await adapter.async_apply(target, still_current)
                 if sent:
                     self.last_commands[resource_id] = {"target": target.to_dict(), "at": now}
                     self._errors.pop(resource_id, None)
             except (HomeAssistantError, ValueError) as err:
                 self._errors[resource_id] = "delivery_failed"
+                if (
+                    not attempted
+                    and not self._closed
+                    and self._generation[resource_id] == generation
+                ):
+                    self._last_identity[resource_id] = identity
+                    self._delivery_retries[resource_id] = self.next_attempts[resource_id] = (
+                        _now() + max(config["retry_interval"], config["command_interval"])
+                    )
                 _LOGGER.debug("Resource %s delivery failed: %s", resource_id, err)
             finally:
+                adapter.on_dispatch = None
                 DISPATCH_PARENT.reset(context_token)
                 self._applying.discard(resource_id)
                 # A relay transaction may spend longer than the retry interval
                 # awaiting off feedback, dead time, or a slow transport. Give
                 # its final effects a full observation interval before retrying.
                 # Telemetry never moves this completion-based pacing boundary.
-                self._last_send[resource_id] = completed_at = _now()
-                if not self._closed and self._generation[resource_id] == generation:
-                    self.next_attempts[resource_id] = completed_at + max(
-                        config["retry_interval"], config["command_interval"]
-                    )
+                if attempted:
+                    self._last_send[resource_id] = completed_at = _now()
+                    if not self._closed and self._generation[resource_id] == generation:
+                        self.next_attempts[resource_id] = completed_at + max(
+                            config["retry_interval"], config["command_interval"]
+                        )
             if not self._closed:
                 self._recompute()
                 self._notify()
@@ -2612,6 +2916,11 @@ class OperatorRuntime:
                     "last_command": self.last_commands.get(key),
                     "next_attempt": self.next_attempts.get(key),
                     "attempts": self.attempts.get(key, 0),
+                    **(
+                        {"conditions": self.condition_details(key)}
+                        if key in self._published_conditions
+                        else {}
+                    ),
                 }
                 for key in ids
             },

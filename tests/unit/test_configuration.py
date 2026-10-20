@@ -103,6 +103,72 @@ def test_defaults_are_normalized_without_changing_input():
     assert validate_target({"on": False}, SWITCH) == {"on": False}
 
 
+def test_native_conditions_preserve_serializable_config():
+    import json
+
+    checks = {
+        "command_conditions": {
+            "turn_on": [{"condition": "template", "value_template": "{{ true }}"}]
+        },
+        "health_checks": [
+            {
+                "alias": "Frames",
+                "conditions": [
+                    {"condition": "numeric_state", "entity_id": "sensor.frames", "above": 1}
+                ],
+                "qualification": [],
+            }
+        ],
+    }
+    data = validate_resource({**SWITCH, **checks})
+    assert json.loads(json.dumps(data))["health_checks"] == checks["health_checks"]
+    assert data["command_conditions"] == checks["command_conditions"]
+
+
+@pytest.mark.parametrize(
+    "checks",
+    [
+        {"command_conditions": {"turn_on": []}},
+        {"health_checks": [{"alias": "Frames", "conditions": []}]},
+    ],
+)
+def test_empty_native_lists_are_admitted(checks):
+    assert validate_resource({**SWITCH, **checks})
+
+
+@pytest.mark.parametrize(
+    "checks",
+    [
+        {"command_conditions": {"stop_cover": []}},
+        {"command_conditions": {"set_cover_position": []}},
+        {"command_conditions": {"turn_on": "{{ true }}"}},
+        {"command_conditions": {"turn_on": [{"condition": "trigger", "id": "start"}]}},
+        {
+            "command_conditions": {
+                "turn_on": [
+                    {"condition": "or", "conditions": [{"condition": "trigger", "id": "start"}]}
+                ]
+            }
+        },
+        {"health_checks": [{"alias": "Missing conditions"}]},
+        {
+            "health_checks": [
+                {"alias": "Same", "conditions": []},
+                {"alias": "Same", "conditions": []},
+            ]
+        },
+    ],
+)
+def test_invalid_native_configuration_is_rejected(checks):
+    with pytest.raises(ConfigurationError):
+        validate_resource({**SWITCH, **checks})
+
+
+def test_health_checks_must_be_a_list():
+    with pytest.raises(ConfigurationError):
+        validate_resource({**SWITCH, "health_checks": {"alias": "Missing list"}})
+
+
 @pytest.mark.parametrize(
     "patch",
     [

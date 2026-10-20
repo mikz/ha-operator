@@ -42,7 +42,12 @@ async def test_numeric_selection_snapshot_and_native_area(
     )
     dr.async_get(hass).async_update_device(device.id, area_id=device_area.id)
     registered = er.async_get(hass).async_get_or_create(
-        "sensor", "test", "temperature", suggested_object_id="temperature", device_id=device.id
+        "sensor",
+        "test",
+        "temperature",
+        suggested_object_id="temperature",
+        device_id=device.id,
+        original_name="Temperature",
     )
     if entity_override:
         er.async_get(hass).async_update_entity(registered.entity_id, area_id=entity_area.id)

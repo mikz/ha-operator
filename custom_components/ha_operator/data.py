@@ -1,6 +1,6 @@
 """Concrete records admitted by the existing pure configuration validators."""
 
-from typing import Literal, NotRequired, TypedDict
+from typing import Any, Literal, NotRequired, TypedDict
 
 type ResourceKind = Literal["cover", "switch", "fan", "relay_fan"]
 type TargetField = Literal["position", "on", "percentage", "direction"]
@@ -28,6 +28,12 @@ class RelayProfileConfig(TypedDict):
 class ReturnMonitorConfig(TypedDict):
     target_at_most: float
     warning_after_seconds: float
+
+
+class HealthCheckConfig(TypedDict):
+    alias: str
+    conditions: list[Any]
+    qualification: NotRequired[list[Any]]
 
 
 class NumericInputConfig(TypedDict):
@@ -66,6 +72,8 @@ class ResourceConfig(TypedDict):
     fault_entity: NotRequired[str]
     manual_control: NotRequired[bool]
     return_monitor: NotRequired[ReturnMonitorConfig]
+    command_conditions: NotRequired[dict[str, list[Any]]]
+    health_checks: NotRequired[list[HealthCheckConfig]]
 
 
 class PolicyConfig(TypedDict):

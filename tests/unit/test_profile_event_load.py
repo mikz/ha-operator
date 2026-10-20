@@ -66,7 +66,7 @@ def test_followers_compare_both_archives_with_three_alternating_repetitions(tmp_
         ]
     evidence = json.loads((output / "comparison.json").read_text())
     assert len(evidence["comparison"]) == 2
-    assert evidence["baseline_operator_trace"] == "disabled"
+    assert evidence["baseline_operator_trace"] == "package_default"
     for row in evidence["comparison"]:
         assert (
             len(row["baseline"]["counts_per_run"]) == len(row["candidate"]["counts_per_run"]) == 3

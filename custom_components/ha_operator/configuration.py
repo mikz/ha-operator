@@ -37,6 +37,12 @@ RESOURCE_DEFAULTS = {
     "manual_duration": 1800.0,
 }
 KINDS = ("cover", "switch", "fan", "relay_fan")
+COMMANDS = {
+    "cover": ("set_cover_position",),
+    "switch": ("turn_on", "turn_off"),
+    "fan": ("turn_on", "turn_off", "set_direction", "set_percentage"),
+    "relay_fan": ("turn_on", "turn_off"),
+}
 TARGET_FIELDS = {"position", "on", "percentage", "direction", "profile"}
 _ENTITY_ID = re.compile(r"^[a-z_]+\.[a-z0-9_]+$")
 
@@ -91,6 +97,30 @@ def _object(value: Any, field: str, allowed: set[str]) -> dict[str, Any]:
             placeholders={"field": str(field), "value": str(sorted(set(value) - allowed))},
         )
     return deepcopy(dict(value))
+
+
+def _conditions(value: Any, field: str) -> list[Any]:
+    """Validate native syntax without storing HA's non-JSON compiled templates."""
+    from homeassistant.helpers import config_validation as cv
+
+    def check(items: list[Any]) -> None:
+        for item in items:
+            if isinstance(item, Mapping):
+                if item.get("condition") == "trigger":
+                    raise ValueError("Trigger conditions require an automation run")
+                check(item.get("conditions", []))
+
+    try:
+        if not isinstance(value, list):
+            raise ValueError("Conditions must be a list")
+        check(cv.CONDITIONS_SCHEMA(deepcopy(value)))
+    except Exception as err:
+        _fail(
+            f"{field}: {err}",
+            translation_key="config_invalid_conditions",
+            placeholders={"field": field, "error": str(err)},
+        )
+    return deepcopy(value)
 
 
 def _text(value: object, field: str, maximum: int | None = None) -> str:
@@ -412,6 +442,8 @@ def validate_resource(
             "default_target",
             "manual_control",
             "return_monitor",
+            "command_conditions",
+            "health_checks",
             *RESOURCE_DEFAULTS,
         },
     )
@@ -422,6 +454,30 @@ def validate_resource(
             translation_key="config_kind_must_be_cover_switch_fan_or_relay_fan",
         )
     kind = data["kind"]
+    if "command_conditions" in data:
+        commands = _object(data["command_conditions"], "command_conditions", set(COMMANDS[kind]))
+        data["command_conditions"] = {
+            key: _conditions(value, f"command_conditions.{key}") for key, value in commands.items()
+        }
+    if "health_checks" in data:
+        if not isinstance(data["health_checks"], list):
+            _fail("health_checks must be a list", translation_key="config_invalid_health_checks")
+        aliases: set[str] = set()
+        checks = []
+        for raw in data["health_checks"]:
+            check = _object(raw, "health check", {"alias", "conditions", "qualification"})
+            check["alias"] = _text(check.get("alias"), "health check alias", 255)
+            if check["alias"] in aliases:
+                _fail(
+                    "Health check aliases must be unique",
+                    translation_key="config_invalid_health_checks",
+                )
+            aliases.add(check["alias"])
+            check["conditions"] = _conditions(check.get("conditions"), "health check conditions")
+            if "qualification" in check:
+                check["qualification"] = _conditions(check["qualification"], "qualification")
+            checks.append(check)
+        data["health_checks"] = checks
     if "return_monitor" in data:
         data["return_monitor"] = _return_monitor(data["return_monitor"], kind)
     if "manual_control" in data and type(data["manual_control"]) is not bool:

@@ -31,17 +31,19 @@ def test_runtime_rejects_stale_harness_before_docker(monkeypatch, tmp_path, chan
         (tmp_path / "tests/lab/recipe.py").unlink()
     else:
         del receipt["lab_source_hashes"]
-    prepared = tmp_path / ".lab/prepared-2026.9.3.json"
+    prepared = tmp_path / ".lab/prepared-2026.10.2.json"
     prepared.parent.mkdir()
     prepared.write_text(json.dumps(receipt))
     monkeypatch.setattr(lab, "command", lambda *a, **kw: pytest.fail("Docker must not start"))
     with pytest.raises(RuntimeError, match="Lab sources differ"):
-        lab.run_lab(argparse.Namespace(ha_version="2026.9.3"))
+        lab.run_lab(argparse.Namespace(ha_version="2026.10.2"))
 
 
 def test_prepared_versions_and_artifacts_do_not_replace_each_others_image_tags():
     versions = [lab.image_references(version, "a" * 64) for version in lab.SUPPORTED]
-    assert set(versions[0].values()).isdisjoint(versions[1].values())
+    assert set(versions[0].values()).isdisjoint(
+        lab.image_references("2026.10.3", "a" * 64).values()
+    )
     assert set(versions[0].values()).isdisjoint(
         lab.image_references(lab.SUPPORTED[0], "b" * 64).values()
     )
@@ -58,14 +60,14 @@ def test_cleanup_receipt_queries_scoped_objects(monkeypatch, remaining):
         return "residual-lab-object" if kind == remaining else ""
 
     monkeypatch.setattr(lab, "output", output)
-    receipt = lab.verify_cleanup("lab-2026-9-3-test")
+    receipt = lab.verify_cleanup("lab-2026-10-2-test")
     assert receipt["status"] == ("passed" if remaining is None else "failed")
-    assert receipt["run_id"] == "lab-2026-9-3-test"
+    assert receipt["run_id"] == "lab-2026-10-2-test"
     assert receipt["completed_at"] > 0
     for key in ("containers", "networks", "volumes"):
         assert receipt[key] == (["residual-lab-object"] if key == remaining else [])
     assert all("--filter" in command for command in calls)
-    assert all(command[-1].endswith("=lab-2026-9-3-test") for command in calls)
+    assert all(command[-1].endswith("=lab-2026-10-2-test") for command in calls)
 
 
 @pytest.mark.parametrize("kind", ["manual", "timer"])

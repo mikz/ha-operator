@@ -125,7 +125,7 @@ def run(args):
             comparison.append(row)
     result = {
         "suite": args.suite,
-        "baseline_operator_trace": "disabled",
+        "baseline_operator_trace": "package_default",
         "baseline_sha256": sha256(args.baseline.read_bytes()).hexdigest(),
         "candidate_sha256": sha256(args.candidate.read_bytes()).hexdigest(),
         "probe_sha256": sha256(probe_bytes).hexdigest(),

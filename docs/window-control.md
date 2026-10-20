@@ -125,11 +125,11 @@ After preparing the pinned images and release archive, run the isolated native
 configuration tests:
 
 ```sh
-uv run --offline --locked python scripts/lab.py prepare --ha-version 2026.9.3
-uv run --offline --locked python scripts/lab.py test --ha-version 2026.9.3 --scenario windows
+uv run --offline --locked python scripts/lab.py prepare --ha-version 2026.10.2
+uv run --offline --locked python scripts/lab.py test --ha-version 2026.10.2 --scenario windows
 ```
 
-Repeat with the second supported HA version. The runner exercises the packaged
+The runner exercises the packaged
 integration through native scripts, helpers, scenes, registry changes, and
 encrypted HomeKit commands. Simulator effects establish movement and ordering.
 Accelerated timing verifies behavior without claiming a production-duration
