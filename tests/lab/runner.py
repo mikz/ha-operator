@@ -46,11 +46,37 @@ def validate_native_diagnostics(data):
             "profile",
             "value",
             "option",
+            "white",
+            "brightness",
+            "color_temp_kelvin",
+            "hs_color",
+            "xy_color",
+            "rgb_color",
+            "rgbw_color",
+            "rgbww_color",
+            "effect",
         }
-        for key in {"position", "percentage", "value"} & set(value):
+        for key in {
+            "position",
+            "percentage",
+            "value",
+            "white",
+            "brightness",
+            "color_temp_kelvin",
+        } & set(value):
             assert type(value[key]) in (int, float) and math.isfinite(value[key])
-        for key in {"profile", "option"} & set(value):
+        for key in {"profile", "option", "effect"} & set(value):
             assert opaque(value[key])
+        for key, size in (
+            ("hs_color", 2),
+            ("xy_color", 2),
+            ("rgb_color", 3),
+            ("rgbw_color", 4),
+            ("rgbww_color", 5),
+        ):
+            if key in value:
+                assert isinstance(value[key], (list, tuple)) and len(value[key]) == size
+                assert all(number(item) for item in value[key])
         if "on" in value:
             assert type(value["on"]) is bool
         if "direction" in value:
@@ -888,6 +914,12 @@ async def main():
                     await run_observe_scenarios(lab)
                     await lab.diagnostics()
                     return
+                if os.environ["LAB_SCENARIO"] == "light":
+                    from .scenarios_light import run_light
+
+                    await run_light(lab)
+                    await lab.diagnostics()
+                    return
                 if os.environ["LAB_SCENARIO"] == "typed":
                     from .scenarios_typed import run_typed
 
@@ -931,10 +963,12 @@ async def main():
                     await observe(lab, locked=False)
                     await run_cellar_scenarios(lab)
                     from .scenarios_conditions import run_conditions
+                    from .scenarios_light import run_light
                     from .scenarios_typed import run_typed
 
                     await run_conditions(lab)
                     await run_typed(lab)
+                    await run_light(lab)
                     await run_observe_scenarios(lab)
                 await lab.diagnostics()
             finally:

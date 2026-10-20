@@ -2,6 +2,22 @@ homeassistant:
   name: HA Operator Lab
 analytics:
 frontend:
+sun:
+adaptive_lighting:
+  - name: Lab ambient
+    lights: [light.sim_ambient_light]
+    min_brightness: 60
+    max_brightness: 60
+    min_color_temp: 3500
+    max_color_temp: 3500
+    transition: 0
+    initial_transition: 0
+    sleep_transition: 0
+    only_once: true
+    adapt_only_on_bare_turn_on: true
+    detect_non_ha_changes: true
+    take_over_control: true
+    intercept: true
 lovelace:
   mode: storage
 config:
@@ -38,9 +54,9 @@ homekit:
     ip_address: LAB_HA_ADDRESS
     advertise_ip: [LAB_HA_ADDRESS]
     filter:
-      include_domains: [cover, fan]
+      include_domains: [cover, fan, light]
       include_entities: [switch.lab_central_sleep_public, switch.lab_room_sleep_public]
-      exclude_entity_globs: ["cover.sim_*", "fan.sim_*"]
+      exclude_entity_globs: ["cover.sim_*", "fan.sim_*", "light.sim_*"]
 
 template:
   - binary_sensor:

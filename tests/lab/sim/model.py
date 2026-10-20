@@ -21,6 +21,7 @@ _ACTIONS = {
     "cover": {"open", "close", "set_position", "stop"},
     "switch": {"turn_on", "turn_off"},
     "fan": {"turn_on", "turn_off", "set_percentage", "set_direction"},
+    "light": {"turn_on", "turn_off"},
     "binary_sensor": set(),
     "sensor": set(),
     "number": {"set_value"},
@@ -133,6 +134,16 @@ def default_devices() -> list[dict[str, Any]]:
         {"id": "central_lighting", "kind": "switch"},
         {"id": "room_flag", "kind": "switch"},
         {"id": "room_lighting", "kind": "switch"},
+        {"id": "ambient_light", "kind": "light"},
+        {
+            "id": "light_duration",
+            "kind": "number",
+            "value": 4,
+            "unit": "s",
+            "min": 1,
+            "max": 120,
+            "step": 1,
+        },
         {"id": "setpoint", "kind": "number", "value": 18, "unit": "°C"},
         {"id": "setpoint_aux", "kind": "number", "value": 18, "unit": "°C"},
         {"id": "setpoint_desired", "kind": "sensor", "value": 20.125, "unit": "°C"},
@@ -211,6 +222,17 @@ class Simulator:
                 "on": bool(spec.get("on", percentage > 0)),
                 "percentage": percentage,
                 "direction": spec.get("direction", "forward"),
+                **(
+                    {
+                        "brightness": 255,
+                        "color_temp_kelvin": 3000,
+                        "hs_color": [0, 0],
+                        "color_mode": "color_temp",
+                        "effect": "none",
+                    }
+                    if kind == "light"
+                    else {}
+                ),
                 "value": spec.get("value", False if kind == "binary_sensor" else 0),
             }
             controls = {
@@ -346,6 +368,20 @@ class Simulator:
                 )
         elif device.kind == "switch":
             state["on"] = device.physical["on"]
+        elif device.kind == "light":
+            state.update(
+                {
+                    key: device.physical[key]
+                    for key in (
+                        "on",
+                        "brightness",
+                        "color_temp_kelvin",
+                        "hs_color",
+                        "color_mode",
+                        "effect",
+                    )
+                }
+            )
         elif device.kind == "fan":
             state.update({key: device.physical[key] for key in ("on", "percentage", "direction")})
         else:
@@ -488,6 +524,8 @@ class Simulator:
             "unknown_direction",
         }
         physical_keys = {"position", "on", "percentage", "direction", "value"}
+        if device.kind == "light":
+            physical_keys |= {"brightness", "color_temp_kelvin", "hs_color", "color_mode", "effect"}
         metadata_keys = (
             {"unit", "min", "max", "step"}
             if device.kind == "number"
@@ -552,6 +590,16 @@ class Simulator:
             self._cover_command(device, action, command)
         elif device.kind == "switch":
             self._switch_command(device, action)
+        elif device.kind == "light":
+            device.physical["on"] = action == "turn_on"
+            if action == "turn_on":
+                for key in ("brightness", "color_temp_kelvin", "hs_color", "effect"):
+                    if key in command:
+                        device.physical[key] = deepcopy(command[key])
+                for key, mode in (("color_temp_kelvin", "color_temp"), ("hs_color", "hs")):
+                    if key in command:
+                        device.physical["color_mode"] = mode
+            self.record("effect", device_id, action=action, **deepcopy(device.physical))
         elif device.kind == "fan":
             self._fan_command(device, action, command)
         elif device.kind in {"number", "select"}:
@@ -577,6 +625,21 @@ class Simulator:
             self._percentage(command.get("position"))
         if device.kind == "fan" and action in {"turn_on", "set_percentage"}:
             self._percentage(command.get("percentage", 100))
+        if device.kind == "light":
+            allowed = {"action", "brightness", "color_temp_kelvin", "hs_color", "effect"}
+            if command.keys() - allowed:
+                raise CommandError("Unsupported light field")
+            for key, low, high in (("brightness", 0, 255), ("color_temp_kelvin", 2000, 6500)):
+                if key in command and not low <= self._finite(command[key]) <= high:
+                    raise CommandError("Light value outside bounds")
+            if "effect" in command and command["effect"] not in {"none", "pulse"}:
+                raise CommandError("Unsupported light effect")
+            if "hs_color" in command:
+                color = command["hs_color"]
+                if not isinstance(color, (list, tuple)) or len(color) != 2:
+                    raise CommandError("Invalid light hue/saturation")
+                if not 0 <= self._finite(color[0]) <= 360 or not 0 <= self._finite(color[1]) <= 100:
+                    raise CommandError("Light color outside bounds")
         if device.kind == "number":
             try:
                 value = self._finite(command.get("value"))

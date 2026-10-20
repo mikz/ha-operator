@@ -22,7 +22,9 @@ def run(args):
     destination.mkdir(parents=True, exist_ok=False)
     native_suite = args.suite == "native-policies"
     conditions_suite = args.suite == "native-conditions"
-    if not conditions_suite and args.baseline is None:
+    lights_suite = args.suite == "native-lights"
+    standalone = conditions_suite or lights_suite
+    if not standalone and args.baseline is None:
         raise ValueError("Comparable suites require a baseline package")
     if native_suite:
         with zipfile.ZipFile(args.candidate) as package:
@@ -49,6 +51,8 @@ def run(args):
         if native_suite
         else ("unchanged", "changed_burst", "followers_commands", "followers_reports")
     )
+    if lights_suite:
+        workloads = ("light_reports", "light_commands")
     if conditions_suite:
         workloads = ("native-conditions",)
     if args.workloads:
@@ -63,7 +67,7 @@ def run(args):
             for repeat in repeats:
                 variants = (
                     [("candidate", args.candidate)]
-                    if conditions_suite
+                    if standalone
                     else [("baseline", args.baseline), ("candidate", args.candidate)]
                 )
                 if repeat % 2:
@@ -126,7 +130,7 @@ def run(args):
                             stats.print_stats("ha_operator", 35)
                     print(name, f"CPU {receipt['cpu_seconds']:.4f}s", flush=True)
     comparison = []
-    if "timing" in args.measurements and not conditions_suite:
+    if "timing" in args.measurements and not standalone:
         for workload in workloads:
             row = {"workload": workload}
             for label in ("baseline", "candidate"):
@@ -148,13 +152,15 @@ def run(args):
             comparison.append(row)
     result = {
         "suite": args.suite,
-        "comparison_scope": "candidate-only native-policy probe"
-        if conditions_suite
+        "comparison_scope": (
+            "candidate-only native-light probe"
+            if lights_suite
+            else "candidate-only native-policy probe"
+        )
+        if standalone
         else "identical probe and inputs in both packages",
-        "baseline_operator_trace": None if conditions_suite else "package_default",
-        "baseline_sha256": None
-        if conditions_suite
-        else sha256(args.baseline.read_bytes()).hexdigest(),
+        "baseline_operator_trace": None if standalone else "package_default",
+        "baseline_sha256": None if standalone else sha256(args.baseline.read_bytes()).hexdigest(),
         "candidate_sha256": sha256(args.candidate.read_bytes()).hexdigest(),
         "probe_sha256": sha256(probe_bytes).hexdigest(),
         "batches": args.batches,
@@ -178,7 +184,9 @@ if __name__ == "__main__":
     parser.add_argument("--batches", type=int, default=300)
     parser.add_argument("--repeats", type=int, default=3)
     parser.add_argument(
-        "--suite", choices=("events", "native-policies", "native-conditions"), default="events"
+        "--suite",
+        choices=("events", "native-policies", "native-conditions", "native-lights"),
+        default="events",
     )
     parser.add_argument("--workloads", nargs="+", help="Run only these workloads from the suite")
     parser.add_argument(

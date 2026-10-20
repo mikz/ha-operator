@@ -49,6 +49,7 @@ def main():
             target.mkdir(exist_ok=True)
             shutil.copytree("/opt/ha-operator/integration", target / "ha_operator")
             shutil.copytree("/opt/ha-operator/sim_bridge", target / "ha_operator_sim")
+            shutil.copytree("/opt/ha-operator/adaptive_lighting", target / "adaptive_lighting")
             receipt.write_text(digest + "\n")
     os.execvp(command[0], command)
 

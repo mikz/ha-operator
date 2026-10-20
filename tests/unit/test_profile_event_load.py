@@ -5,6 +5,8 @@ import zipfile
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from scripts.profile_event_load import run
 
 
@@ -74,7 +76,16 @@ def test_followers_compare_both_archives_with_three_alternating_repetitions(tmp_
         assert row["baseline"]["counts_per_run"] == row["candidate"]["counts_per_run"]
 
 
-def test_new_native_probe_is_candidate_only_without_comparative_speed_claim(tmp_path, monkeypatch):
+@pytest.mark.parametrize(
+    "suite,workload,probe",
+    [
+        ("native-conditions", "native-conditions", "NativeConditionList"),
+        ("native-lights", "light_reports", "FeedbackLight"),
+    ],
+)
+def test_new_native_probe_is_candidate_only_without_comparative_speed_claim(
+    tmp_path, monkeypatch, suite, workload, probe
+):
     package = tmp_path / "candidate.zip"
     with zipfile.ZipFile(package, "w") as archive:
         archive.writestr("__init__.py", "ready = True\n")
@@ -82,8 +93,8 @@ def test_new_native_probe_is_candidate_only_without_comparative_speed_claim(tmp_
 
     def execute(command, *, env, cwd, **kwargs):
         calls.append(env["OPERATOR_PROFILE_VARIANT"])
-        assert env["OPERATOR_PROFILE_WORKLOAD"] == "native-conditions"
-        assert "NativeConditionList" in (Path(cwd) / "test_event_profile.py").read_text()
+        assert env["OPERATOR_PROFILE_WORKLOAD"] == workload
+        assert probe in (Path(cwd) / "test_event_profile.py").read_text()
         Path(env["OPERATOR_PROFILE_OUTPUT"]).with_suffix(".json").write_text(
             json.dumps(
                 {"cpu_seconds": 1, "wall_seconds": 1, "counts": {"condition_evaluations": 20}}
@@ -96,8 +107,8 @@ def test_new_native_probe_is_candidate_only_without_comparative_speed_claim(tmp_
     run(
         SimpleNamespace(
             output=destination,
-            suite="native-conditions",
-            workloads=None,
+            suite=suite,
+            workloads=[workload],
             measurements=["timing"],
             repeats=2,
             baseline=None,
@@ -110,7 +121,11 @@ def test_new_native_probe_is_candidate_only_without_comparative_speed_claim(tmp_
     assert calls == ["candidate", "candidate"]
     assert evidence["baseline_sha256"] is None
     assert evidence["comparison"] == []
-    assert evidence["comparison_scope"] == "candidate-only native-policy probe"
+    assert evidence["comparison_scope"] == (
+        "candidate-only native-light probe"
+        if suite == "native-lights"
+        else "candidate-only native-policy probe"
+    )
 
 
 def test_legacy_detector_probe_refuses_incompatible_native_candidate(tmp_path):

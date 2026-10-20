@@ -469,6 +469,27 @@ async def test_native_ha_bridge_reports_feedback_not_receipts(
     await hass.async_block_till_done()
     coordinator = hass.data["ha_operator_sim"]
     try:
+        assert hass.states.get("light.sim_ambient_light").state == "off"
+        simulator.control("ambient_light", {"refuse_actions": ["turn_on"]})
+        await hass.services.async_call(
+            "light",
+            "turn_on",
+            {"entity_id": "light.sim_ambient_light", "brightness": 64},
+            blocking=True,
+        )
+        assert simulator.devices["ambient_light"].physical["on"] is False
+        assert hass.states.get("light.sim_ambient_light").state == "off"
+        simulator.control("ambient_light", {"refuse_actions": []})
+        await hass.services.async_call(
+            "light",
+            "turn_on",
+            {"entity_id": "light.sim_ambient_light", "brightness": 64, "hs_color": [25, 70]},
+            blocking=True,
+        )
+        await coordinator.async_refresh()
+        await hass.async_block_till_done()
+        assert hass.states.get("light.sim_ambient_light").attributes["brightness"] == 64
+        assert simulator.devices["ambient_light"].physical["hs_color"] == [25, 70]
         assert hass.states.get("number.sim_setpoint").state == "18.0"
         assert hass.states.get("select.sim_operating_mode").state == "quiet"
         simulator.control("setpoint", {"refuse_actions": ["set_value"]})
@@ -655,3 +676,24 @@ def test_typed_actuator_metadata_changes_and_command_validation(sim):
     with pytest.raises(CommandError, match="options"):
         simulator.command("operating_mode", {"action": "select_option", "option": "boost"})
     assert simulator.devices["operating_mode"].descriptor()["options"] == ["quiet"]
+
+
+def test_light_partial_commands_keep_physical_color_and_delayed_feedback(sim):
+    simulator, clock = sim
+    simulator.control("ambient_light", {"telemetry_delay": 2})
+    simulator.command(
+        "ambient_light", {"action": "turn_on", "brightness": 64, "hs_color": [25, 70]}
+    )
+    assert simulator.devices["ambient_light"].physical["hs_color"] == [25, 70]
+    assert observed(simulator, "ambient_light")["on"] is False
+    clock.advance(2)
+    assert observed(simulator, "ambient_light")["brightness"] == 64
+    simulator.command("ambient_light", {"action": "turn_off"})
+    simulator.command("ambient_light", {"action": "turn_on"})
+    assert simulator.devices["ambient_light"].physical["brightness"] == 64
+    assert simulator.devices["ambient_light"].physical["hs_color"] == [25, 70]
+    simulator.control("ambient_light", {"refuse_actions": ["turn_on"]})
+    simulator.command("ambient_light", {"action": "turn_on", "brightness": 200})
+    assert simulator.devices["ambient_light"].physical["brightness"] == 64
+    with pytest.raises(CommandError):
+        simulator.command("ambient_light", {"action": "turn_on", "brightness": 256})

@@ -329,3 +329,44 @@ def test_migration_snapshot_only_reads_selected_synthetic_entry(monkeypatch, tmp
             "container:/config/.storage/ha_operator.entry123",
         ]
         assert list(tmp_path.iterdir()) == []
+
+
+def test_prepare_acquires_pinned_adaptive_source_from_clean_checkout(tmp_path, monkeypatch):
+    import io
+    import tarfile
+
+    payload = io.BytesIO()
+    prefix = f"adaptive-lighting-{lab.ADAPTIVE_COMMIT}/"
+    with tarfile.open(fileobj=payload, mode="w:gz") as archive:
+        for name, content in (
+            ("LICENSE", b"Test upstream license"),
+            ("custom_components/adaptive_lighting/manifest.json", b'{"version":"1.32.0"}'),
+            ("custom_components/adaptive_lighting/__init__.py", b"upstream = True\n"),
+        ):
+            member = tarfile.TarInfo(prefix + name)
+            member.size = len(content)
+            archive.addfile(member, io.BytesIO(content))
+    data = payload.getvalue()
+    requests = []
+
+    def download(url, **kwargs):
+        requests.append(url)
+        return io.BytesIO(data)
+
+    monkeypatch.setattr(lab, "ROOT", tmp_path)
+    monkeypatch.setattr(lab, "ADAPTIVE_SHA256", hashlib.sha256(data).hexdigest())
+    monkeypatch.setattr(lab, "urlopen", download)
+    lab.prepare_adaptive_lighting()
+    source = tmp_path / ".lab/adaptive-lighting"
+    assert (source / "LICENSE").read_bytes() == b"Test upstream license"
+    component = source / "adaptive_lighting/__init__.py"
+    component.write_text("altered cache")
+    lab.prepare_adaptive_lighting()
+    assert component.read_bytes() == b"upstream = True\n"
+    assert len(requests) == 1 and lab.ADAPTIVE_COMMIT in requests[0]
+    assert json.loads((source / "source.json").read_text())["archive_sha256"] == lab.ADAPTIVE_SHA256
+    (tmp_path / ".lab/adaptive-lighting-source.tar.gz").unlink()
+    monkeypatch.setattr(lab, "ADAPTIVE_SHA256", "0" * 64)
+    with pytest.raises(RuntimeError, match="checksum mismatch"):
+        lab.prepare_adaptive_lighting()
+    assert component.read_bytes() == b"upstream = True\n"

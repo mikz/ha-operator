@@ -1,6 +1,9 @@
 ARG HA_BASE
 FROM ${HA_BASE}
 RUN apk add --no-cache iproute2
+RUN pip install --no-cache-dir ulid-transform==2.2.9
+COPY .lab/adaptive-lighting/LICENSE /opt/ha-operator/adaptive-lighting-LICENSE
+COPY .lab/adaptive-lighting/adaptive_lighting /opt/ha-operator/adaptive_lighting
 COPY tests/lab/gate.py /lab/gate.py
 COPY tests/lab/configuration.yaml /lab/configuration.yaml
 COPY tests/lab/custom_components/ha_operator_sim /opt/ha-operator/sim_bridge

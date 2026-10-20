@@ -9,12 +9,15 @@ import ipaddress
 import json
 import os
 import secrets
+import shutil
 import subprocess
 import sys
+import tarfile
 import tempfile
 import time
 import zipfile
 from pathlib import Path
+from urllib.request import urlopen
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -22,6 +25,49 @@ from tests.lab.isolation import validate_compose, validate_inspect, validate_rou
 from tests.lab.redaction import sanitize_artifacts  # noqa: E402
 
 SUPPORTED = ("2026.10.2",)
+ADAPTIVE_COMMIT = "7f7fec4e34d331fa5fd84b95514ddb1baf2a401e"
+ADAPTIVE_SHA256 = "fb4a4878b40379e61ad8e40cca63a2657b177ece9c0ba3cf326860b9d95aed8e"
+
+
+def prepare_adaptive_lighting():
+    """Acquire one immutable public dependency only during networked preparation."""
+    archive = ROOT / ".lab/adaptive-lighting-source.tar.gz"
+    archive.parent.mkdir(exist_ok=True)
+    if not archive.is_file() or hashlib.sha256(archive.read_bytes()).hexdigest() != ADAPTIVE_SHA256:
+        url = f"https://github.com/basnijholt/adaptive-lighting/archive/{ADAPTIVE_COMMIT}.tar.gz"
+        with urlopen(url, timeout=60) as response:
+            content = response.read()
+        if hashlib.sha256(content).hexdigest() != ADAPTIVE_SHA256:
+            raise RuntimeError("Adaptive Lighting source archive checksum mismatch")
+        archive.write_bytes(content)
+    prefix = f"adaptive-lighting-{ADAPTIVE_COMMIT}/"
+    destination = ROOT / ".lab/adaptive-lighting"
+    with tempfile.TemporaryDirectory(dir=archive.parent) as temporary:
+        with tarfile.open(archive) as source:
+            members = [
+                member
+                for member in source.getmembers()
+                if member.name.startswith(prefix + "custom_components/adaptive_lighting/")
+                or member.name == prefix + "LICENSE"
+            ]
+            source.extractall(temporary, members=members, filter="data")
+        extracted = Path(temporary) / prefix
+        component = extracted / "custom_components/adaptive_lighting"
+        if json.loads((component / "manifest.json").read_text())["version"] != "1.32.0":
+            raise RuntimeError("Adaptive Lighting archive version mismatch")
+        if destination.exists():
+            shutil.rmtree(destination)
+        destination.mkdir()
+        shutil.copytree(component, destination / "adaptive_lighting")
+        shutil.copyfile(extracted / "LICENSE", destination / "LICENSE")
+    write_json(
+        destination / "source.json",
+        {
+            "version": "1.32.0",
+            "commit": ADAPTIVE_COMMIT,
+            "archive_sha256": ADAPTIVE_SHA256,
+        },
+    )
 
 
 def command(args, *, env=None, capture=True, timeout=900, check=True):
@@ -78,6 +124,11 @@ def lab_source_hashes():
     files = [ROOT / "scripts/lab.py", ROOT / "tests/__init__.py", ROOT / "uv.lock"]
     files.extend(
         path
+        for path in (ROOT / ".lab/adaptive-lighting").rglob("*")
+        if path.is_file() and "__pycache__" not in path.parts and path.suffix != ".pyc"
+    )
+    files.extend(
+        path
         for path in (ROOT / "tests/lab").rglob("*")
         if path.is_file() and "__pycache__" not in path.parts and path.suffix != ".pyc"
     )
@@ -99,7 +150,8 @@ def release_metadata():
 
 def prepare(args):
     """Only this phase is allowed to fetch/build dependencies."""
-    command([sys.executable, "scripts/release.py", "verify"], capture=False)
+    prepare_adaptive_lighting()
+    command([sys.executable, "scripts/release.py", "verify", "--against-source"], capture=False)
     archive = ROOT / "dist/ha_operator.zip"
     digest = hashlib.sha256(archive.read_bytes()).hexdigest()
     prepared_dir = ROOT / ".lab"
@@ -183,6 +235,7 @@ def wait_saved_request(container, entry_id, expected, *, timeout=15):
         raise RuntimeError("Invalid lab Store precondition")
     probe = """import hashlib, json, sys
 from pathlib import Path
+from urllib.request import urlopen
 path = Path('/config/.storage') / ('ha_operator.' + sys.argv[1])
 expected = json.loads(sys.argv[2])
 try:
@@ -722,6 +775,7 @@ def main():
             "sleep",
             "conditions",
             "typed",
+            "light",
             "migration",
         ),
         default="all",

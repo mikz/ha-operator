@@ -23,6 +23,7 @@ PLATFORMS = [
     Platform.COVER,
     Platform.SWITCH,
     Platform.FAN,
+    Platform.LIGHT,
     Platform.BINARY_SENSOR,
     Platform.SENSOR,
     Platform.NUMBER,

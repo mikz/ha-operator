@@ -20,6 +20,7 @@ from importlib.metadata import version
 from pathlib import Path
 
 import pytest
+from homeassistant.components.light import ColorMode, LightEntity
 from homeassistant.components.switch import SwitchEntity
 from homeassistant.core import EVENT_STATE_CHANGED, callback
 from homeassistant.helpers import entity_registry as er
@@ -68,8 +69,9 @@ async def test_profile(hass, tmp_path):
     loop.set_debug(False)
     hass.config.config_dir = str(tmp_path)
     followers = workload.startswith("followers_")
+    lights = workload.startswith("light_")
     raw_ids = [
-        f"{'switch' if followers else 'cover'}.profile_raw_{index}"
+        f"{'light' if lights else 'switch' if followers else 'cover'}.profile_raw_{index}"
         for index in range(15 if followers else 4)
     ]
 
@@ -100,7 +102,34 @@ async def test_profile(hass, tmp_path):
             self._attr_is_on = False
             self.async_write_ha_state()
 
-    for entity_id in raw_ids if not followers else ():
+    class FeedbackLight(LightEntity):
+        _attr_should_poll = False
+        _attr_is_on = False
+        _attr_supported_color_modes = {ColorMode.HS}
+        _attr_color_mode = ColorMode.HS
+        _attr_brightness = 100
+        _attr_hs_color = (20, 50)
+
+        def __init__(self, entity_id):
+            self.entity_id = entity_id
+            self._attr_unique_id = entity_id
+
+        async def async_turn_on(self, **kwargs):
+            counts["actuator_commands"] += 1
+            self._attr_is_on = True
+            self._attr_brightness = kwargs.get("brightness", self._attr_brightness)
+            self._attr_hs_color = kwargs.get("hs_color", self._attr_hs_color)
+            self.async_write_ha_state()
+
+        async def async_turn_off(self, **kwargs):
+            counts["actuator_commands"] += 1
+            self._attr_is_on = False
+            self.async_write_ha_state()
+
+    if lights:
+        assert await async_setup_component(hass, "light", {})
+        await hass.data["light"].async_add_entities([FeedbackLight(key) for key in raw_ids])
+    for entity_id in raw_ids if not followers and not lights else ():
         hass.states.async_set(
             entity_id, "closed", {"current_position": 0, "supported_features": 15}
         )
@@ -116,9 +145,10 @@ async def test_profile(hass, tmp_path):
                 "title": f"Profile {index}",
                 "data": {
                     "name": f"Profile {index}",
-                    "kind": "switch" if followers else "cover",
+                    "kind": "light" if lights else "switch" if followers else "cover",
                     "entity_id": entity_id,
                     **({"manual_control": False, "command_interval": 0.001} if followers else {}),
+                    **({"command_interval": 0.001} if lights else {}),
                 },
                 "unique_id": None,
             }
@@ -167,6 +197,11 @@ async def test_profile(hass, tmp_path):
             await runtime.async_set_mode(resource_id, "live")
         source_id = er.async_get(hass).async_get_entity_id("switch", DOMAIN, "central_desired")
         await hass.async_block_till_done()
+    if lights:
+        for resource_id in runtime.resources:
+            await runtime.async_set_mode(resource_id, "live")
+        light_entity = er.async_get(hass).async_get_entity_id("light", DOMAIN, "resource0_managed")
+        await hass.async_block_till_done()
     managed_ids = {
         state.entity_id for state in hass.states.async_all() if state.entity_id not in set(raw_ids)
     }
@@ -192,7 +227,22 @@ async def test_profile(hass, tmp_path):
     runtime._recompute = recompute
 
     async def batch(index):
-        if workload == "followers_commands":
+        if workload == "light_commands":
+            await hass.services.async_call(
+                "light",
+                "turn_on",
+                {
+                    "entity_id": light_entity,
+                    "brightness": 50 if index % 2 else 180,
+                    "hs_color": [20 if index % 2 else 160, 50],
+                },
+                blocking=True,
+            )
+            await asyncio.sleep(0.002)
+        elif workload == "light_reports":
+            current = hass.states.get(raw_ids[0])
+            hass.states.async_set(raw_ids[0], current.state, current.attributes)
+        elif workload == "followers_commands":
             await hass.services.async_call(
                 "switch",
                 "turn_on" if index % 2 else "turn_off",
@@ -264,7 +314,7 @@ async def test_profile(hass, tmp_path):
         "ha_version": version("homeassistant"),
         "fixture_version": version("pytest-homeassistant-custom-component"),
         "asyncio_debug": False,
-        "scope": "native HA fixtures; live simulated feedback switches for followers, "
+        "scope": "native HA fixtures; live simulated feedback switches/lights for command probes, "
         "observe mode for covers; no Recorder, KNX, or full-house load; "
         "memory measured after workload and garbage collection",
     }
@@ -288,5 +338,7 @@ async def test_profile(hass, tmp_path):
     remove_changed()
     remove_reported()
     loop.set_debug(previous_debug)
-    if workload != "followers_commands":
+    if workload == "light_commands":
+        assert counts["actuator_commands"] == count
+    if workload not in {"followers_commands", "light_commands"}:
         assert counts["actuator_commands"] == 0
