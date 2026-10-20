@@ -22,6 +22,9 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 REPOSITORY = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(REPOSITORY))
+
+from tests.lab.redaction import sanitize_artifacts  # noqa: E402
 
 
 @dataclass(frozen=True)
@@ -152,6 +155,7 @@ def run_tests(root: Path, tests: tuple[str, ...], evidence: Path, name: str, tim
     except subprocess.TimeoutExpired:
         return {"status": "timeout", "seconds": time.monotonic() - started, "tests": list(tests)}
     (evidence / f"{name}.log").write_text(process.stdout + process.stderr)
+    sanitize_artifacts(evidence, [])
     result = {
         "returncode": process.returncode,
         "seconds": time.monotonic() - started,

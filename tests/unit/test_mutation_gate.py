@@ -1,11 +1,12 @@
 """Only executed assertion failures can kill a safety mutant."""
 
 from types import SimpleNamespace
-from xml.etree.ElementTree import Element, ElementTree, SubElement
+from xml.etree.ElementTree import Element, ElementTree, SubElement, parse
 
 import pytest
 
 from scripts.mutation_gate import run_tests
+from tests.lab.redaction import sanitize_artifacts
 
 
 @pytest.mark.parametrize(
@@ -35,6 +36,7 @@ def test_mutation_requires_only_assertion_failures(
             failures=str(len(messages)),
             errors=str(errors),
             skipped=str(skipped),
+            hostname="mutation-runner",
         )
         for message in messages:
             SubElement(SubElement(suite, "testcase"), "failure", message=message)
@@ -44,3 +46,13 @@ def test_mutation_requires_only_assertion_failures(
     monkeypatch.setattr("scripts.mutation_gate.subprocess.run", execute)
     result = run_tests(tmp_path, ("test_guard.py",), tmp_path, "guard", 10)
     assert result["status"] == expected
+    delivered = parse(tmp_path / "guard.xml").getroot()
+    assert delivered.attrib == {
+        "tests": "3",
+        "failures": str(len(messages)),
+        "errors": str(errors),
+        "skipped": str(skipped),
+    }
+    assert [item.get("message") for item in delivered.iter("failure")] == messages
+    assert len(list(delivered.iter("testcase"))) == len(messages)
+    sanitize_artifacts(tmp_path, [], check=True)
