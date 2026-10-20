@@ -159,13 +159,35 @@ async def edit_resource_actor(lab, title, entity_id):
 
 
 async def delete_subentry(lab, title):
+    from .runner import eventually
+
+    before = await lab.ha.ws("config_entries/subentries/list", entry_id=lab.entry)
+    identifier = next(item["subentry_id"] for item in before if item["title"] == title)
+    survivor = next(item["title"] for item in before if item["subentry_id"] != identifier)
     await lab.page.goto(lab.ha.base + "/config/integrations/integration/ha_operator")
     row = lab.page.locator("ha-config-sub-entry-row").filter(has_text=title)
-    await row.get_by_role("button", name="Menu", exact=True).click()
-    await row.locator('ha-dropdown-item[value="delete"]').click()
-    await lab.page.get_by_role("dialog").get_by_role("button", name="Delete", exact=True).click()
-    await row.wait_for(state="hidden")
+    menu = row.locator("ha-list-item-base.sub-entry > ha-dropdown[slot='end']")
+    await menu.get_by_role("button", name="Menu", exact=True).click()
+    await menu.locator('ha-dropdown-item[value="delete"]').click()
+    await lab.page.get_by_role("heading", name=f"Delete {title}?", exact=True).wait_for(
+        state="visible"
+    )
+    await lab.page.get_by_role("button", name="Delete", exact=True).click()
+    remaining = await eventually(
+        lambda: lab.ha.ws("config_entries/subentries/list", entry_id=lab.entry),
+        lambda rows: all(item["subentry_id"] != identifier for item in rows),
+    )
+    assert {item["subentry_id"] for item in remaining} == {
+        item["subentry_id"] for item in before if item["subentry_id"] != identifier
+    }
     await lab.ha.reload_entry(lab.entry)
+    await lab.page.goto(lab.ha.base + "/config/integrations/integration/ha_operator")
+    await (
+        lab.page.locator("ha-config-sub-entry-row")
+        .filter(has_text=survivor)
+        .wait_for(state="visible")
+    )
+    await expect(row).to_have_count(0)
 
 
 async def exercise_occurrence_editor(lab, title, policy_id, event_prefix):
@@ -188,13 +210,13 @@ async def exercise_occurrence_editor(lab, title, policy_id, event_prefix):
             ),
             exact=True,
         ).click()
-        body = selector.locator("ha-automation-trigger-event")
-        await body.get_by_label("Event type", exact=True).wait_for(state="visible")
-        field = body.get_by_label("Event type", exact=True)
+        body = selector
+        await body.get_by_role("textbox", name="Event type", exact=True).wait_for(state="visible")
+        field = body.get_by_role("textbox", name="Event type", exact=True)
         await field.fill(event)
         await field.press("Tab")
-    duration = lab.page.locator("ha-selector-duration ha-input[name='seconds']").get_by_role(
-        "spinbutton"
+    duration = lab.page.get_by_role("group", name="Request duration", exact=True).get_by_role(
+        "spinbutton", name="ss", exact=True
     )
     await duration.fill("3")
     await duration.press("Tab")
@@ -212,12 +234,12 @@ async def exercise_occurrence_editor(lab, title, policy_id, event_prefix):
         "value", [{"trigger": "event", "event_type": event_prefix + "_cancel"}]
     )
     await expand_native_row(selector)
-    field = selector.get_by_label("Event type", exact=True)
+    field = selector.get_by_role("textbox", name="Event type", exact=True)
     assert await field.input_value() == event_prefix + "_draft"
     await field.fill(event_prefix + "_admit")
     await field.press("Tab")
-    duration = lab.page.locator("ha-selector-duration ha-input[name='seconds']").get_by_role(
-        "spinbutton"
+    duration = lab.page.get_by_role("group", name="Request duration", exact=True).get_by_role(
+        "spinbutton", name="ss", exact=True
     )
     await duration.fill("4")
     await duration.press("Tab")
@@ -233,11 +255,14 @@ async def exercise_occurrence_editor(lab, title, policy_id, event_prefix):
             "value", [{"trigger": "event", "event_type": event}]
         )
         await expand_native_row(selector)
-        assert await selector.get_by_label("Event type", exact=True).input_value() == event
+        assert (
+            await selector.get_by_role("textbox", name="Event type", exact=True).input_value()
+            == event
+        )
     assert (
         int(
-            await lab.page.locator("ha-selector-duration ha-input[name='seconds']")
-            .get_by_role("spinbutton")
+            await lab.page.get_by_role("group", name="Request duration", exact=True)
+            .get_by_role("spinbutton", name="ss", exact=True)
             .input_value()
         )
         == 4

@@ -8,6 +8,8 @@ import re
 from datetime import UTC, datetime, timedelta
 from urllib.parse import urlencode
 
+from playwright.async_api import expect
+
 from .runner import ARTIFACTS, eventually
 from .scenarios_observe import observe
 
@@ -56,6 +58,7 @@ async def run_typed(lab):
             if row["seq"] > after and row["device_id"] == device and row["kind"] == "command"
         ]
 
+    positive_history_start = datetime.now(UTC)
     async with lab.scenario("TYPED-NATIVE-RESOURCES"):
         numeric = await ha.add_resource(
             lab.entry,
@@ -233,7 +236,23 @@ async def run_typed(lab):
             await lab.page.goto(ha.base + "/config/entities")
             await lab.page.get_by_placeholder(re.compile(r"Search \d+ entities")).fill(identifier)
             await lab.page.get_by_role("rowheader", name=name, exact=True).click()
-            await lab.page.get_by_role("dialog").last.wait_for(state="visible")
+            dialog = lab.page.locator("ha-more-info-dialog")
+            await expect(dialog.get_by_role("dialog").last).to_be_visible()
+            await expect(
+                dialog.get_by_text(
+                    re.compile(r"^20\.125\s*°C$" if identifier == number_entity else r"^boost$")
+                ).first
+            ).to_be_visible()
+            if identifier == number_entity:
+                await expect(
+                    dialog.get_by_role("application", name="Chart", exact=True)
+                ).to_be_visible()
+            await expect(dialog.get_by_role("heading", name="History", exact=True)).to_be_visible()
+            await expect(
+                dialog.get_by_role("link", name="Show more", exact=True).first
+            ).to_have_attribute(
+                "href", re.compile(r"^/history\?entity_id=" + re.escape(identifier) + r"(?:&|$)")
+            )
             await lab.page.screenshot(
                 animations="disabled",
                 path=str(
@@ -280,12 +299,48 @@ async def run_typed(lab):
         # Limit this window to these two settled resources, excluding other lab
         # scenarios' leases. Recorder is real; fixture profiling excludes it.
         await asyncio.sleep(6)
-        entities = sorted(
-            row["entity_id"]
+        registry = [
+            row
             for row in await ha.ws("config/entity_registry/list")
             if row.get("config_subentry_id") in {numeric, selected}
+        ]
+        entities = sorted(row["entity_id"] for row in registry if row.get("disabled_by") is None)
+        disabled = sorted(
+            row["entity_id"] for row in registry if row.get("disabled_by") is not None
         )
+        positive_entities = {}
+        for kind, resource in (("number", numeric), ("select", selected)):
+            for key in ("managed", "desired", "observed", "reason"):
+                positive_entities[kind + "_" + key] = await entity(resource, key)
+        assert set(positive_entities.values()) <= set(entities)
         start = datetime.now(UTC)
+        prior_path = (
+            "/api/history/period/"
+            + positive_history_start.isoformat()
+            + "?"
+            + urlencode(
+                {
+                    "filter_entity_id": ",".join(positive_entities.values()),
+                    "end_time": start.isoformat(),
+                    "skip_initial_state": "1",
+                    "significant_changes_only": "0",
+                }
+            )
+        )
+        positive_counts = dict.fromkeys(positive_entities.values(), 0)
+        distinct_states = {identifier: set() for identifier in positive_counts}
+        for group in await ha.request("GET", prior_path):
+            for row in group:
+                positive_counts[row["entity_id"]] += 1
+                distinct_states[row["entity_id"]].add(row["state"])
+        assert all(count > 0 for count in positive_counts.values()), positive_counts
+        positive_history = {
+            "start": positive_history_start.isoformat(),
+            "end": start.isoformat(),
+            "entities": positive_entities,
+            "counts": positive_counts,
+            "distinct_states": {key: sorted(values) for key, values in distinct_states.items()},
+        }
         end = start + timedelta(seconds=4)
         path = (
             "/api/history/period/"
@@ -320,8 +375,9 @@ async def run_typed(lab):
             "schema": 1,
             "status": "passed",
             "scope": (
-                "Real Recorder history for two settled typed resource entities, including Reason; "
-                "identical simulator input and explicit native reconciliation"
+                "Real Recorder history for enabled entities of two settled typed resources; "
+                "prior changed-state rows prove managed/Desired/Observed/Reason recording, "
+                "then identical simulator input and explicit native reconciliation"
             ),
             "window": {
                 "start": start.isoformat(),
@@ -330,6 +386,8 @@ async def run_typed(lab):
                 "input_updates": 3,
             },
             "entities": entities,
+            "disabled_registry_entities": disabled,
+            "positive_history": positive_history,
             "baseline_counts": baseline_counts,
             "current_counts": current_counts,
             "additional_rows": sum(current_counts.values()) - sum(baseline_counts.values()),
